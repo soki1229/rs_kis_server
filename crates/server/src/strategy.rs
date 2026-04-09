@@ -44,13 +44,13 @@ pub struct SignalContext {
     pub regime: MarketRegime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     Long,
     Short,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LlmVerdict {
     Enter,
     Watch,
