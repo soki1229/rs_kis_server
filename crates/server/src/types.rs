@@ -1,6 +1,22 @@
-use chrono::{DateTime, FixedOffset};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+// ── Market ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Market {
+    Kr,
+    Us,
+}
+
+impl Market {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Kr => "KR",
+            Self::Us => "US",
+        }
+    }
+}
 
 // ── Market Regime ─────────────────────────────────────────────────────────
 
@@ -21,28 +37,126 @@ impl std::fmt::Display for MarketRegime {
     }
 }
 
-/// 레짐 계산에 필요한 시장 지표 스냅샷 (CandleBar 배열에서 파이프라인이 계산)
-#[derive(Debug, Clone)]
-pub struct RegimeInput {
-    pub ma5: f64,
-    pub ma20: f64,
-    pub daily_change_pct: f64,
-    pub volume_ratio: f64,
+// ── Watchlist ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WatchlistSet {
+    pub stable: Vec<String>,
+    pub aggressive: Vec<String>,
 }
 
-// ── Bot State ─────────────────────────────────────────────────────────────
+impl WatchlistSet {
+    pub fn all_unique(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for s in self.stable.iter().chain(self.aggressive.iter()) {
+            if seen.insert(s.clone()) {
+                result.push(s.clone());
+            }
+        }
+        result
+    }
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum BotState {
-    #[default]
-    Idle,
-    RecoveryCheck,
-    Active,
-    EntryPaused,
-    EntryPausedLlmOutage,
-    SoftBlocked,
-    Suspended,
-    HardBlocked,
+// ── Position ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Position {
+    pub symbol: String,
+    pub name: Option<String>,
+    pub qty: i64,
+    pub avg_price: Decimal,
+    #[serde(default)]
+    pub current_price: Decimal,
+    #[serde(default)]
+    pub unrealized_pnl: Decimal,
+    #[serde(default)]
+    pub pnl_pct: f64,
+    #[serde(default)]
+    pub stop_price: Decimal,
+    #[serde(default)]
+    pub trailing_stop: Option<Decimal>,
+    #[serde(default)]
+    pub profit_target_1: Decimal,
+    #[serde(default)]
+    pub profit_target_2: Decimal,
+    #[serde(default)]
+    pub regime: String,
+}
+
+// ── Order ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Side {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderRequest {
+    pub symbol: String,
+    pub side: Side,
+    pub qty: u64,
+    pub price: Option<Decimal>,
+    pub atr: Option<Decimal>,
+    /// KIS exchange code: "J" = KOSPI, "Q" = KOSDAQ. None for US orders.
+    pub exchange_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderResult {
+    pub order_id: String,
+    pub symbol: String,
+    pub side: Side,
+    pub qty: u64,
+    pub price: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FillInfo {
+    pub order_id: String,
+    pub symbol: String,
+    pub filled_qty: u64,
+    pub filled_price: Decimal,
+    /// KIS exchange code: "J"=KOSPI, "Q"=KOSDAQ. None for US orders.
+    pub exchange_code: Option<String>,
+}
+
+// ── PnL ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PnLReport {
+    pub realized: Decimal,
+    pub unrealized: Decimal,
+    pub date: chrono::NaiveDate,
+}
+
+// ── Signal ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlertLevel {
+    Info,
+    Warning,
+    Critical,
+}
+
+// ── Market Tick / Quote ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tick {
+    pub symbol: String,
+    pub price: Decimal,
+    pub volume: u64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quote {
+    pub symbol: String,
+    pub bid_price: Decimal,
+    pub ask_price: Decimal,
+    pub bid_qty: u64,
+    pub ask_qty: u64,
 }
 
 // ── Kill Switch ────────────────────────────────────────────────────────────
@@ -57,154 +171,44 @@ pub enum KillSwitchMode {
 pub struct KillSwitchFile {
     pub mode: KillSwitchMode,
     pub reason: String,
-    pub triggered_at: DateTime<FixedOffset>,
+    pub triggered_at: chrono::DateTime<chrono::FixedOffset>,
     pub details: String,
 }
 
-// ── Order ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Side {
-    Buy,
-    Sell,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Market {
-    Us,
-    Kr,
-}
+// ── Order State Machine ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderState {
     PendingSubmit,
     Submitted,
-    PartiallyFilled { filled_qty: Decimal },
+    PartiallyFilled { filled_qty: u64 },
     FullyFilled,
-    CancelledPartial { filled_qty: Decimal },
+    CancelledPartial { filled_qty: u64 },
     Cancelled,
     Failed { reason: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderRequest {
-    pub symbol: String,
-    pub market: Market,
-    pub side: Side,
-    pub quantity: Decimal,
-    pub price: Decimal,
-}
+// ── Bot Commands / Events ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderResult {
-    pub broker_order_id: Option<String>,
-    pub state: OrderState,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FillInfo {
-    pub filled_qty: Decimal,
-    pub avg_price: Decimal,
-}
-
-// ── Position ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Position {
-    pub symbol: String,
-    pub market: Market,
-    pub quantity: Decimal,
-    pub avg_price: Decimal,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PnLReport {
-    pub realized_pnl: Decimal,
-    pub unrealized_pnl: Decimal,
-    pub daily_r: f64,
-}
-
-// ── Signal ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Direction {
-    Long,
-    Short,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleSignal {
-    pub direction: Direction,
-    pub strength: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LlmVerdict {
-    Enter,
-    Watch,
-    Block,
-}
-
-// ── Market Tick / Quote ───────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tick {
-    pub symbol: String,
-    pub price: Decimal,
-    pub volume: Decimal,
-    pub timestamp: DateTime<FixedOffset>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Quote {
-    pub symbol: String,
-    pub bid: Decimal,
-    pub ask: Decimal,
-}
-
-// ── Watchlist ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WatchlistSet {
-    pub us: Vec<String>,
-    pub kr: Vec<String>,
-}
-
-// ── Alerts ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AlertLevel {
-    Info,
-    Warn,
-    Critical,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AlertEvent {
-    Info { message: String },
-    Warn { message: String },
-    Critical { message: String },
-}
-
-// ── Bot Commands / Events (previously in domain crate) ────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BotCommand {
     Start,
     Stop,
-    PauseEntry,
-    ResumeEntry,
-    GetStatus,
-    KillSwitch { mode: KillSwitchMode, reason: String },
+    LiquidateAll,
+    Pause,
+    ForceOrder(OrderRequest),
+    SetRiskLimit(Decimal),
+    QueryStatus,
+    KillHard,
+    KillSoft,
+    KillClear,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum BotEvent {
-    StateChanged { new_state: BotState },
-    OrderPlaced(OrderRequest),
+    OrderPlaced(OrderResult),
     OrderFilled(FillInfo),
-    PositionUpdated(Vec<Position>),
-    PnLUpdated(PnLReport),
-    Alert(AlertEvent),
-    WatchlistUpdated(WatchlistSet),
+    PositionChanged(Position),
+    DailyPnL(PnLReport),
+    Alert { level: AlertLevel, msg: String },
 }

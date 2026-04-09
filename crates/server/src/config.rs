@@ -1,24 +1,5 @@
-use crate::error::BotError;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BotConfig {
-    pub profile: ProfileSection,
-    pub risk: RiskSection,
-    pub signal: SignalSection,
-    pub llm: LlmSection,
-    pub position: PositionSection,
-    pub trading_hours: TradingHoursSection,
-    pub monitoring: MonitoringSection,
-    pub finnhub: FinnhubSection,
-    pub state: StateSection,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ProfileSection {
-    pub active: ProfileName,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,114 +10,498 @@ pub enum ProfileName {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RiskSection {
-    pub risk_per_trade: f64,
-    pub max_open_positions: u32,
-    pub max_position_pct: f64,
-    pub max_sector_exposure: f64,
-    pub daily_loss_limit: f64,
-    pub consecutive_loss_limit: u32,
-    pub atr_stop_multiplier: f64,
+pub struct StrategyProfile {
+    pub id: String,
+    pub allocation_pct: Decimal,
+    pub setup_score_min: u32,
+    #[serde(default = "default_true")]
+    pub regime_filter: bool,
+    #[serde(default)]
+    pub aggressive_mode: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SignalSection {
-    pub setup_score_threshold_entry: i32,
-    pub setup_score_threshold_llm: i32,
-    pub rule_strength_threshold: f64,
-    pub fallback_rule_strength: f64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LlmSection {
-    pub model: String,
-    pub timeout_secs: u64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PositionSection {
-    pub profit_target_1_atr: f64,
-    pub profit_target_2_atr: f64,
-    pub trailing_atr_trending: f64,
-    pub trailing_atr_volatile: f64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TradingHoursSection {
-    pub entry_blackout_open_mins: i64,
-    pub entry_blackout_close_mins: i64,
-    pub eod_liquidate_mins: i64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct MonitoringSection {
-    pub regime_consecutive_loss_limit: u32,
-    pub regime_suspend_days: u32,
-    pub llm_underperformance_weeks: u32,
-    pub cumulative_r_alert_threshold: f64,
-    pub mdd_alert_pct: f64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FinnhubSection {
-    pub api_key: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct StateSection {
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct MarketConfig {
+    pub watchlist: Vec<String>,
+    pub dynamic_watchlist_size: usize,
     pub db_path: String,
     pub kill_switch_path: String,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    #[serde(default = "default_watchlist_refresh_interval")]
+    pub watchlist_refresh_interval_secs: u64,
+    #[serde(default = "default_strategies")]
+    pub strategies: Vec<StrategyProfile>,
 }
 
-impl BotConfig {
-    pub fn from_file(path: &Path) -> Result<Self, BotError> {
-        let content = std::fs::read_to_string(path).map_err(BotError::Io)?;
-        toml::from_str(&content).map_err(|e| BotError::Config(e.to_string()))
-    }
+fn default_strategies() -> Vec<StrategyProfile> {
+    use rust_decimal_macros::dec;
+    vec![StrategyProfile {
+        id: "stable".into(),
+        allocation_pct: dec!(1.0),
+        setup_score_min: 60,
+        regime_filter: true,
+        aggressive_mode: false,
+    }]
+}
 
-    /// 현재 프로파일에 따른 `risk_per_trade` 값 반환.
-    /// Conservative: 0.003, Aggressive: 0.008, Default: config 값 그대로.
-    pub fn effective_risk_per_trade(&self) -> f64 {
-        match self.profile.active {
-            ProfileName::Conservative => 0.003_f64.min(self.risk.risk_per_trade),
-            ProfileName::Aggressive => 0.008_f64.max(self.risk.risk_per_trade),
-            ProfileName::Default => self.risk.risk_per_trade,
+fn default_watchlist_refresh_interval() -> u64 {
+    600
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RiskConfig {
+    pub max_open_positions: u32,
+    pub daily_loss_limit_pct: Decimal,
+    #[allow(dead_code)]
+    pub consecutive_loss_limit: u32,
+    pub pending_order_limit_pct: Decimal,
+    pub risk_per_trade_pct: Decimal,
+    pub atr_stop_multiplier: Decimal,
+    pub max_position_pct: Decimal,
+    #[serde(default = "default_weekly_loss_limit_pct")]
+    pub weekly_loss_limit_pct: Decimal,
+    #[serde(default = "default_total_drawdown_hard_stop_pct")]
+    pub total_drawdown_hard_stop_pct: Decimal,
+    #[serde(default)]
+    pub earnings_blackout_symbols: Vec<String>,
+    #[serde(default = "default_entry_blackout_open_mins")]
+    #[allow(dead_code)]
+    pub entry_blackout_open_mins: i64,
+    #[serde(default = "default_mdd_soft_kill_pct")]
+    #[allow(dead_code)]
+    pub mdd_soft_kill_pct: Decimal,
+    #[serde(default = "default_mdd_hard_kill_pct")]
+    #[allow(dead_code)]
+    pub mdd_hard_kill_pct: Decimal,
+}
+
+fn default_weekly_loss_limit_pct() -> Decimal {
+    rust_decimal_macros::dec!(0.05)
+}
+
+fn default_total_drawdown_hard_stop_pct() -> Decimal {
+    rust_decimal_macros::dec!(0.15)
+}
+
+fn default_entry_blackout_open_mins() -> i64 {
+    15
+}
+
+fn default_mdd_soft_kill_pct() -> Decimal {
+    rust_decimal_macros::dec!(0.10)
+}
+
+fn default_mdd_hard_kill_pct() -> Decimal {
+    rust_decimal_macros::dec!(0.15)
+}
+
+impl Default for RiskConfig {
+    fn default() -> Self {
+        use rust_decimal_macros::dec;
+        Self {
+            max_open_positions: 5,
+            daily_loss_limit_pct: dec!(0.02),
+            consecutive_loss_limit: 3,
+            pending_order_limit_pct: dec!(0.30),
+            risk_per_trade_pct: dec!(0.005),
+            atr_stop_multiplier: dec!(1.5),
+            max_position_pct: dec!(0.10),
+            weekly_loss_limit_pct: dec!(0.05),
+            total_drawdown_hard_stop_pct: dec!(0.15),
+            earnings_blackout_symbols: vec![],
+            entry_blackout_open_mins: 15,
+            mdd_soft_kill_pct: dec!(0.10),
+            mdd_hard_kill_pct: dec!(0.15),
+        }
+    }
+}
+
+impl RiskConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use rust_decimal_macros::dec;
+
+        if self.risk_per_trade_pct <= Decimal::ZERO || self.risk_per_trade_pct > dec!(0.05) {
+            anyhow::bail!(
+                "risk_per_trade_pct={} out of range (0, 0.05]",
+                self.risk_per_trade_pct
+            );
+        }
+        if self.max_position_pct <= Decimal::ZERO || self.max_position_pct > dec!(0.30) {
+            anyhow::bail!(
+                "max_position_pct={} out of range (0, 0.30]",
+                self.max_position_pct
+            );
+        }
+        if self.daily_loss_limit_pct <= Decimal::ZERO || self.daily_loss_limit_pct > dec!(0.10) {
+            anyhow::bail!(
+                "daily_loss_limit_pct={} out of range (0, 0.10]",
+                self.daily_loss_limit_pct
+            );
+        }
+        if self.atr_stop_multiplier <= dec!(0.5) || self.atr_stop_multiplier > dec!(5.0) {
+            anyhow::bail!(
+                "atr_stop_multiplier={} out of range (0.5, 5.0]",
+                self.atr_stop_multiplier
+            );
+        }
+        if self.max_open_positions == 0 || self.max_open_positions > 20 {
+            anyhow::bail!(
+                "max_open_positions={} out of range [1, 20]",
+                self.max_open_positions
+            );
+        }
+        if self.pending_order_limit_pct <= Decimal::ZERO
+            || self.pending_order_limit_pct > Decimal::ONE
+        {
+            anyhow::bail!(
+                "pending_order_limit_pct={} out of range (0, 1.0]",
+                self.pending_order_limit_pct
+            );
+        }
+        if self.weekly_loss_limit_pct <= Decimal::ZERO || self.weekly_loss_limit_pct > dec!(0.20) {
+            anyhow::bail!(
+                "weekly_loss_limit_pct={} out of range (0, 0.20]",
+                self.weekly_loss_limit_pct
+            );
+        }
+        if self.total_drawdown_hard_stop_pct <= Decimal::ZERO
+            || self.total_drawdown_hard_stop_pct > dec!(0.50)
+        {
+            anyhow::bail!(
+                "total_drawdown_hard_stop_pct={} out of range (0, 0.50]",
+                self.total_drawdown_hard_stop_pct
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignalConfig {
+    pub setup_score_min: u32,
+    pub llm_score_threshold: u32,
+    pub llm_strength_threshold: f64,
+    #[serde(default = "default_llm_model")]
+    pub llm_model: String,
+    #[serde(default = "default_llm_circuit_breaker")]
+    pub llm_circuit_breaker_threshold: u32,
+    #[serde(default = "default_llm_timeout")]
+    pub llm_timeout_secs: u64,
+    #[serde(default = "default_signal_cooldown")]
+    pub signal_cooldown_secs: u64,
+    #[serde(default = "default_true")]
+    pub llm_enabled: bool,
+    #[serde(default = "default_candle_interval")]
+    pub candle_interval_secs: u64,
+    #[serde(default = "default_volume_ratio_threshold")]
+    pub volume_ratio_threshold: f64,
+    #[serde(default = "default_recent_volume_ratio_threshold")]
+    pub recent_volume_ratio_threshold: f64,
+}
+
+fn default_llm_model() -> String {
+    "claude-haiku-20240307".to_string()
+}
+
+fn default_llm_circuit_breaker() -> u32 {
+    5
+}
+
+fn default_llm_timeout() -> u64 {
+    10
+}
+
+fn default_signal_cooldown() -> u64 {
+    60
+}
+
+fn default_candle_interval() -> u64 {
+    30
+}
+
+fn default_volume_ratio_threshold() -> f64 {
+    1.5
+}
+
+fn default_recent_volume_ratio_threshold() -> f64 {
+    1.2
+}
+
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            setup_score_min: 50,
+            llm_score_threshold: 80,
+            llm_strength_threshold: 0.50,
+            llm_model: default_llm_model(),
+            llm_circuit_breaker_threshold: default_llm_circuit_breaker(),
+            llm_timeout_secs: default_llm_timeout(),
+            signal_cooldown_secs: default_signal_cooldown(),
+            llm_enabled: true,
+            candle_interval_secs: default_candle_interval(),
+            volume_ratio_threshold: default_volume_ratio_threshold(),
+            recent_volume_ratio_threshold: default_recent_volume_ratio_threshold(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PositionConfig {
+    pub stop_atr_multiplier: Decimal,
+    pub profit_target_1_atr: Decimal,
+    pub profit_target_2_atr: Decimal,
+    pub trailing_atr_trending: Decimal,
+    pub trailing_atr_volatile: Decimal,
+    pub partial_exit_pct: Decimal,
+    pub entry_blackout_close_mins: u32,
+    pub limit_price_atr_cushion: Decimal,
+}
+
+impl Default for PositionConfig {
+    fn default() -> Self {
+        use rust_decimal_macros::dec;
+        Self {
+            stop_atr_multiplier: dec!(2.0),
+            profit_target_1_atr: dec!(2.0),
+            profit_target_2_atr: dec!(4.0),
+            trailing_atr_trending: dec!(1.5),
+            trailing_atr_volatile: dec!(2.0),
+            partial_exit_pct: dec!(0.5),
+            entry_blackout_close_mins: 15,
+            limit_price_atr_cushion: dec!(0.10),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TunableConfig {
+    pub signal: SignalConfig,
+    pub position: PositionConfig,
+}
+
+impl TunableConfig {
+    pub fn from_server_config(cfg: &ServerConfig) -> Self {
+        Self {
+            signal: cfg.signal.clone(),
+            position: cfg.position.clone(),
         }
     }
 
-    /// 현재 프로파일에 따른 Setup Score 진입 임계값.
-    pub fn effective_score_threshold_entry(&self) -> i32 {
-        match self.profile.active {
-            ProfileName::Conservative => 70,
-            ProfileName::Aggressive => 55,
-            ProfileName::Default => self.signal.setup_score_threshold_entry,
+    pub fn apply(&mut self, param: &str, new_value: &str) -> bool {
+        match param {
+            "setup_score_min" => {
+                if let Ok(v) = new_value.parse::<u32>() {
+                    self.signal.setup_score_min = v;
+                    return true;
+                }
+            }
+            "stop_atr_multiplier" => {
+                if let Ok(v) = new_value.parse::<Decimal>() {
+                    self.position.stop_atr_multiplier = v;
+                    return true;
+                }
+            }
+            "profit_target_1_atr" => {
+                if let Ok(v) = new_value.parse::<Decimal>() {
+                    self.position.profit_target_1_atr = v;
+                    return true;
+                }
+            }
+            "profit_target_2_atr" => {
+                if let Ok(v) = new_value.parse::<Decimal>() {
+                    self.position.profit_target_2_atr = v;
+                    return true;
+                }
+            }
+            "trailing_atr_trending" => {
+                if let Ok(v) = new_value.parse::<Decimal>() {
+                    self.position.trailing_atr_trending = v;
+                    return true;
+                }
+            }
+            "trailing_atr_volatile" => {
+                if let Ok(v) = new_value.parse::<Decimal>() {
+                    self.position.trailing_atr_volatile = v;
+                    return true;
+                }
+            }
+            _ => {
+                tracing::warn!("TunableConfig: unknown parameter '{}'", param);
+            }
         }
+        false
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServerConfig {
+    pub rest_port: u16,
+    pub kr: MarketConfig,
+    pub us: MarketConfig,
+    #[serde(default)]
+    pub risk: RiskConfig,
+    #[serde(default)]
+    pub signal: SignalConfig,
+    #[serde(default)]
+    pub position: PositionConfig,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default = "default_env_file")]
+    pub env_file: String,
+    #[serde(default)]
+    pub integrations: IntegrationConfig,
+}
+
+fn default_env_file() -> String {
+    ".env".to_string()
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct IntegrationConfig {
+    #[serde(default)]
+    pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub notion: NotionConfig,
+    #[serde(default)]
+    pub llm: LlmConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub alert_chat_id: Option<i64>,
+    #[serde(default)]
+    pub monitor_chat_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NotionConfig {
+    #[serde(default)]
+    pub page_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct Secrets {
+    pub alert_bot_token: String,
+    pub alert_chat_id: i64,
+    pub monitor_bot_token: String,
+    pub monitor_chat_id: i64,
+    pub rest_admin_token: String,
+    pub notion_token: String,
+    pub notion_page_id: String,
+}
+
+impl Secrets {
+    pub fn from_env(overrides: &IntegrationConfig) -> anyhow::Result<Self> {
+        let alert_chat_id: i64 = match overrides.telegram.alert_chat_id {
+            Some(id) => id,
+            None => std::env::var("TELEGRAM_ALERT_CHAT_ID")?.parse()?,
+        };
+        let monitor_chat_id: i64 = match overrides.telegram.monitor_chat_id {
+            Some(id) => id,
+            None => std::env::var("TELEGRAM_MONITOR_CHAT_ID")?.parse()?,
+        };
+        let notion_page_id = match &overrides.notion.page_id {
+            Some(id) => id.clone(),
+            None => std::env::var("NOTION_PAGE_ID")?,
+        };
+
+        Ok(Self {
+            alert_bot_token: std::env::var("TELEGRAM_ALERT_BOT_TOKEN")?,
+            alert_chat_id,
+            monitor_bot_token: std::env::var("TELEGRAM_MONITOR_BOT_TOKEN")?,
+            monitor_chat_id,
+            rest_admin_token: std::env::var("REST_ADMIN_TOKEN")?,
+            notion_token: std::env::var("NOTION_TOKEN")?,
+            notion_page_id,
+        })
+    }
+}
+
+impl ServerConfig {
+    pub fn from_file(path: &str) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read config file '{}': {}", path, e))?;
+        let mut cfg: Self = toml::from_str(&content)?;
+
+        cfg.risk.validate()?;
+
+        match dotenvy::from_filename(&cfg.env_file) {
+            Ok(_) => tracing::info!("loaded env_file: {}", cfg.env_file),
+            Err(e) if e.not_found() => {
+                tracing::warn!(
+                    "env_file '{}' not found, using process environment",
+                    cfg.env_file
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to load env_file '{}': {}",
+                    cfg.env_file,
+                    e
+                ));
+            }
+        }
+
+        if !cfg.integrations.llm.enabled {
+            cfg.signal.llm_enabled = false;
+        }
+
+        Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn market_config_has_defaults() {
+        let mc = MarketConfig {
+            watchlist: vec!["NVDA".into()],
+            dynamic_watchlist_size: 10,
+            db_path: "/tmp/test.db".into(),
+            kill_switch_path: "/tmp/ks.json".into(),
+            dry_run: None,
+            watchlist_refresh_interval_secs: default_watchlist_refresh_interval(),
+            strategies: default_strategies(),
+        };
+        assert_eq!(mc.watchlist.len(), 1);
+        assert_eq!(mc.dynamic_watchlist_size, 10);
+        assert_eq!(mc.watchlist_refresh_interval_secs, 600);
     }
 
-    /// 현재 프로파일에 따른 LLM 호출 임계값.
-    pub fn effective_score_threshold_llm(&self) -> i32 {
-        match self.profile.active {
-            ProfileName::Conservative => 85,
-            ProfileName::Aggressive => 75,
-            ProfileName::Default => self.signal.setup_score_threshold_llm,
-        }
+    #[test]
+    fn risk_config_default_passes_validation() {
+        RiskConfig::default().validate().unwrap();
     }
 
-    /// 현재 프로파일에 따른 consecutive_loss_limit.
-    pub fn effective_consecutive_loss_limit(&self) -> u32 {
-        match self.profile.active {
-            ProfileName::Conservative => 2,
-            ProfileName::Aggressive => 4,
-            ProfileName::Default => self.risk.consecutive_loss_limit,
-        }
-    }
-
-    /// 현재 프로파일에 따른 atr_stop_multiplier.
-    pub fn effective_atr_stop_multiplier(&self) -> f64 {
-        match self.profile.active {
-            ProfileName::Conservative => 2.0,
-            ProfileName::Aggressive => 1.2,
-            ProfileName::Default => self.risk.atr_stop_multiplier,
-        }
+    #[test]
+    fn risk_config_rejects_pct_over_one() {
+        use rust_decimal_macros::dec;
+        let cfg = RiskConfig {
+            daily_loss_limit_pct: dec!(2.0),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
     }
 }

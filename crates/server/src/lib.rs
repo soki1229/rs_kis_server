@@ -1,9 +1,17 @@
+pub mod auth;
 pub mod config;
 pub mod control;
 pub mod db;
+pub mod dual_client;
 pub mod error;
 pub mod execution;
 pub mod monitoring;
+pub mod notion;
+pub mod pipeline;
 pub mod position;
+pub mod qualification;
+pub mod regime;
+pub mod shared;
+pub mod state;
 pub mod strategy;
 pub mod types;

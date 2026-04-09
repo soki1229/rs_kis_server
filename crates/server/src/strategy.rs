@@ -1,5 +1,5 @@
-// crates/server/src/strategy.rs
-use crate::types::{Direction, LlmVerdict, MarketRegime, RegimeInput};
+use crate::regime::RegimeInput;
+use crate::types::MarketRegime;
 use async_trait::async_trait;
 use kis_api::{KisApi, KisDomesticApi};
 use rust_decimal::Decimal;
@@ -42,6 +42,19 @@ pub struct SignalContext {
     pub account_balance: Decimal,
     /// 현재 시장 레짐
     pub regime: MarketRegime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Direction {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmVerdict {
+    Enter,
+    Watch,
+    Block,
 }
 
 /// 시그널 평가 결과
