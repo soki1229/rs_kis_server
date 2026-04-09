@@ -1,9 +1,9 @@
-use crate::pipeline::TickData;
-use crate::state::MarketLiveState;
-use crate::types::{FillInfo, OrderRequest, Position, Side};
 use crate::monitoring::alert::AlertRouter;
+use crate::pipeline::TickData;
 use crate::position::{calculate_trailing_stop, evaluate_exit, ExitDecision, PositionState};
 use crate::regime::RegimeReceiver;
+use crate::state::MarketLiveState;
+use crate::types::{FillInfo, OrderRequest, Position, Side};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -590,12 +590,12 @@ fn update_live_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::TickData;
-    use crate::state::MarketLiveState;
-    use crate::types::{FillInfo, OrderRequest};
     use crate::monitoring::alert::AlertRouter;
+    use crate::pipeline::TickData;
     use crate::regime::regime_channel;
+    use crate::state::MarketLiveState;
     use crate::types::MarketRegime;
+    use crate::types::{FillInfo, OrderRequest};
     use rust_decimal_macros::dec;
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;

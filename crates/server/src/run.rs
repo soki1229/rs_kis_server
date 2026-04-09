@@ -1,4 +1,4 @@
-use crate::config::{ServerConfig, Secrets, TunableConfig};
+use crate::config::{Secrets, ServerConfig, TunableConfig};
 use crate::dual_client::{DualClients, DualKisClient, DualKisDomesticClient};
 use crate::pipeline;
 use crate::shared;
@@ -68,9 +68,7 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
     }
 
     if cfg.risk.earnings_blackout_symbols.is_empty() {
-        tracing::warn!(
-            "earnings_blackout_symbols is empty — earnings blocking is NOT active."
-        );
+        tracing::warn!("earnings_blackout_symbols is empty — earnings blocking is NOT active.");
     } else {
         tracing::info!(
             "Earnings blackout active for {} symbols: {:?}",
@@ -287,7 +285,9 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
                 match kr_client.domestic_unfilled_orders().await {
                     Ok(unfilled) => Some(unfilled.into_iter().map(|o| o.order_no).collect()),
                     Err(e) => {
-                        tracing::warn!("KR unfilled_orders fetch failed: {e} — skipping orphan check");
+                        tracing::warn!(
+                            "KR unfilled_orders fetch failed: {e} — skipping orphan check"
+                        );
                         None
                     }
                 }
@@ -484,7 +484,9 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
                 match kis_client.unfilled_orders().await {
                     Ok(unfilled) => Some(unfilled.into_iter().map(|o| o.order_no).collect()),
                     Err(e) => {
-                        tracing::warn!("US unfilled_orders fetch failed: {e} — skipping orphan check");
+                        tracing::warn!(
+                            "US unfilled_orders fetch failed: {e} — skipping orphan check"
+                        );
                         None
                     }
                 }
@@ -643,8 +645,7 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
     let us_notion = notion_client.clone();
     let us_tunable_tx = Some(Arc::clone(&tunable_tx));
     let us_dry_run = us_effective_dry_run;
-    let us_eod_fallback =
-        pipeline::position::market_close_utc(16, 0, chrono_tz::America::New_York);
+    let us_eod_fallback = pipeline::position::market_close_utc(16, 0, chrono_tz::America::New_York);
     let h_us_pos: JoinHandle<()> = tokio::spawn(async move {
         pipeline::position::run_position_task(
             us_fill_rx,

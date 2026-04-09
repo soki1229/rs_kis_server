@@ -7,8 +7,8 @@ pub mod signal;
 pub mod tick;
 pub mod tuner;
 
-use crate::types::{FillInfo, OrderRequest};
 use crate::monitoring::alert::AlertRouter;
+use crate::types::{FillInfo, OrderRequest};
 use rust_decimal::Decimal;
 use tokio::sync::{broadcast, mpsc, watch};
 

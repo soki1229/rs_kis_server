@@ -1,4 +1,4 @@
-use kis_server::config::{ProfileName, RiskConfig, ServerConfig, SignalConfig};
+use kis_server::config::{ProfileName, RiskConfig, SignalConfig};
 
 #[test]
 fn risk_config_default_passes_validation() {

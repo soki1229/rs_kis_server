@@ -1,6 +1,6 @@
-use kis_api::{CandleBar, DailyChartRequest, DomesticDailyChartRequest, KisApi, KisDomesticApi};
 use crate::monitoring::alert::AlertRouter;
 use crate::regime::{classify_regime, RegimeInput, RegimeSender};
+use kis_api::{CandleBar, DailyChartRequest, DomesticDailyChartRequest, KisApi, KisDomesticApi};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -164,6 +164,7 @@ pub async fn run_kr_regime_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::MarketRegime;
     use async_trait::async_trait;
     use kis_api::{
         CancelOrderRequest, CancelOrderResponse, DomesticCancelOrderRequest,
@@ -172,7 +173,6 @@ mod tests {
         DomesticUnfilledOrder, Exchange, Holiday, KisDomesticApi, KisError, KisStream, NewsItem,
         PlaceOrderRequest, PlaceOrderResponse, RankingItem, UnfilledOrder,
     };
-    use crate::types::MarketRegime;
     use rust_decimal::Decimal;
     use tokio_util::sync::CancellationToken;
 

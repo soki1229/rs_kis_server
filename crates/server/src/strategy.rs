@@ -72,11 +72,7 @@ pub struct TradeSignal {
 #[async_trait]
 pub trait SignalStrategy: Send + Sync {
     /// None 반환 시 진입 없음
-    async fn evaluate(
-        &self,
-        ctx: &SignalContext,
-        db: &sqlx::SqlitePool,
-    ) -> Option<TradeSignal>;
+    async fn evaluate(&self, ctx: &SignalContext, db: &sqlx::SqlitePool) -> Option<TradeSignal>;
 }
 
 // ── Qualification ─────────────────────────────────────────────────────────
@@ -122,9 +118,9 @@ pub trait RiskStrategy: Send + Sync {
 
 /// 프레임워크에 주입되는 전략 구현체 묶음
 pub struct StrategyBundle {
-    pub discovery:     Box<dyn DiscoveryStrategy>,
-    pub regime:        Box<dyn RegimeStrategy>,
-    pub signal:        Box<dyn SignalStrategy>,
+    pub discovery: Box<dyn DiscoveryStrategy>,
+    pub regime: Box<dyn RegimeStrategy>,
+    pub signal: Box<dyn SignalStrategy>,
     pub qualification: Box<dyn QualificationStrategy>,
-    pub risk:          Box<dyn RiskStrategy>,
+    pub risk: Box<dyn RiskStrategy>,
 }

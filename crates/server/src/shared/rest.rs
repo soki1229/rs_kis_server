@@ -1,5 +1,6 @@
 use crate::auth::require_admin_token;
 use crate::state::PipelineState;
+use crate::types::BotCommand;
 use axum::{
     extract::State as AxumState,
     http::StatusCode,
@@ -8,7 +9,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use crate::types::BotCommand;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::time::Instant;
