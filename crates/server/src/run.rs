@@ -381,6 +381,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let kr_signal_activity = activity.clone();
     let kr_strategies = cfg.kr.strategies.clone();
     let kr_signal_notion = notion_client.clone();
+    let kr_live_state_rx = kr_state.live_state_rx.clone();
     let kr_signal_strategy = Arc::clone(&signal_strategy);
     let kr_qual_strategy = Arc::clone(&qual_strategy);
     let kr_risk_strategy = Arc::clone(&risk_strategy);
@@ -402,6 +403,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             kr_strategies,
             kr_signal_activity,
             kr_signal_notion,
+            kr_live_state_rx,
             kr_signal_strategy,
             kr_qual_strategy,
             kr_risk_strategy,
@@ -600,6 +602,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let us_signal_activity = activity.clone();
     let us_strategies = cfg.us.strategies.clone();
     let us_signal_notion = notion_client.clone();
+    let us_live_state_rx = us_state.live_state_rx.clone();
     let us_signal_strategy = Arc::clone(&signal_strategy);
     let us_qual_strategy = Arc::clone(&qual_strategy);
     let us_risk_strategy = Arc::clone(&risk_strategy);
@@ -621,6 +624,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             us_strategies,
             us_signal_activity,
             us_signal_notion,
+            us_live_state_rx,
             us_signal_strategy,
             us_qual_strategy,
             us_risk_strategy,
