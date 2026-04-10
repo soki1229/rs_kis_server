@@ -383,7 +383,14 @@ mod tests {
 
         let regime_strategy = default_regime_strategy();
         tokio::spawn(async move {
-            run_regime_task(Arc::new(FailingClient), regime_strategy, regime_tx, alert, t).await;
+            run_regime_task(
+                Arc::new(FailingClient),
+                regime_strategy,
+                regime_tx,
+                alert,
+                t,
+            )
+            .await;
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

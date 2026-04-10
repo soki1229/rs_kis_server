@@ -1,5 +1,6 @@
 use crate::types::MarketRegime;
 
+#[allow(dead_code)]
 pub struct SetupScoreInput {
     pub ma5_above_ma20: bool,
     pub volume_ratio: f64,
@@ -13,6 +14,7 @@ pub struct SetupScoreInput {
     pub regime: MarketRegime,
 }
 
+#[allow(dead_code)]
 pub fn calculate_setup_score(input: &SetupScoreInput) -> i32 {
     let mut score: i32 = 0;
 

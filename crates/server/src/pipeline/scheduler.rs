@@ -204,7 +204,7 @@ pub async fn run_kr_scheduler_task(
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
-    alert: AlertRouter,
+    _alert: AlertRouter,
     summary_alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: SqlitePool,
@@ -248,7 +248,9 @@ pub async fn run_kr_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("KR", if now >= open { "Trading" } else { "Pre-market" });
-            let symbols = discovery_strategy.build_kr_watchlist(Arc::clone(&client)).await;
+            let symbols = discovery_strategy
+                .build_kr_watchlist(Arc::clone(&client))
+                .await;
             let fresh = WatchlistSet {
                 stable: symbols,
                 aggressive: vec![],
@@ -283,7 +285,7 @@ pub async fn run_scheduler_task(
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
-    alert: AlertRouter,
+    _alert: AlertRouter,
     summary_alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: SqlitePool,
@@ -327,7 +329,9 @@ pub async fn run_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("US", if now >= open { "Trading" } else { "Pre-market" });
-            let symbols = discovery_strategy.build_us_watchlist(Arc::clone(&client)).await;
+            let symbols = discovery_strategy
+                .build_us_watchlist(Arc::clone(&client))
+                .await;
             let fresh = WatchlistSet {
                 stable: symbols,
                 aggressive: vec![],

@@ -1,11 +1,14 @@
 use crate::monitoring::alert::AlertRouter;
 use crate::pipeline::{QuoteSnapshot, TickData};
 use crate::state::BotState;
+use crate::strategy::{
+    Portfolio, QualResult, QualificationStrategy, RiskStrategy, SignalCandidate,
+    SignalContext as StrategySignalContext, SignalStrategy,
+};
 use crate::types::MarketRegime;
 use crate::types::{OrderRequest, Side, WatchlistSet};
-use kis_api::{DomesticExchange, KisApi, KisDomesticApi};
+use kis_api::{CandleBar, DomesticExchange, KisApi, KisDomesticApi};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
@@ -108,14 +111,18 @@ struct SignalContext {
     order_tx: mpsc::Sender<OrderRequest>,
     regime: MarketRegime,
     completed: Vec<CompletedCandle>,
+    #[allow(dead_code)]
     quote: Option<QuoteSnapshot>,
     #[allow(dead_code)]
     rolling_highs: Vec<(chrono::DateTime<chrono::Utc>, Decimal)>,
     summary: Arc<StdRwLock<crate::state::MarketSummary>>,
+    #[allow(dead_code)]
     mins_until_close: i64,
     account_balance: Decimal,
     exchange_code: Option<String>,
+    #[allow(dead_code)]
     risk_cfg: crate::config::RiskConfig,
+    #[allow(dead_code)]
     signal_cfg: crate::config::SignalConfig,
     strategy: crate::config::StrategyProfile,
     activity: crate::shared::activity::ActivityLog,
@@ -128,6 +135,9 @@ struct SignalContext {
     llm_fail_count: Arc<AtomicU32>,
     #[allow(dead_code)]
     pending_count: Arc<AtomicU32>,
+    signal_strategy: Arc<dyn SignalStrategy>,
+    qual_strategy: Arc<dyn QualificationStrategy>,
+    risk_strategy: Arc<dyn RiskStrategy>,
 }
 
 #[allow(dead_code)]
@@ -153,14 +163,14 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         order_tx,
         regime,
         completed,
-        quote,
+        quote: _,
         rolling_highs: _,
         summary,
-        mins_until_close,
+        mins_until_close: _,
         account_balance,
         exchange_code,
-        risk_cfg,
-        signal_cfg,
+        risk_cfg: _,
+        signal_cfg: _,
         strategy,
         activity,
         notion,
@@ -168,23 +178,88 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         llm_sem: _,
         llm_fail_count: _,
         pending_count: _,
+        signal_strategy,
+        qual_strategy,
+        risk_strategy,
     } = ctx;
     use rust_decimal::prelude::ToPrimitive;
-    use sqlx::Row;
+
     let strategy_id = strategy.id.clone();
-    let rows = sqlx::query("SELECT date, open, high, low, close, volume FROM daily_ohlc WHERE symbol = ? AND date != '0000-00-00' ORDER BY date DESC LIMIT 30").bind(&symbol).fetch_all(&db_pool).await.unwrap_or_default();
-    let min_history = if strategy.aggressive_mode { 1 } else { 15 };
-    if rows.len() < min_history {
-        let reason = format!("insufficient_data({}/{} days)", rows.len(), min_history);
-        activity.record_eval(&market, &symbol, 0, "skip", &reason);
+
+    let last = match completed.last() {
+        Some(c) => c,
+        None => return,
+    };
+
+    let current_price = last.close;
+    let rolling_high = completed
+        .iter()
+        .map(|c| c.high)
+        .fold(Decimal::MIN, Decimal::max);
+
+    let candles: Vec<CandleBar> = completed
+        .iter()
+        .map(|c| CandleBar {
+            date: c.ts.format("%Y%m%d").to_string(),
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: Decimal::from(c.volume),
+        })
+        .collect();
+
+    let strategy_ctx = StrategySignalContext {
+        symbol: symbol.clone(),
+        market: market.clone(),
+        candles,
+        current_price,
+        rolling_high,
+        account_balance,
+        regime: regime.clone(),
+    };
+
+    let trade_signal = match signal_strategy.evaluate(&strategy_ctx, &db_pool).await {
+        Some(sig) => sig,
+        None => {
+            activity.record_eval(&market, &symbol, 0, "skip", "no_signal");
+            if let Some(nc) = notion {
+                let row = crate::notion::SignalEvalRow {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    symbol: symbol.clone(),
+                    score: 0,
+                    market: market.clone(),
+                    regime: format!("{:?}", regime),
+                    action: "skip".into(),
+                    strategy: format!("{}:no_signal", strategy_id),
+                };
+                tokio::spawn(async move {
+                    let client = nc.read().await;
+                    let _ = client.add_signal_eval(&row).await;
+                });
+            }
+            return;
+        }
+    };
+
+    let score = (trade_signal.strength * 100.0) as i32;
+
+    let candidate = SignalCandidate {
+        signal: trade_signal.clone(),
+        regime: regime.clone(),
+    };
+    let qual_result = qual_strategy.qualify(&candidate);
+
+    if let QualResult::Block { reason } = qual_result {
+        activity.record_eval(&market, &symbol, score, "blocked", &reason);
         if let Some(nc) = notion {
             let row = crate::notion::SignalEvalRow {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 symbol: symbol.clone(),
-                score: 0,
+                score,
                 market: market.clone(),
                 regime: format!("{:?}", regime),
-                action: "skip".into(),
+                action: "blocked".into(),
                 strategy: format!("{}:{}", strategy_id, reason),
             };
             tokio::spawn(async move {
@@ -194,111 +269,21 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         }
         return;
     }
-    let bars: Vec<DailyBar> = rows
-        .iter()
-        .map(|r| DailyBar {
-            date: r.get(0),
-            open: r.get::<String, _>(1).parse().unwrap_or(Decimal::ZERO),
-            high: r.get::<String, _>(2).parse().unwrap_or(Decimal::ZERO),
-            low: r.get::<String, _>(3).parse().unwrap_or(Decimal::ZERO),
-            close: r.get::<String, _>(4).parse().unwrap_or(Decimal::ZERO),
-            volume: r.get::<String, _>(5).parse().unwrap_or(Decimal::ZERO),
-        })
-        .collect();
-    let atr_14 = compute_atr14(&bars)
-        .unwrap_or_else(|| (bars[0].high - bars[0].low).max(bars[0].close * dec!(0.02)));
-    let ma5 = if bars.len() >= 5 {
-        bars[..5].iter().map(|b| b.close).sum::<Decimal>() / dec!(5)
-    } else {
-        bars.iter().map(|b| b.close).sum::<Decimal>() / Decimal::from(bars.len())
-    };
-    let ma20 = if bars.len() >= 20 {
-        bars[..20].iter().map(|b| b.close).sum::<Decimal>() / dec!(20)
-    } else {
-        bars.iter().map(|b| b.close).sum::<Decimal>() / Decimal::from(bars.len())
-    };
-    let prev_close = if bars.len() > 1 {
-        bars[1].close
-    } else {
-        bars[0].open
-    };
-    let avg_vol_20 = if bars.len() > 1 {
-        let count = (bars.len() - 1).min(20);
-        bars[1..1 + count].iter().map(|b| b.volume).sum::<Decimal>() / Decimal::from(count)
-    } else {
-        bars[0].volume
-    };
-    let last = match completed.last() {
-        Some(c) => c,
-        None => return,
-    };
-    let today_volume: Decimal = completed.iter().map(|c| Decimal::from(c.volume)).sum();
-    let volume_ratio = if avg_vol_20.is_zero() {
-        1.0
-    } else {
-        (today_volume / avg_vol_20).to_f64().unwrap_or(1.0) * (390.0 / 60.0)
-    };
-    let (bid_qty, ask_qty) = quote
-        .as_ref()
-        .map(|q| (q.bid_qty, q.ask_qty))
-        .unwrap_or((1, 1));
-    let bid_ask_imbalance = if ask_qty == 0 {
-        1.0
-    } else {
-        bid_qty as f64 / ask_qty as f64
-    };
-    let daily_change_pct = if prev_close.is_zero() {
-        0.0
-    } else {
-        ((last.close - prev_close) / prev_close * dec!(100))
-            .to_f64()
-            .unwrap_or(0.0)
-    };
 
-    let score = if strategy.aggressive_mode {
-        let mut s = 40;
-        if bid_ask_imbalance > 2.0 {
-            s += 25;
-        } else if bid_ask_imbalance > 1.5 {
-            s += 15;
-        }
-        if matches!(regime, MarketRegime::Volatile) {
-            s += 10;
-        }
-        let day_low = completed
-            .iter()
-            .map(|c| c.low)
-            .fold(Decimal::MAX, Decimal::min);
-        if last.close > day_low && (last.close - day_low) < (atr_14 * dec!(0.5)) {
-            s += 15;
-        }
-        if last.close > ma5 {
-            s += 10;
-        }
-        s
-    } else {
-        let input = crate::qualification::setup_score::SetupScoreInput {
-            ma5_above_ma20: ma5 > ma20,
-            volume_ratio: volume_ratio * (2.0 / signal_cfg.volume_ratio_threshold),
-            recent_5min_volume_ratio: 1.0,
-            bid_ask_imbalance,
-            new_high_last_10min: last.high > ma5,
-            daily_change_pct,
-            entry_blackout_close_mins: 15,
-            has_news_catalyst: false,
-            mins_until_close,
-            regime: regime.clone(),
-        };
-        crate::qualification::setup_score::calculate_setup_score(&input) as i32
+    let portfolio = Portfolio {
+        balance: account_balance,
+        open_position_count: 0,
+        daily_pnl_r: 0.0,
     };
+    let sized_qty = risk_strategy.size(&trade_signal, &portfolio);
 
-    activity.record_eval(
-        &market,
-        &symbol,
-        score,
-        if score >= 70 { "order" } else { "skip" },
-        &format!("{:?}", regime),
-    );
+    let qty = sized_qty.to_u64().unwrap_or(0);
+    if qty == 0 {
+        activity.record_eval(&market, &symbol, score, "skip", "qty_zero");
+        return;
+    }
+
+    activity.record_eval(&market, &symbol, score, "order", &format!("{:?}", regime));
     if let Some(nc) = notion {
         let row = crate::notion::SignalEvalRow {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -306,11 +291,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             score,
             market: market.clone(),
             regime: format!("{:?}", regime),
-            action: if score >= 70 {
-                "order".into()
-            } else {
-                "skip".into()
-            },
+            action: "order".into(),
             strategy: strategy_id.clone(),
         };
         tokio::spawn(async move {
@@ -318,24 +299,18 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             let _ = client.add_signal_eval(&row).await;
         });
     }
-    if score >= 70 && mins_until_close > 10 {
-        let bot_state = summary.read().unwrap().bot_state.clone();
-        if matches!(bot_state, BotState::Active) {
-            let qty = (account_balance * risk_cfg.risk_per_trade_pct / (atr_14 * dec!(2.0)))
-                .to_u64()
-                .unwrap_or(0);
-            if qty > 0 {
-                let req = OrderRequest {
-                    symbol: symbol.clone(),
-                    side: Side::Buy,
-                    qty,
-                    price: None,
-                    atr: Some(atr_14),
-                    exchange_code,
-                };
-                let _ = order_tx.send(req).await;
-            }
-        }
+
+    let bot_state = summary.read().unwrap().bot_state.clone();
+    if matches!(bot_state, BotState::Active) {
+        let req = OrderRequest {
+            symbol: symbol.clone(),
+            side: Side::Buy,
+            qty,
+            price: None,
+            atr: Some(trade_signal.quantity),
+            exchange_code,
+        };
+        let _ = order_tx.send(req).await;
     }
 }
 
@@ -371,6 +346,9 @@ pub async fn run_signal_task(
     strategies: Vec<crate::config::StrategyProfile>,
     activity: crate::shared::activity::ActivityLog,
     notion: Option<Arc<TokioRwLock<crate::notion::NotionClient>>>,
+    signal_strategy: Arc<dyn SignalStrategy>,
+    qual_strategy: Arc<dyn QualificationStrategy>,
+    risk_strategy: Arc<dyn RiskStrategy>,
     token: tokio_util::sync::CancellationToken,
 ) {
     let eval_sem = Arc::new(tokio::sync::Semaphore::new(20));
@@ -444,6 +422,9 @@ pub async fn run_signal_task(
                     let permit = eval_sem.clone().acquire_owned().await.unwrap();
                     let llm_fail_count = Arc::clone(&state.llm_fail_count); let act = activity.clone(); let strategies_snap = strategies.clone(); let notion_clone = notion.clone();
                     let alert_router = alert.clone();
+                    let sig_strat = Arc::clone(&signal_strategy);
+                    let q_strat = Arc::clone(&qual_strategy);
+                    let r_strat = Arc::clone(&risk_strategy);
                     tokio::spawn(async move {
                         let _permit = permit;
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
@@ -456,6 +437,7 @@ pub async fn run_signal_task(
                                 summary: summary_clone.clone(), mins_until_close, account_balance, exchange_code: us_exchange_code.clone(),
                                 risk_cfg: rc.clone(), signal_cfg: sc.clone(), strategy, activity: act.clone(), notion: notion_clone.clone(),
                                 alert: alert_router.clone(), llm_sem: sem.clone(), llm_fail_count: llm_fail_count.clone(), pending_count: pc.clone(),
+                                signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
                             }).await;
                         }
                     });
@@ -484,6 +466,9 @@ pub async fn run_kr_signal_task(
     strategies: Vec<crate::config::StrategyProfile>,
     activity: crate::shared::activity::ActivityLog,
     notion: Option<Arc<TokioRwLock<crate::notion::NotionClient>>>,
+    signal_strategy: Arc<dyn SignalStrategy>,
+    qual_strategy: Arc<dyn QualificationStrategy>,
+    risk_strategy: Arc<dyn RiskStrategy>,
     token: tokio_util::sync::CancellationToken,
 ) {
     let eval_sem = Arc::new(tokio::sync::Semaphore::new(20));
@@ -556,6 +541,9 @@ pub async fn run_kr_signal_task(
                     let permit = eval_sem.clone().acquire_owned().await.unwrap();
                     let llm_fail_count = Arc::clone(&state.llm_fail_count); let act = activity.clone(); let strategies_snap = strategies.clone(); let notion_clone = notion.clone();
                     let alert_router = alert.clone();
+                    let sig_strat = Arc::clone(&signal_strategy);
+                    let q_strat = Arc::clone(&qual_strategy);
+                    let r_strat = Arc::clone(&risk_strategy);
                     tokio::spawn(async move {
                         let _permit = permit;
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
@@ -568,6 +556,7 @@ pub async fn run_kr_signal_task(
                                 summary: summary_clone.clone(), mins_until_close, account_balance: kr_account_balance, exchange_code: kr_exchange_code.clone(),
                                 risk_cfg: rc.clone(), signal_cfg: sc.clone(), strategy, activity: act.clone(), notion: notion_clone.clone(),
                                 alert: alert_router.clone(), llm_sem: sem.clone(), llm_fail_count: llm_fail_count.clone(), pending_count: pc.clone(),
+                                signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
                             }).await;
                         }
                     });

@@ -37,10 +37,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let regime_strategy: Arc<dyn crate::strategy::RegimeStrategy> = Arc::from(strategies.regime);
     let discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy> =
         Arc::from(strategies.discovery);
-    // signal/qual/risk strategies will be wired in a future task
-    let _ = strategies.signal;
-    let _ = strategies.qualification;
-    let _ = strategies.risk;
+    let signal_strategy: Arc<dyn crate::strategy::SignalStrategy> = Arc::from(strategies.signal);
+    let qual_strategy: Arc<dyn crate::strategy::QualificationStrategy> =
+        Arc::from(strategies.qualification);
+    let risk_strategy: Arc<dyn crate::strategy::RiskStrategy> = Arc::from(strategies.risk);
 
     let secrets = Secrets::from_env(&cfg.integrations)?;
 
@@ -381,6 +381,9 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let kr_signal_activity = activity.clone();
     let kr_strategies = cfg.kr.strategies.clone();
     let kr_signal_notion = notion_client.clone();
+    let kr_signal_strategy = Arc::clone(&signal_strategy);
+    let kr_qual_strategy = Arc::clone(&qual_strategy);
+    let kr_risk_strategy = Arc::clone(&risk_strategy);
     let t = token.clone();
     let h_kr_signal: JoinHandle<()> = tokio::spawn(async move {
         pipeline::signal::run_kr_signal_task(
@@ -399,6 +402,9 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             kr_strategies,
             kr_signal_activity,
             kr_signal_notion,
+            kr_signal_strategy,
+            kr_qual_strategy,
+            kr_risk_strategy,
             t,
         )
         .await;
@@ -594,6 +600,9 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let us_signal_activity = activity.clone();
     let us_strategies = cfg.us.strategies.clone();
     let us_signal_notion = notion_client.clone();
+    let us_signal_strategy = Arc::clone(&signal_strategy);
+    let us_qual_strategy = Arc::clone(&qual_strategy);
+    let us_risk_strategy = Arc::clone(&risk_strategy);
     let t = token.clone();
     let h_us_signal: JoinHandle<()> = tokio::spawn(async move {
         pipeline::signal::run_signal_task(
@@ -612,6 +621,9 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             us_strategies,
             us_signal_activity,
             us_signal_notion,
+            us_signal_strategy,
+            us_qual_strategy,
+            us_risk_strategy,
             t,
         )
         .await;
