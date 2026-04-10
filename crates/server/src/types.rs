@@ -101,6 +101,9 @@ pub struct OrderRequest {
     pub atr: Option<Decimal>,
     /// KIS exchange code: "J" = KOSPI, "Q" = KOSDAQ. None for US orders.
     pub exchange_code: Option<String>,
+    /// Signal strength (0.0-1.0) for aggressive limit pricing
+    #[serde(default)]
+    pub strength: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

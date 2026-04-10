@@ -454,6 +454,7 @@ mod tests {
             dry_run: None,
             watchlist_refresh_interval_secs: 600,
             strategies: vec![],
+            use_generic_pipeline: false,
         }
     }
 

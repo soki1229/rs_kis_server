@@ -33,6 +33,10 @@ pub struct MarketConfig {
     pub watchlist_refresh_interval_secs: u64,
     #[serde(default = "default_strategies")]
     pub strategies: Vec<StrategyProfile>,
+    /// Enable generic pipeline for this market (phased rollout).
+    /// When true, uses MarketAdapter-based generic tasks instead of legacy market-specific tasks.
+    #[serde(default)]
+    pub use_generic_pipeline: bool,
 }
 
 fn default_strategies() -> Vec<StrategyProfile> {
@@ -257,6 +261,13 @@ pub struct PositionConfig {
     pub partial_exit_pct: Decimal,
     pub entry_blackout_close_mins: u32,
     pub limit_price_atr_cushion: Decimal,
+    /// US market FX spread compensation (e.g., 0.005 = 0.5%)
+    #[serde(default = "default_us_fx_spread_pct")]
+    pub us_fx_spread_pct: Decimal,
+}
+
+fn default_us_fx_spread_pct() -> Decimal {
+    rust_decimal_macros::dec!(0.005)
 }
 
 impl Default for PositionConfig {
@@ -271,6 +282,7 @@ impl Default for PositionConfig {
             partial_exit_pct: dec!(0.5),
             entry_blackout_close_mins: 15,
             limit_price_atr_cushion: dec!(0.10),
+            us_fx_spread_pct: dec!(0.005),
         }
     }
 }
@@ -484,10 +496,12 @@ mod tests {
             dry_run: None,
             watchlist_refresh_interval_secs: default_watchlist_refresh_interval(),
             strategies: default_strategies(),
+            use_generic_pipeline: false,
         };
         assert_eq!(mc.watchlist.len(), 1);
         assert_eq!(mc.dynamic_watchlist_size, 10);
         assert_eq!(mc.watchlist_refresh_interval_secs, 600);
+        assert!(!mc.use_generic_pipeline);
     }
 
     #[test]

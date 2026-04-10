@@ -1,4 +1,7 @@
 pub mod execution;
+pub mod generic_execution;
+pub mod generic_position;
+pub mod generic_regime;
 pub mod position;
 pub mod regime;
 pub mod review;
@@ -6,6 +9,10 @@ pub mod scheduler;
 pub mod signal;
 pub mod tick;
 pub mod tuner;
+
+pub use generic_execution::run_generic_execution_task;
+pub use generic_position::run_generic_position_task;
+pub use generic_regime::run_generic_regime_task;
 
 use crate::monitoring::alert::AlertRouter;
 use crate::types::{FillInfo, OrderRequest};

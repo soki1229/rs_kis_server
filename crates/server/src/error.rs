@@ -35,4 +35,7 @@ pub enum BotError {
 
     #[error("Risk guard blocked: {reason}")]
     RiskBlocked { reason: String },
+
+    #[error("API error: {msg}")]
+    ApiError { msg: String },
 }

@@ -53,6 +53,8 @@ fn is_within_regime_window(market: &str) -> bool {
     }
 }
 
+// DEPRECATED: Use `run_generic_regime_task` with `UsMarketAdapter` instead.
+// This function will be removed in a future version after all callers migrate to the generic version.
 pub async fn run_regime_task(
     client: Arc<dyn KisApi>,
     regime_strategy: Arc<dyn crate::strategy::RegimeStrategy>,
@@ -107,6 +109,8 @@ pub async fn run_regime_task(
     }
 }
 
+// DEPRECATED: Use `run_generic_regime_task` with `KrMarketAdapter` instead.
+// This function will be removed in a future version after all callers migrate to the generic version.
 pub async fn run_kr_regime_task(
     client: Arc<dyn KisDomesticApi>,
     regime_strategy: Arc<dyn crate::strategy::RegimeStrategy>,

@@ -251,6 +251,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let candidate = SignalCandidate {
         signal: trade_signal.clone(),
         regime: regime.clone(),
+        setup_score: trade_signal.setup_score,
     };
     let qual_result = qual_strategy.qualify(&candidate);
 
@@ -316,6 +317,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             price: None,
             atr: Some(trade_signal.quantity),
             exchange_code,
+            strength: Some(trade_signal.strength),
         };
         let _ = order_tx.send(req).await;
     }

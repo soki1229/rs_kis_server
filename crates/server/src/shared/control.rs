@@ -169,6 +169,7 @@ mod tests {
             price: None,
             atr: None,
             exchange_code: None,
+            strength: None,
         };
         cmd_tx
             .send(BotCommand::ForceOrder(req.clone()))

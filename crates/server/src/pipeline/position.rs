@@ -35,6 +35,8 @@ pub fn market_close_utc(
     }
 }
 
+// DEPRECATED: Use `run_generic_position_task` with the appropriate `MarketAdapter` instead.
+// This function will be removed in a future version after all callers migrate to the generic version.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_position_task(
     mut fill_rx: mpsc::Receiver<FillInfo>,
@@ -154,12 +156,12 @@ pub async fn run_position_task(
         tokio::select! {
             _ = token.cancelled() => {
                 for (sym, (state, qty, _)) in pos_states.drain() {
-                    let _ = force_order_tx.send(OrderRequest { symbol: sym.clone(), side: Side::Sell, qty, price: None, atr: None, exchange_code: state.exchange_code.clone() }).await;
+                    let _ = force_order_tx.send(OrderRequest { symbol: sym.clone(), side: Side::Sell, qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None }).await;
                 }
                 return;
             }
             fill = fill_rx.recv() => {
-                if let Some(f) = fill { handle_fill(f, &mut pos_states, &regime_rx, &db_pool, &live_state_tx, &alert, daily_pnl_r, &pos_cfg, &last_prices).await; }
+                if let Some(f) = fill { handle_fill(f, &mut pos_states, &regime_rx, &db_pool, &live_state_tx, &alert, daily_pnl_r, &pos_cfg, &last_prices, &market_name).await; }
             }
             tick = tick_pos_rx.recv() => {
                 if let Some(t) = tick {
@@ -192,6 +194,7 @@ async fn handle_fill(
     daily_pnl_r: Decimal,
     pos_cfg: &crate::config::PositionConfig,
     last_prices: &HashMap<String, Decimal>,
+    market_name: &str,
 ) {
     let row = sqlx::query("SELECT o.atr, d.name FROM orders o LEFT JOIN daily_ohlc d ON o.symbol = d.symbol AND d.date = '0000-00-00' WHERE o.id = ?")
         .bind(&fill.order_id).fetch_optional(db_pool).await.ok().flatten();
@@ -208,8 +211,20 @@ async fn handle_fill(
 
     let entry = fill.filled_price;
     let stop = entry - pos_cfg.stop_atr_multiplier * atr;
-    let pt1 = entry + pos_cfg.profit_target_1_atr * atr;
-    let pt2 = entry + pos_cfg.profit_target_2_atr * atr;
+
+    // Calculate profit targets with FX spread compensation for US market
+    let (pt1, pt2) = if market_name == "US" {
+        let fx_compensation = entry * pos_cfg.us_fx_spread_pct;
+        (
+            entry + pos_cfg.profit_target_1_atr * atr + fx_compensation,
+            entry + pos_cfg.profit_target_2_atr * atr + fx_compensation,
+        )
+    } else {
+        (
+            entry + pos_cfg.profit_target_1_atr * atr,
+            entry + pos_cfg.profit_target_2_atr * atr,
+        )
+    };
     let regime = regime_rx.borrow().clone();
 
     let state = PositionState {
@@ -300,6 +315,7 @@ async fn handle_tick(
                     price: None,
                     atr: None,
                     exchange_code,
+                    strength: None,
                 })
                 .await
                 .is_ok()
@@ -344,6 +360,7 @@ async fn handle_tick(
                         price: None,
                         atr: None,
                         exchange_code: state.exchange_code.clone(),
+                        strength: None,
                     })
                     .await
                     .is_ok()
@@ -406,6 +423,7 @@ async fn handle_tick(
                     price: None,
                     atr: None,
                     exchange_code,
+                    strength: None,
                 })
                 .await
                 .is_ok()
@@ -499,6 +517,7 @@ async fn handle_eod(
                 price: None,
                 atr: None,
                 exchange_code: state.exchange_code.clone(),
+                strength: None,
             })
             .await;
         let _ = sqlx::query("DELETE FROM positions WHERE symbol = ?")

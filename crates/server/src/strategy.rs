@@ -70,6 +70,10 @@ pub struct TradeSignal {
     pub llm_verdict: Option<LlmVerdict>,
     pub entry_price: Decimal,
     pub quantity: Decimal,
+    /// Signal 레벨에서 계산된 setup score (Qualification 중복 계산 방지용)
+    pub setup_score: Option<i32>,
+    /// 시장 레짐 (Risk sizing에서 사용)
+    pub regime: Option<MarketRegime>,
 }
 
 /// 시그널 전략. 틱/캔들 컨텍스트를 받아 진입 신호를 생성한다.
@@ -86,6 +90,8 @@ pub trait SignalStrategy: Send + Sync {
 pub struct SignalCandidate {
     pub signal: TradeSignal,
     pub regime: MarketRegime,
+    /// Signal 레벨에서 계산된 setup score (있으면 Qualification에서 재계산 안 함)
+    pub setup_score: Option<i32>,
 }
 
 /// 심사 결과

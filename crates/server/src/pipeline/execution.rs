@@ -17,6 +17,9 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+// DEPRECATED: Use `run_generic_execution_task` from `generic_execution.rs` instead.
+// This function will be removed in a future version after all callers migrate to the generic version.
+//
 // 9 parameters: 2 receivers, 1 sender, client, db_pool, summary, alert, token, pending_count — all required for this task
 #[allow(clippy::too_many_arguments)]
 pub async fn run_execution_task(
@@ -143,6 +146,23 @@ async fn process_order(
             Exchange::NASD
         }
     };
+    // Apply aggressive limit pricing for strong buy signals
+    let adjusted_price = match (req.side.clone(), req.price, req.strength) {
+        (Side::Buy, Some(base_price), Some(strength)) if strength >= 0.85 => {
+            let bump_pct = Decimal::new(2, 3); // 0.2%
+            let adjusted = base_price * (Decimal::ONE + bump_pct);
+            tracing::debug!(
+                symbol = %req.symbol,
+                strength,
+                base_price = %base_price,
+                adjusted_price = %adjusted,
+                "ExecutionTask: aggressive limit pricing applied"
+            );
+            Some(adjusted)
+        }
+        _ => req.price,
+    };
+
     let place_req = PlaceOrderRequest {
         symbol: req.symbol.clone(),
         exchange,
@@ -153,7 +173,7 @@ async fn process_order(
         },
         order_type: OrderType::Limit,
         qty: Decimal::from(req.qty),
-        price: req.price,
+        price: adjusted_price,
     };
 
     let broker_order_id = match client.place_order(place_req).await {
@@ -616,6 +636,8 @@ async fn cancel_unfilled_on_shutdown(client: &Arc<dyn KisApi>, alert: &AlertRout
     }
 }
 
+// DEPRECATED: Use `run_generic_execution_task` with `KrMarketAdapter` instead.
+// This function will be removed in a future version after all callers migrate to the generic version.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kr_execution_task(
     mut order_rx: mpsc::Receiver<OrderRequest>,
@@ -722,6 +744,24 @@ async fn process_kr_order(
         "Q" => DomesticExchange::KOSDAQ,
         _ => DomesticExchange::KOSPI,
     };
+
+    // Apply aggressive limit pricing for strong buy signals
+    let adjusted_price = match (req.side.clone(), req.price, req.strength) {
+        (Side::Buy, Some(base_price), Some(strength)) if strength >= 0.85 => {
+            let bump_pct = Decimal::new(2, 3); // 0.2%
+            let adjusted = base_price * (Decimal::ONE + bump_pct);
+            tracing::debug!(
+                symbol = %req.symbol,
+                strength,
+                base_price = %base_price,
+                adjusted_price = %adjusted,
+                "KrExecutionTask: aggressive limit pricing applied"
+            );
+            Some(adjusted)
+        }
+        _ => req.price,
+    };
+
     let place_req = DomesticPlaceOrderRequest {
         symbol: req.symbol.clone(),
         exchange,
@@ -732,7 +772,7 @@ async fn process_kr_order(
         },
         order_type: kis_api::DomesticOrderType::Limit,
         qty: req.qty as u32,
-        price: req.price,
+        price: adjusted_price,
     };
 
     let broker_order_no = match client.domestic_place_order(place_req).await {
@@ -907,7 +947,51 @@ async fn poll_kr_until_filled(
                 }
             }
             Err(e) => {
-                tracing::warn!("KrExecutionTask: domestic_unfilled_orders error: {}", e);
+                tracing::warn!(
+                    "KrExecutionTask: domestic_unfilled_orders error: {} — trying balance fallback",
+                    e
+                );
+
+                // VTS fallback: check balance to detect fill when unfilled_orders API fails
+                match try_kr_balance_fallback(client, symbol, qty).await {
+                    Some((filled_qty, filled_price)) => {
+                        let _ = sqlx::query(
+                            "UPDATE orders SET state = 'FullyFilled', updated_at = ? WHERE id = ?",
+                        )
+                        .bind(chrono::Utc::now().to_rfc3339())
+                        .bind(order_id)
+                        .execute(db_pool)
+                        .await;
+
+                        tracing::info!(
+                            "✅ [국내 체결완료-폴백] {} {}주 (@{})",
+                            symbol,
+                            filled_qty,
+                            filled_price
+                        );
+                        alert.info(format!(
+                            "✅ [국내 체결완료-폴백] {} {}주 (@{}) — 잔고 변화로 체결 감지됨",
+                            symbol, filled_qty, filled_price
+                        ));
+
+                        let _ = fill_tx
+                            .send(FillInfo {
+                                order_id: order_id.to_string(),
+                                symbol: symbol.to_string(),
+                                filled_qty,
+                                filled_price,
+                                exchange_code: exchange_code.clone(),
+                            })
+                            .await;
+                        return;
+                    }
+                    None => {
+                        tracing::debug!(
+                            "KrExecutionTask: balance fallback did not detect fill for {}",
+                            symbol
+                        );
+                    }
+                }
             }
         }
 
@@ -1022,6 +1106,41 @@ async fn confirm_kr_fill_from_history(
                 "KrExecutionTask: domestic_order_history error for {broker_order_no}: {e}"
             );
             PollResult::TimedOut
+        }
+    }
+}
+
+/// VTS fallback: detect fill by checking balance change when unfilled_orders API fails.
+/// Returns (filled_qty, filled_price) if the symbol appears in balance with expected qty.
+async fn try_kr_balance_fallback(
+    client: &Arc<dyn KisDomesticApi>,
+    symbol: &str,
+    expected_qty: u64,
+) -> Option<(u64, Decimal)> {
+    use rust_decimal::prelude::ToPrimitive;
+    match client.domestic_balance().await {
+        Ok(balance) => {
+            if let Some(holding) = balance.items.iter().find(|h| h.symbol == symbol) {
+                let qty = holding.qty.to_u64().unwrap_or(0);
+                if qty >= expected_qty {
+                    tracing::info!(
+                        "VTS balance fallback: found {} with qty={}, avg_price={}",
+                        symbol,
+                        qty,
+                        holding.avg_price
+                    );
+                    return Some((qty, holding.avg_price));
+                }
+            }
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                "KrExecutionTask: domestic_balance fallback failed for {}: {}",
+                symbol,
+                e
+            );
+            None
         }
     }
 }
@@ -1192,6 +1311,7 @@ mod tests {
             price: Some(dec!(130.00)),
             atr: Some(dec!(2.5)),
             exchange_code: None,
+            strength: None,
         }
     }
 
