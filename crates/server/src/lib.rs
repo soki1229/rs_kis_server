@@ -9,7 +9,7 @@ pub mod monitoring;
 pub mod notion;
 pub mod pipeline;
 pub mod position;
-pub mod qualification;
+pub(crate) mod qualification;
 pub mod regime;
 pub mod run;
 pub mod shared;
