@@ -138,6 +138,7 @@ struct SignalContext {
     signal_strategy: Arc<dyn SignalStrategy>,
     qual_strategy: Arc<dyn QualificationStrategy>,
     risk_strategy: Arc<dyn RiskStrategy>,
+    live_state_rx: watch::Receiver<crate::state::MarketLiveState>,
 }
 
 #[allow(dead_code)]
@@ -181,6 +182,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         signal_strategy,
         qual_strategy,
         risk_strategy,
+        live_state_rx,
     } = ctx;
     use rust_decimal::prelude::ToPrimitive;
 
@@ -217,6 +219,8 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         rolling_high,
         account_balance,
         regime: regime.clone(),
+        setup_score_min: strategy.setup_score_min,
+        regime_filter: strategy.regime_filter,
     };
 
     let trade_signal = match signal_strategy.evaluate(&strategy_ctx, &db_pool).await {
@@ -270,10 +274,13 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         return;
     }
 
-    let portfolio = Portfolio {
-        balance: account_balance,
-        open_position_count: 0,
-        daily_pnl_r: 0.0,
+    let portfolio = {
+        let live = live_state_rx.borrow();
+        Portfolio {
+            balance: account_balance,
+            open_position_count: live.positions.len() as u32,
+            daily_pnl_r: live.daily_pnl_r,
+        }
     };
     let sized_qty = risk_strategy.size(&trade_signal, &portfolio);
 
@@ -346,6 +353,7 @@ pub async fn run_signal_task(
     strategies: Vec<crate::config::StrategyProfile>,
     activity: crate::shared::activity::ActivityLog,
     notion: Option<Arc<TokioRwLock<crate::notion::NotionClient>>>,
+    live_state_rx: watch::Receiver<crate::state::MarketLiveState>,
     signal_strategy: Arc<dyn SignalStrategy>,
     qual_strategy: Arc<dyn QualificationStrategy>,
     risk_strategy: Arc<dyn RiskStrategy>,
@@ -425,6 +433,7 @@ pub async fn run_signal_task(
                     let sig_strat = Arc::clone(&signal_strategy);
                     let q_strat = Arc::clone(&qual_strategy);
                     let r_strat = Arc::clone(&risk_strategy);
+                    let live_rx = live_state_rx.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
@@ -438,6 +447,7 @@ pub async fn run_signal_task(
                                 risk_cfg: rc.clone(), signal_cfg: sc.clone(), strategy, activity: act.clone(), notion: notion_clone.clone(),
                                 alert: alert_router.clone(), llm_sem: sem.clone(), llm_fail_count: llm_fail_count.clone(), pending_count: pc.clone(),
                                 signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
+                                live_state_rx: live_rx.clone(),
                             }).await;
                         }
                     });
@@ -466,6 +476,7 @@ pub async fn run_kr_signal_task(
     strategies: Vec<crate::config::StrategyProfile>,
     activity: crate::shared::activity::ActivityLog,
     notion: Option<Arc<TokioRwLock<crate::notion::NotionClient>>>,
+    live_state_rx: watch::Receiver<crate::state::MarketLiveState>,
     signal_strategy: Arc<dyn SignalStrategy>,
     qual_strategy: Arc<dyn QualificationStrategy>,
     risk_strategy: Arc<dyn RiskStrategy>,
@@ -544,6 +555,7 @@ pub async fn run_kr_signal_task(
                     let sig_strat = Arc::clone(&signal_strategy);
                     let q_strat = Arc::clone(&qual_strategy);
                     let r_strat = Arc::clone(&risk_strategy);
+                    let live_rx = live_state_rx.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
@@ -557,6 +569,7 @@ pub async fn run_kr_signal_task(
                                 risk_cfg: rc.clone(), signal_cfg: sc.clone(), strategy, activity: act.clone(), notion: notion_clone.clone(),
                                 alert: alert_router.clone(), llm_sem: sem.clone(), llm_fail_count: llm_fail_count.clone(), pending_count: pc.clone(),
                                 signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
+                                live_state_rx: live_rx.clone(),
                             }).await;
                         }
                     });

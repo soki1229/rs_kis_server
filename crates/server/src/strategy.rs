@@ -42,6 +42,10 @@ pub struct SignalContext {
     pub account_balance: Decimal,
     /// 현재 시장 레짐
     pub regime: MarketRegime,
+    /// config에서 설정한 최소 setup score (기본값: 60)
+    pub setup_score_min: u32,
+    /// config에서 설정한 regime filter 활성화 여부
+    pub regime_filter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
