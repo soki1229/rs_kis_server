@@ -200,6 +200,7 @@ async fn sleep_until_next_day(token: &CancellationToken) {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kr_scheduler_task(
     client: Arc<dyn KisDomesticApi>,
+    discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
@@ -247,7 +248,11 @@ pub async fn run_kr_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("KR", if now >= open { "Trading" } else { "Pre-market" });
-            let fresh = build_kr_watchlist(&client, &config, &alert, &db).await;
+            let symbols = discovery_strategy.build_kr_watchlist(Arc::clone(&client)).await;
+            let fresh = WatchlistSet {
+                stable: symbols,
+                aggressive: vec![],
+            };
             let merged: WatchlistSet =
                 merge_with_protected_symbols(fresh.clone(), &db, &config).await;
             if merged != *watchlist_tx.borrow() {
@@ -274,6 +279,7 @@ pub async fn run_kr_scheduler_task(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_scheduler_task(
     client: Arc<dyn KisApi>,
+    discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
@@ -321,7 +327,11 @@ pub async fn run_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("US", if now >= open { "Trading" } else { "Pre-market" });
-            let fresh = build_watchlist(&client, &config, &alert, &db).await;
+            let symbols = discovery_strategy.build_us_watchlist(Arc::clone(&client)).await;
+            let fresh = WatchlistSet {
+                stable: symbols,
+                aggressive: vec![],
+            };
             let merged: WatchlistSet =
                 merge_with_protected_symbols(fresh.clone(), &db, &config).await;
             if merged != *watchlist_tx.borrow() {

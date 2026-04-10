@@ -6,7 +6,6 @@ use crate::state;
 use crate::strategy::StrategyBundle;
 use crate::types::BotCommand;
 
-use chrono::Datelike;
 use kis_api::{KisClient, KisConfig, KisDomesticApi, KisDomesticClient};
 use std::sync::{atomic::AtomicU32, Arc};
 use tokio::task::JoinHandle;
@@ -34,7 +33,15 @@ fn is_market_active(market: &str) -> bool {
 /// Note: StrategyBundle is accepted but not yet wired into pipeline tasks.
 /// Pipeline tasks still call regime/qualification logic directly.
 /// Future versions will inject strategy traits into each pipeline task.
-pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Result<()> {
+pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Result<()> {
+    let regime_strategy: Arc<dyn crate::strategy::RegimeStrategy> = Arc::from(strategies.regime);
+    let discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy> =
+        Arc::from(strategies.discovery);
+    // signal/qual/risk strategies will be wired in a future task
+    let _ = strategies.signal;
+    let _ = strategies.qualification;
+    let _ = strategies.risk;
+
     let secrets = Secrets::from_env(&cfg.integrations)?;
 
     let kr_effective_dry_run = cfg.kr.dry_run.unwrap_or(cfg.dry_run);
@@ -55,16 +62,6 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
         tracing::error!(
             "ANTHROPIC_API_KEY not set — LLM evaluation will be skipped in signal tasks"
         );
-    }
-
-    {
-        let current_year = chrono::Utc::now().date_naive().year();
-        if !crate::fomc_calendar::has_calendar_for_year(current_year) {
-            tracing::error!(
-                "FOMC calendar expired — year {} not defined. Update the calendar!",
-                current_year
-            );
-        }
     }
 
     if cfg.risk.earnings_blackout_symbols.is_empty() {
@@ -317,10 +314,17 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
 
     let kr_regime_client = Arc::clone(&kr_client);
     let kr_regime_alert = kr.alert.clone();
+    let kr_regime_strategy = Arc::clone(&regime_strategy);
     let t = token.clone();
     let h_kr_regime: JoinHandle<()> = tokio::spawn(async move {
-        pipeline::regime::run_kr_regime_task(kr_regime_client, kr_regime_tx, kr_regime_alert, t)
-            .await;
+        pipeline::regime::run_kr_regime_task(
+            kr_regime_client,
+            kr_regime_strategy,
+            kr_regime_tx,
+            kr_regime_alert,
+            t,
+        )
+        .await;
     });
 
     if kr_active {
@@ -563,9 +567,17 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
 
     let us_regime_client = Arc::clone(&kis_client);
     let us_regime_alert = us.alert.clone();
+    let us_regime_strategy = Arc::clone(&regime_strategy);
     let t = token.clone();
     let h_us_regime: JoinHandle<()> = tokio::spawn(async move {
-        pipeline::regime::run_regime_task(us_regime_client, regime_tx, us_regime_alert, t).await;
+        pipeline::regime::run_regime_task(
+            us_regime_client,
+            us_regime_strategy,
+            regime_tx,
+            us_regime_alert,
+            t,
+        )
+        .await;
     });
 
     let us_pending = Arc::new(AtomicU32::new(0));
@@ -681,10 +693,12 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
     let kr_cfg = cfg.kr.clone();
     let kr_sched_activity = activity.clone();
     let kr_sched_db = kr_db_pool.clone();
+    let kr_discovery_strategy = Arc::clone(&discovery_strategy);
     let t = token.clone();
     let h_kr_sched: JoinHandle<()> = tokio::spawn(async move {
         pipeline::scheduler::run_kr_scheduler_task(
             kr_sched_client,
+            kr_discovery_strategy,
             kr_watchlist_tx,
             kr_eod_tx,
             kr_cfg,
@@ -709,10 +723,12 @@ pub async fn run(cfg: ServerConfig, _strategies: StrategyBundle) -> anyhow::Resu
     let us_sched_client = Arc::clone(&kis_client);
     let us_sched_activity = activity.clone();
     let us_sched_db = us_db_pool.clone();
+    let us_discovery_strategy = Arc::clone(&discovery_strategy);
     let t = token.clone();
     let h_us_sched: JoinHandle<()> = tokio::spawn(async move {
         pipeline::scheduler::run_scheduler_task(
             us_sched_client,
+            us_discovery_strategy,
             us_watchlist_tx,
             us_eod_tx,
             us_cfg,

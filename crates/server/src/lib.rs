@@ -5,7 +5,6 @@ pub mod db;
 pub mod dual_client;
 pub mod error;
 pub mod execution;
-pub mod fomc_calendar;
 pub mod monitoring;
 pub mod notion;
 pub mod pipeline;

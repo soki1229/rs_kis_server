@@ -7,7 +7,8 @@ pub struct RegimeInput {
     pub volume_ratio: f64,
 }
 
-pub fn classify_regime(input: &RegimeInput) -> MarketRegime {
+#[cfg(test)]
+pub(crate) fn classify_regime(input: &RegimeInput) -> MarketRegime {
     let abs_change = input.daily_change_pct.abs();
 
     if abs_change >= 1.5 {

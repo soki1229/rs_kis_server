@@ -1,5 +1,5 @@
 use crate::monitoring::alert::AlertRouter;
-use crate::regime::{classify_regime, RegimeInput, RegimeSender};
+use crate::regime::{RegimeInput, RegimeSender};
 use kis_api::{CandleBar, DailyChartRequest, DomesticDailyChartRequest, KisApi, KisDomesticApi};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -55,6 +55,7 @@ fn is_within_regime_window(market: &str) -> bool {
 
 pub async fn run_regime_task(
     client: Arc<dyn KisApi>,
+    regime_strategy: Arc<dyn crate::strategy::RegimeStrategy>,
     regime_tx: RegimeSender,
     alert: AlertRouter,
     token: CancellationToken,
@@ -71,7 +72,7 @@ pub async fn run_regime_task(
             match client.daily_chart(req).await {
                 Ok(bars) => {
                     if let Some(input) = build_regime_input(&bars) {
-                        let regime = classify_regime(&input);
+                        let regime = regime_strategy.classify(&input);
                         tracing::info!(
                             ?regime,
                             ma5 = input.ma5,
@@ -108,6 +109,7 @@ pub async fn run_regime_task(
 
 pub async fn run_kr_regime_task(
     client: Arc<dyn KisDomesticApi>,
+    regime_strategy: Arc<dyn crate::strategy::RegimeStrategy>,
     regime_tx: crate::regime::RegimeSender,
     alert: AlertRouter,
     token: CancellationToken,
@@ -126,7 +128,7 @@ pub async fn run_kr_regime_task(
             match client.domestic_daily_chart(req).await {
                 Ok(bars) => {
                     if let Some(input) = build_regime_input(&bars) {
-                        let regime = crate::regime::classify_regime(&input);
+                        let regime = regime_strategy.classify(&input);
                         tracing::info!(
                             ?regime,
                             ma5 = input.ma5,
@@ -175,6 +177,16 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use tokio_util::sync::CancellationToken;
+
+    struct DefaultRegime;
+    impl crate::strategy::RegimeStrategy for DefaultRegime {
+        fn classify(&self, input: &crate::regime::RegimeInput) -> crate::types::MarketRegime {
+            crate::regime::classify_regime(input)
+        }
+    }
+    fn default_regime_strategy() -> Arc<dyn crate::strategy::RegimeStrategy> {
+        Arc::new(DefaultRegime)
+    }
 
     struct MockRegimeClient {
         bars: Vec<CandleBar>,
@@ -282,8 +294,9 @@ mod tests {
         let token = CancellationToken::new();
         let t = token.clone();
 
+        let regime_strategy = default_regime_strategy();
         tokio::spawn(async move {
-            run_regime_task(client, regime_tx, alert, t).await;
+            run_regime_task(client, regime_strategy, regime_tx, alert, t).await;
         });
 
         // Should immediately update on startup
@@ -368,8 +381,9 @@ mod tests {
         let token = CancellationToken::new();
         let t = token.clone();
 
+        let regime_strategy = default_regime_strategy();
         tokio::spawn(async move {
-            run_regime_task(Arc::new(FailingClient), regime_tx, alert, t).await;
+            run_regime_task(Arc::new(FailingClient), regime_strategy, regime_tx, alert, t).await;
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -451,8 +465,9 @@ mod tests {
         let token = CancellationToken::new();
         let t = token.clone();
 
+        let regime_strategy = default_regime_strategy();
         tokio::spawn(async move {
-            run_kr_regime_task(client, regime_tx, alert, t).await;
+            run_kr_regime_task(client, regime_strategy, regime_tx, alert, t).await;
         });
 
         if tokio::time::timeout(std::time::Duration::from_millis(200), regime_rx.changed())
