@@ -224,7 +224,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             side: Side::Buy,
             qty,
             price: None,
-            atr: Some(trade_signal.quantity),
+            atr: Some(trade_signal.atr),
             exchange_code,
             strength: Some(trade_signal.strength),
         };

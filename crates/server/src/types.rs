@@ -115,7 +115,7 @@ pub struct OrderResult {
     pub price: Decimal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FillInfo {
     pub order_id: String,
     pub symbol: String,

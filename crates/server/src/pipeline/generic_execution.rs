@@ -131,8 +131,8 @@ async fn process_order(
     };
 
     // 1. Record in DB
-    if let Err(e) = sqlx::query("INSERT INTO orders (id, symbol, side, qty, price, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(&order_id).bind(&req.symbol).bind(format!("{:?}", req.side)).bind(req.qty as i64).bind(req.price.map(|p| p.to_string())).bind("Created").bind(&now)
+    if let Err(e) = sqlx::query("INSERT INTO orders (id, symbol, side, qty, price, atr, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(&order_id).bind(&req.symbol).bind(format!("{:?}", req.side)).bind(req.qty as i64).bind(req.price.map(|p| p.to_string())).bind(req.atr.map(|v| v.to_string())).bind("Created").bind(&now)
         .execute(db_pool).await {
         alert.warn(format!("DB error recording order {}: {}", req.symbol, e));
         return;
@@ -238,7 +238,9 @@ async fn reconcile_submitted_orders(
         let broker_id: String = row.get("broker_order_id");
         let symbol: String = row.get("symbol");
         let qty: i64 = row.get("qty");
-        let atr: Option<Decimal> = row.try_get::<Option<String>, _>("atr").ok().flatten().and_then(|s| s.parse().ok());
+        let atr: Option<Decimal> = row.try_get::<Option<String>, _>("atr").ok().flatten().and_then(|s| {
+            s.parse().map_err(|_| tracing::warn!(order_id = %order_id, "ATR parse failed, defaulting to None")).ok()
+        });
         let ex_code: Option<String> = row.get("exchange_code");
 
         let _permit = poll_sem.acquire().await.unwrap();
