@@ -22,14 +22,11 @@ const BALANCE_CACHE_TTL_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct CompletedCandle {
-    #[allow(dead_code)]
     pub open: Decimal,
     pub high: Decimal,
     pub low: Decimal,
     pub close: Decimal,
-    #[allow(dead_code)]
     pub volume: u64,
-    #[allow(dead_code)]
     pub ts: chrono::DateTime<chrono::Utc>,
 }
 
@@ -99,9 +96,8 @@ struct SignalState {
     watchlist: WatchlistSet,
     candle_start: HashMap<String, Instant>,
     cached_balance: Option<(Decimal, Instant)>,
-    us_exchange: HashMap<String, String>,
+    symbol_exchange: HashMap<String, String>,
     pending_symbols: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    llm_fail_count: Arc<AtomicU32>,
 }
 
 struct SignalContext {
@@ -113,47 +109,16 @@ struct SignalContext {
     completed: Vec<CompletedCandle>,
     #[allow(dead_code)]
     quote: Option<QuoteSnapshot>,
-    #[allow(dead_code)]
-    rolling_highs: Vec<(chrono::DateTime<chrono::Utc>, Decimal)>,
     summary: Arc<StdRwLock<crate::state::MarketSummary>>,
-    #[allow(dead_code)]
-    mins_until_close: i64,
     account_balance: Decimal,
     exchange_code: Option<String>,
-    #[allow(dead_code)]
-    risk_cfg: crate::config::RiskConfig,
-    #[allow(dead_code)]
-    signal_cfg: crate::config::SignalConfig,
     strategy: crate::config::StrategyProfile,
     activity: crate::shared::activity::ActivityLog,
     notion: Option<Arc<TokioRwLock<crate::notion::NotionClient>>>,
-    #[allow(dead_code)]
-    alert: AlertRouter,
-    #[allow(dead_code)]
-    llm_sem: Arc<tokio::sync::Semaphore>,
-    #[allow(dead_code)]
-    llm_fail_count: Arc<AtomicU32>,
-    #[allow(dead_code)]
-    pending_count: Arc<AtomicU32>,
     signal_strategy: Arc<dyn SignalStrategy>,
     qual_strategy: Arc<dyn QualificationStrategy>,
     risk_strategy: Arc<dyn RiskStrategy>,
     live_state_rx: watch::Receiver<crate::state::MarketLiveState>,
-}
-
-#[allow(dead_code)]
-async fn get_stock_name(db: &sqlx::SqlitePool, symbol: &str) -> String {
-    let name: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM daily_ohlc WHERE symbol = ? AND name IS NOT NULL LIMIT 1",
-    )
-    .bind(symbol)
-    .fetch_optional(db)
-    .await
-    .unwrap_or(None);
-    match name {
-        Some(n) if !n.is_empty() => format!("{}({})", n, symbol),
-        _ => symbol.to_string(),
-    }
 }
 
 async fn evaluate_and_maybe_order(ctx: SignalContext) {
@@ -165,20 +130,12 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         regime,
         completed,
         quote: _,
-        rolling_highs: _,
         summary,
-        mins_until_close: _,
         account_balance,
         exchange_code,
-        risk_cfg: _,
-        signal_cfg: _,
         strategy,
         activity,
         notion,
-        alert: _,
-        llm_sem: _,
-        llm_fail_count: _,
-        pending_count: _,
         signal_strategy,
         qual_strategy,
         risk_strategy,
@@ -227,21 +184,6 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         Some(sig) => sig,
         None => {
             activity.record_eval(&market, &symbol, 0, "skip", "no_signal");
-            if let Some(nc) = notion {
-                let row = crate::notion::SignalEvalRow {
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    symbol: symbol.clone(),
-                    score: 0,
-                    market: market.clone(),
-                    regime: format!("{:?}", regime),
-                    action: "skip".into(),
-                    strategy: format!("{}:no_signal", strategy_id),
-                };
-                tokio::spawn(async move {
-                    let client = nc.read().await;
-                    let _ = client.add_signal_eval(&row).await;
-                });
-            }
             return;
         }
     };
@@ -257,21 +199,6 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     if let QualResult::Block { reason } = qual_result {
         activity.record_eval(&market, &symbol, score, "blocked", &reason);
-        if let Some(nc) = notion {
-            let row = crate::notion::SignalEvalRow {
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                symbol: symbol.clone(),
-                score,
-                market: market.clone(),
-                regime: format!("{:?}", regime),
-                action: "blocked".into(),
-                strategy: format!("{}:{}", strategy_id, reason),
-            };
-            tokio::spawn(async move {
-                let client = nc.read().await;
-                let _ = client.add_signal_eval(&row).await;
-            });
-        }
         return;
     }
 
@@ -323,21 +250,6 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     }
 }
 
-pub fn compute_atr14(bars: &[DailyBar]) -> Option<Decimal> {
-    if bars.len() < 15 {
-        return None;
-    }
-    let mut trs = Vec::new();
-    for i in 0..bars.len() - 1 {
-        let h = bars[i].high;
-        let l = bars[i].low;
-        let pc = bars[i + 1].close;
-        let tr = h.max(pc) - l.min(pc);
-        trs.push(tr);
-    }
-    Some(trs.iter().take(14).sum::<Decimal>() / Decimal::from(14))
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_signal_task(
     mut tick_rx: broadcast::Receiver<TickData>,
@@ -348,9 +260,9 @@ pub async fn run_signal_task(
     adapter: Arc<dyn MarketAdapter>,
     mut watchlist_rx: watch::Receiver<WatchlistSet>,
     summary: Arc<StdRwLock<crate::state::MarketSummary>>,
-    alert: AlertRouter,
-    pending_count: Arc<AtomicU32>,
-    risk_cfg: crate::config::RiskConfig,
+    _alert: AlertRouter,
+    _pending_count: Arc<AtomicU32>,
+    _risk_cfg: crate::config::RiskConfig,
     signal_cfg: crate::config::SignalConfig,
     strategies: Vec<crate::config::StrategyProfile>,
     activity: crate::shared::activity::ActivityLog,
@@ -370,11 +282,9 @@ pub async fn run_signal_task(
         watchlist: WatchlistSet::default(),
         candle_start: HashMap::new(),
         cached_balance: None,
-        us_exchange: HashMap::new(),
+        symbol_exchange: HashMap::new(),
         pending_symbols: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        llm_fail_count: Arc::new(AtomicU32::new(0)),
     };
-    let llm_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     let candle_interval = Duration::from_secs(signal_cfg.candle_interval_secs);
     let initial_wl = watchlist_rx.borrow().clone();
     state.watchlist = initial_wl.clone();
@@ -397,7 +307,7 @@ pub async fn run_signal_task(
                 if !new_syms.is_empty() {
                     let mut news_cache = HashMap::new();
                     let (exch_map, _bad): (HashMap<String, String>, std::collections::HashSet<String>) = seed_symbols(&new_syms, adapter.as_ref(), &db_pool, &mut news_cache, false).await;
-                    state.us_exchange.extend(exch_map);
+                    state.symbol_exchange.extend(exch_map);
                 }
                 for sym in &new_wl { if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new(sym)); } }
             }
@@ -412,9 +322,6 @@ pub async fn run_signal_task(
                     let cq = state.completed.entry(tick.symbol.clone()).or_default();
                     cq.push_back(completed_candle); if cq.len() > MAX_COMPLETED_CANDLES { cq.pop_front(); }
 
-                    let timing = adapter.market_timing();
-                    let mins_until_close = timing.mins_until_close;
-
                     if state.cached_balance.map(|(_, t)| t.elapsed().as_secs() >= BALANCE_CACHE_TTL_SECS).unwrap_or(true) {
                         match adapter.balance().await {
                             Ok(resp) => { state.cached_balance = Some((resp.available_cash, Instant::now())); }
@@ -426,13 +333,11 @@ pub async fn run_signal_task(
                     let sym_for_eval = tick.symbol.clone(); let sym_for_guard = tick.symbol.clone();
                     let pool = db_pool.clone(); let order_tx = order_tx.clone(); let regime = regime_rx.borrow().clone();
                     let completed_snap = cq.iter().cloned().collect::<Vec<_>>(); let quote_snap = state.latest_quotes.get(&sym_for_eval).cloned();
-                    let summary_clone = summary.clone(); let sem = llm_semaphore.clone();
-                    let pc = pending_count.clone();
-                    let ex_code = state.us_exchange.get(&sym_for_eval).cloned();
-                    let rc = risk_cfg.clone(); let sc = signal_cfg.clone(); let ps_clone = Arc::clone(&state.pending_symbols);
+                    let summary_clone = summary.clone();
+                    let ex_code = state.symbol_exchange.get(&sym_for_eval).cloned();
+                    let ps_clone = Arc::clone(&state.pending_symbols);
                     let permit = eval_sem.clone().acquire_owned().await.unwrap();
-                    let llm_fail_count = Arc::clone(&state.llm_fail_count); let act = activity.clone(); let strategies_snap = strategies.clone(); let notion_clone = notion.clone();
-                    let alert_router = alert.clone();
+                    let act = activity.clone(); let strategies_snap = strategies.clone(); let notion_clone = notion.clone();
                     let sig_strat = Arc::clone(&signal_strategy);
                     let q_strat = Arc::clone(&qual_strategy);
                     let r_strat = Arc::clone(&risk_strategy);
@@ -446,10 +351,9 @@ pub async fn run_signal_task(
                         for strategy in strategies_snap {
                             evaluate_and_maybe_order(SignalContext {
                                 symbol: sym_for_eval.clone(), market: market_name_inner.clone(), db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
-                                completed: completed_snap.clone(), quote: quote_snap.clone(), rolling_highs: vec![],
-                                summary: summary_clone.clone(), mins_until_close, account_balance, exchange_code: ex_code.clone(),
-                                risk_cfg: rc.clone(), signal_cfg: sc.clone(), strategy, activity: act.clone(), notion: notion_clone.clone(),
-                                alert: alert_router.clone(), llm_sem: sem.clone(), llm_fail_count: llm_fail_count.clone(), pending_count: pc.clone(),
+                                completed: completed_snap.clone(), quote: quote_snap.clone(),
+                                summary: summary_clone.clone(), account_balance, exchange_code: ex_code.clone(),
+                                strategy, activity: act.clone(), notion: notion_clone.clone(),
                                 signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
                                 live_state_rx: live_rx.clone(),
                             }).await;
@@ -472,6 +376,13 @@ pub async fn seed_symbols(
 ) -> (HashMap<String, String>, std::collections::HashSet<String>) {
     let mut exch_map = HashMap::new();
     let mut bad = std::collections::HashSet::new();
+    let market_id = adapter.market_id();
+    let default_exch = if market_id.is_kr() {
+        "J".to_string()
+    } else {
+        "NASD".to_string()
+    };
+
     for sym in wl {
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM daily_ohlc WHERE symbol = ? AND date != '0000-00-00'",
@@ -481,7 +392,7 @@ pub async fn seed_symbols(
         .await
         .unwrap_or(0);
         if !force && count >= 30 {
-            exch_map.insert(sym.clone(), "NASD".to_string());
+            exch_map.insert(sym.clone(), default_exch.clone());
             continue;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -494,7 +405,7 @@ pub async fn seed_symbols(
                         .bind(sym).bind(date_str).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
                 }
                 tracing::info!(symbol = %sym, bars = bar_count, "History seeded successfully");
-                exch_map.insert(sym.clone(), "NASD".to_string());
+                exch_map.insert(sym.clone(), default_exch.clone());
             }
             Err(_) => {
                 bad.insert(sym.clone());
