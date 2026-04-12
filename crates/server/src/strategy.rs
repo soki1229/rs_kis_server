@@ -1,3 +1,4 @@
+use crate::pipeline::QuoteSnapshot;
 use crate::regime::RegimeInput;
 use crate::types::MarketRegime;
 use async_trait::async_trait;
@@ -34,6 +35,8 @@ pub struct SignalContext {
     pub market: String,
     /// 완성된 캔들 (최신 순)
     pub candles: Vec<kis_api::CandleBar>,
+    /// 현재 호가 정보
+    pub quote: Option<QuoteSnapshot>,
     /// 현재 틱 가격
     pub current_price: Decimal,
     /// 당일 최고가 (rolling)

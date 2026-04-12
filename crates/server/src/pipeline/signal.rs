@@ -38,7 +38,7 @@ struct CandleAccumulator {
 }
 
 impl CandleAccumulator {
-    fn new(_symbol: &str) -> Self {
+    fn new() -> Self {
         Self {
             open: Decimal::ZERO,
             high: Decimal::MIN,
@@ -89,7 +89,6 @@ struct SignalContext {
     order_tx: mpsc::Sender<OrderRequest>,
     regime: MarketRegime,
     completed: Vec<CompletedCandle>,
-    #[allow(dead_code)]
     quote: Option<QuoteSnapshot>,
     summary: Arc<StdRwLock<crate::state::MarketSummary>>,
     account_balance: Decimal,
@@ -111,7 +110,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         order_tx,
         regime,
         completed,
-        quote: _,
+        quote,
         summary,
         account_balance,
         exchange_code,
@@ -154,6 +153,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         symbol: symbol.clone(),
         market: market.clone(),
         candles,
+        quote,
         current_price,
         rolling_high,
         account_balance,
@@ -267,9 +267,7 @@ pub async fn run_signal_task(
     let initial_wl = watchlist_rx.borrow().clone();
     state.watchlist = initial_wl.clone();
     for sym in initial_wl.all_unique() {
-        state
-            .candles
-            .insert(sym.clone(), CandleAccumulator::new(&sym));
+        state.candles.insert(sym.clone(), CandleAccumulator::new());
     }
 
     let market_label = adapter.market_id().label().to_string();
@@ -287,12 +285,12 @@ pub async fn run_signal_task(
                     let (exch_map, _bad): (HashMap<String, String>, std::collections::HashSet<String>) = seed_symbols(&new_syms, adapter.as_ref(), &db_pool, &mut news_cache, false).await;
                     state.symbol_exchange.extend(exch_map);
                 }
-                for sym in &new_wl { if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new(sym)); } }
+                for sym in &new_wl { if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new()); } }
             }
             Ok(tick) = tick_rx.recv() => {
                 if state.watchlist.all_unique().is_empty() { state.watchlist = watchlist_rx.borrow().clone(); }
                 if !state.watchlist.all_unique().contains(&tick.symbol) { continue; }
-                let candle = state.candles.entry(tick.symbol.clone()).or_insert_with(|| CandleAccumulator::new(&tick.symbol));
+                let candle = state.candles.entry(tick.symbol.clone()).or_insert_with(CandleAccumulator::new);
                 candle.push(tick.clone());
                 if state.candle_start.entry(tick.symbol.clone()).or_insert_with(Instant::now).elapsed() >= candle_interval && candle.is_signal_eligible() {
                     tracing::info!(symbol = %tick.symbol, "🕯️ 캔들 완성 (분석 시작)");

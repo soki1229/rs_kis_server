@@ -56,9 +56,9 @@ rs_kis_pilot/     ← 전략 구현체 (../rs_kis_pilot)
 `StrategyBundle`이 이들을 묶어 `run()`에 전달된다.
 
 **현재 파이프라인 주입 상태:**
-- `RegimeStrategy` → `Arc<dyn RegimeStrategy>` 로 `run_regime_task` / `run_kr_regime_task`에 주입됨 ✅
+- `RegimeStrategy` → `Arc<dyn RegimeStrategy>` 로 `run_generic_regime_task`에 주입됨 ✅
 - `DiscoveryStrategy` → `Arc<dyn DiscoveryStrategy>` 로 scheduler 태스크에 주입됨 ✅
-- `SignalStrategy`, `QualificationStrategy`, `RiskStrategy` → `pipeline/signal.rs` 내부 직접 호출 구조 유지 중 (TODO: 완전 주입 필요)
+- `SignalStrategy`, `QualificationStrategy`, `RiskStrategy` → `pipeline/signal.rs`에 `Arc<dyn Trait>`으로 완전 주입되어 의사결정 위임 완료 ✅
 
 ### main.rs
 
