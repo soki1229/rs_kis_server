@@ -210,14 +210,20 @@ pub async fn run_generic_position_task(
 
         let mut positions = Vec::new();
         for (symbol, (state, qty)) in &pos_states {
-            let current_price = last_prices.get(symbol).cloned().unwrap_or(state.entry_price);
+            let current_price = last_prices
+                .get(symbol)
+                .cloned()
+                .unwrap_or(state.entry_price);
             positions.push(Position {
                 symbol: symbol.clone(),
                 name: None,
                 qty: *qty as i64,
                 avg_price: state.entry_price,
                 current_price,
-                pnl_pct: ((current_price - state.entry_price) / state.entry_price.max(Decimal::ONE)).to_f64().unwrap_or(0.0),
+                pnl_pct: ((current_price - state.entry_price)
+                    / state.entry_price.max(Decimal::ONE))
+                .to_f64()
+                .unwrap_or(0.0),
                 unrealized_pnl: (current_price - state.entry_price) * Decimal::from(*qty),
                 stop_price: state.stop_price,
                 trailing_stop: state.trailing_stop_price,
@@ -226,10 +232,12 @@ pub async fn run_generic_position_task(
                 regime: format!("{:?}", state.regime),
             });
         }
-        live_state_tx.send(MarketLiveState {
-            positions,
-            daily_pnl_r: 0.0, // Placeholder for actual stats calculation
-            regime: format!("{:?}", *regime_rx.borrow()),
-        }).ok();
+        live_state_tx
+            .send(MarketLiveState {
+                positions,
+                daily_pnl_r: 0.0, // Placeholder for actual stats calculation
+                regime: format!("{:?}", *regime_rx.borrow()),
+            })
+            .ok();
     }
 }

@@ -474,7 +474,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         t,
     ));
 
-    kr_summary_alert.info(format!("✅ 모든 태스크 준비 완료 [{}] — 장 시작 대기 중", mode));
+    kr_summary_alert.info(format!(
+        "✅ 모든 태스크 준비 완료 [{}] — 장 시작 대기 중",
+        mode
+    ));
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C — initiating graceful shutdown");

@@ -126,7 +126,6 @@ pub struct FillInfo {
     pub exchange_code: Option<String>,
 }
 
-
 // ── PnL ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
