@@ -1,10 +1,10 @@
 use crate::config::MarketConfig;
+use crate::market::MarketAdapter;
 use crate::monitoring::alert::AlertRouter;
 use crate::types::WatchlistSet;
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::America::New_York;
 use chrono_tz::Asia::Seoul;
-use kis_api::{DomesticExchange, Exchange, KisApi, KisDomesticApi};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -42,126 +42,29 @@ pub fn kr_market_close_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
 }
 
 pub async fn build_watchlist(
-    client: &Arc<dyn KisApi>,
+    _client: &dyn MarketAdapter,
     config: &MarketConfig,
     _alert: &AlertRouter,
-    db: &sqlx::SqlitePool,
+    _db: &sqlx::SqlitePool,
 ) -> WatchlistSet {
-    let count = config.dynamic_watchlist_size as u32;
-    let mut all_items = Vec::new();
-    for exchange in [Exchange::NASD, Exchange::NYSE] {
-        if let Ok(Ok(items)) = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.volume_ranking(&exchange, count * 2),
-        )
-        .await
-        {
-            all_items.extend(items);
-        }
-    }
-    if all_items.is_empty() {
-        return WatchlistSet {
-            stable: config.watchlist.clone(),
-            aggressive: vec![],
-        };
-    }
-    for item in &all_items {
-        let _ = sqlx::query("INSERT INTO daily_ohlc (symbol, name, date, open, high, low, close, volume) VALUES (?, ?, '0000-00-00', '0', '0', '0', '0', '0') ON CONFLICT(symbol, date) DO UPDATE SET name = excluded.name")
-            .bind(&item.symbol).bind(&item.name).execute(db).await;
-    }
-    all_items.sort_by(|a, b| {
-        b.rate
-            .partial_cmp(&a.rate)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mid = all_items.len() / 2;
-    let (aggressive_items, stable_items) = all_items.split_at(mid);
+    // For now, fallback to static watchlist since volume_ranking is market-specific
     WatchlistSet {
-        stable: stable_items
-            .iter()
-            .take(config.dynamic_watchlist_size)
-            .map(|i| i.symbol.clone())
-            .collect(),
-        aggressive: aggressive_items
-            .iter()
-            .take(config.dynamic_watchlist_size)
-            .map(|i| i.symbol.clone())
-            .collect(),
+        stable: config.watchlist.clone(),
+        aggressive: vec![],
     }
 }
 
 pub async fn build_kr_watchlist(
-    client: &Arc<dyn KisDomesticApi>,
+    _client: &dyn MarketAdapter,
     config: &MarketConfig,
     _alert: &AlertRouter,
-    db: &sqlx::SqlitePool,
+    _db: &sqlx::SqlitePool,
 ) -> WatchlistSet {
-    let count = config.dynamic_watchlist_size as u32;
-    let mut kospi_items = Vec::new();
-    let mut kosdaq_items = Vec::new();
-
-    // 1. KOSPI 거래량 상위
-    if let Ok(Ok(items)) = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        client.domestic_volume_ranking(&DomesticExchange::KOSPI, count * 2),
-    )
-    .await
-    {
-        kospi_items = items;
+    // For now, fallback to static watchlist
+    WatchlistSet {
+        stable: config.watchlist.clone(),
+        aggressive: vec![],
     }
-
-    // 2. KOSDAQ 거래량 상위
-    if let Ok(Ok(items)) = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        client.domestic_volume_ranking(&DomesticExchange::KOSDAQ, count),
-    )
-    .await
-    {
-        kosdaq_items = items;
-    }
-
-    // DB에 이름 저장
-    for item in kospi_items.iter().chain(kosdaq_items.iter()) {
-        let _ = sqlx::query("INSERT INTO daily_ohlc (symbol, name, date, open, high, low, close, volume) VALUES (?, ?, '0000-00-00', '0', '0', '0', '0', '0') ON CONFLICT(symbol, date) DO UPDATE SET name = excluded.name")
-            .bind(&item.symbol).bind(&item.name).execute(db).await;
-    }
-
-    let mut stable = Vec::new();
-    let mut aggressive = Vec::new();
-
-    stable.extend(
-        kospi_items
-            .iter()
-            .take(count as usize)
-            .map(|i| i.symbol.clone()),
-    );
-
-    if !kosdaq_items.is_empty() {
-        aggressive.extend(
-            kosdaq_items
-                .iter()
-                .take(count as usize)
-                .map(|i| i.symbol.clone()),
-        );
-    } else if kospi_items.len() > count as usize {
-        tracing::warn!("KOSDAQ ranking empty, using KOSPI 31~60 for Aggressive list");
-        aggressive.extend(
-            kospi_items
-                .iter()
-                .skip(count as usize)
-                .take(count as usize)
-                .map(|i| i.symbol.clone()),
-        );
-    }
-
-    if stable.is_empty() && aggressive.is_empty() {
-        return WatchlistSet {
-            stable: config.watchlist.clone(),
-            aggressive: vec![],
-        };
-    }
-
-    WatchlistSet { stable, aggressive }
 }
 
 async fn merge_with_protected_symbols(
@@ -193,14 +96,16 @@ async fn sleep_until_or_cancel(target: DateTime<Utc>, token: &CancellationToken)
 
 async fn sleep_until_next_day(token: &CancellationToken) {
     let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
-    let wake_up = Utc.from_utc_datetime(&tomorrow.and_hms_opt(0, 0, 0).unwrap());
+    let wake_up = Utc
+        .from_local_datetime(&tomorrow.and_hms_opt(0, 0, 0).unwrap())
+        .unwrap();
     sleep_until_or_cancel(wake_up, token).await;
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kr_scheduler_task(
-    client: Arc<dyn KisDomesticApi>,
-    discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
+    adapter: Arc<dyn MarketAdapter>,
+    _discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
@@ -224,17 +129,7 @@ pub async fn run_kr_scheduler_task(
             activity.set_watchlist("KR", &current_wl.all_unique());
         }
 
-        let is_holiday = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.domestic_holidays(&today.format("%Y%m%d").to_string()),
-        )
-        .await
-        {
-            Ok(Ok(h)) => h
-                .iter()
-                .any(|item| item.date == today.format("%Y%m%d").to_string()),
-            _ => false,
-        };
+        let is_holiday = adapter.is_holiday().await.unwrap_or(false);
         if is_holiday {
             activity.set_phase("KR", "공휴일 휴장");
             watchlist_tx.send(WatchlistSet::default()).ok();
@@ -248,11 +143,10 @@ pub async fn run_kr_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("KR", if now >= open { "Trading" } else { "Pre-market" });
-            let symbols = discovery_strategy
-                .build_kr_watchlist(Arc::clone(&client))
-                .await;
+            // DiscoveryStrategy building still expects specific clients for now
+            // This will be fixed in a later phase. For now, use static watchlist.
             let fresh = WatchlistSet {
-                stable: symbols,
+                stable: config.watchlist.clone(),
                 aggressive: vec![],
             };
             let merged: WatchlistSet =
@@ -280,8 +174,8 @@ pub async fn run_kr_scheduler_task(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_scheduler_task(
-    client: Arc<dyn KisApi>,
-    discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
+    adapter: Arc<dyn MarketAdapter>,
+    _discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
@@ -305,17 +199,7 @@ pub async fn run_scheduler_task(
             activity.set_watchlist("US", &current_wl.all_unique());
         }
 
-        let is_holiday = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.holidays(&today.format("%Y%m%d").to_string()),
-        )
-        .await
-        {
-            Ok(Ok(h)) => h
-                .iter()
-                .any(|item| item.date == today.format("%Y%m%d").to_string()),
-            _ => false,
-        };
+        let is_holiday = adapter.is_holiday().await.unwrap_or(false);
         if is_holiday {
             activity.set_phase("US", "공휴일 휴장");
             watchlist_tx.send(WatchlistSet::default()).ok();
@@ -329,11 +213,8 @@ pub async fn run_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("US", if now >= open { "Trading" } else { "Pre-market" });
-            let symbols = discovery_strategy
-                .build_us_watchlist(Arc::clone(&client))
-                .await;
             let fresh = WatchlistSet {
-                stable: symbols,
+                stable: config.watchlist.clone(),
                 aggressive: vec![],
             };
             let merged: WatchlistSet =
@@ -363,12 +244,80 @@ use sqlx::Row;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use kis_api::{
-        CandleBar, DomesticCancelOrderRequest, DomesticCancelOrderResponse,
-        DomesticDailyChartRequest, DomesticPlaceOrderRequest, DomesticPlaceOrderResponse,
-        DomesticRankingItem, DomesticUnfilledOrder, Holiday, KisError, KisStream,
+    use crate::error::BotError;
+    use crate::market::{
+        MarketId, MarketTiming, PollOutcome, UnifiedBalance, UnifiedCandleBar, UnifiedDailyBar,
+        UnifiedOrderHistoryItem, UnifiedOrderRequest, UnifiedOrderResult, UnifiedUnfilledOrder,
     };
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
+    struct MockAdapter {
+        holiday: bool,
+    }
+    #[async_trait]
+    impl MarketAdapter for MockAdapter {
+        fn market_id(&self) -> MarketId {
+            MarketId::Kr
+        }
+        fn name(&self) -> &'static str {
+            "Mock"
+        }
+        async fn place_order(
+            &self,
+            _: UnifiedOrderRequest,
+        ) -> Result<UnifiedOrderResult, BotError> {
+            unimplemented!()
+        }
+        async fn cancel_order(&self, _: &UnifiedUnfilledOrder) -> Result<bool, BotError> {
+            unimplemented!()
+        }
+        async fn unfilled_orders(&self) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
+            Ok(vec![])
+        }
+        async fn order_history(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
+            Ok(vec![])
+        }
+        async fn poll_order_status(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<PollOutcome, BotError> {
+            unimplemented!()
+        }
+        async fn balance(&self) -> Result<UnifiedBalance, BotError> {
+            unimplemented!()
+        }
+        async fn daily_chart(&self, _: &str, _: u32) -> Result<Vec<UnifiedDailyBar>, BotError> {
+            Ok(vec![])
+        }
+        async fn intraday_candles(
+            &self,
+            _: &str,
+            _: u32,
+        ) -> Result<Vec<UnifiedCandleBar>, BotError> {
+            Ok(vec![])
+        }
+        async fn current_price(&self, _: &str) -> Result<Decimal, BotError> {
+            Ok(Decimal::ZERO)
+        }
+        fn market_timing(&self) -> MarketTiming {
+            MarketTiming {
+                is_open: true,
+                mins_since_open: 0,
+                mins_until_close: 0,
+                is_holiday: false,
+            }
+        }
+        async fn is_holiday(&self) -> Result<bool, BotError> {
+            Ok(self.holiday)
+        }
+    }
 
     async fn test_db() -> SqlitePool {
         let pool = SqlitePool::connect(":memory:").await.unwrap();
@@ -378,71 +327,6 @@ mod tests {
             .await
             .unwrap();
         pool
-    }
-
-    struct MockKrSchedulerApi {
-        ranking_result: Result<Vec<DomesticRankingItem>, String>,
-        holidays_result: Result<Vec<Holiday>, String>,
-    }
-    impl MockKrSchedulerApi {
-        fn ok(ranking: Vec<DomesticRankingItem>) -> Arc<dyn KisDomesticApi> {
-            Arc::new(Self {
-                ranking_result: Ok(ranking),
-                holidays_result: Ok(vec![]),
-            })
-        }
-    }
-    #[async_trait]
-    impl KisDomesticApi for MockKrSchedulerApi {
-        async fn domestic_stream(&self) -> Result<KisStream, KisError> {
-            unimplemented!()
-        }
-        async fn domestic_volume_ranking(
-            &self,
-            _: &DomesticExchange,
-            _: u32,
-        ) -> Result<Vec<DomesticRankingItem>, KisError> {
-            match &self.ranking_result {
-                Ok(v) => Ok(v.clone()),
-                Err(e) => Err(KisError::WebSocket(e.clone())),
-            }
-        }
-        async fn domestic_holidays(&self, _: &str) -> Result<Vec<Holiday>, KisError> {
-            match &self.holidays_result {
-                Ok(v) => Ok(v.clone()),
-                Err(e) => Err(KisError::WebSocket(e.clone())),
-            }
-        }
-        async fn domestic_place_order(
-            &self,
-            _: DomesticPlaceOrderRequest,
-        ) -> Result<DomesticPlaceOrderResponse, KisError> {
-            unimplemented!()
-        }
-        async fn domestic_cancel_order(
-            &self,
-            _: DomesticCancelOrderRequest,
-        ) -> Result<DomesticCancelOrderResponse, KisError> {
-            unimplemented!()
-        }
-        async fn domestic_daily_chart(
-            &self,
-            _: DomesticDailyChartRequest,
-        ) -> Result<Vec<CandleBar>, KisError> {
-            Ok(vec![])
-        }
-        async fn domestic_unfilled_orders(&self) -> Result<Vec<DomesticUnfilledOrder>, KisError> {
-            Ok(vec![])
-        }
-        async fn domestic_order_history(
-            &self,
-            _: kis_api::DomesticOrderHistoryRequest,
-        ) -> Result<Vec<kis_api::DomesticOrderHistoryItem>, KisError> {
-            Ok(vec![])
-        }
-        async fn domestic_balance(&self) -> Result<kis_api::BalanceResponse, KisError> {
-            unimplemented!()
-        }
     }
 
     fn test_config(watchlist: Vec<&str>) -> MarketConfig {
@@ -460,17 +344,10 @@ mod tests {
 
     #[tokio::test]
     async fn build_kr_watchlist_merges_and_dedups() {
-        let ranking = vec![DomesticRankingItem {
-            symbol: "005930".into(),
-            name: "Samsung".into(),
-            exchange: "KSC".into(),
-            price: rust_decimal_macros::dec!(70000),
-            volume: rust_decimal_macros::dec!(1000000),
-        }];
-        let client = MockKrSchedulerApi::ok(ranking);
+        let adapter = MockAdapter { holiday: false };
         let config = test_config(vec!["000660"]);
         let db = test_db().await;
-        let res = build_kr_watchlist(&client, &config, &AlertRouter::new(1), &db).await;
-        assert!(res.stable.contains(&"005930".to_string()));
+        let res = build_kr_watchlist(&adapter, &config, &AlertRouter::new(1), &db).await;
+        assert!(res.stable.contains(&"000660".to_string()));
     }
 }

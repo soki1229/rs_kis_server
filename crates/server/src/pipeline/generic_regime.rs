@@ -45,8 +45,8 @@ pub fn build_regime_input(bars: &[crate::market::UnifiedDailyBar]) -> Option<Reg
 }
 
 /// Generic regime task that works with any MarketAdapter.
-pub async fn run_generic_regime_task<M: MarketAdapter>(
-    adapter: Arc<M>,
+pub async fn run_generic_regime_task(
+    adapter: Arc<dyn MarketAdapter>,
     regime_strategy: Arc<dyn crate::strategy::RegimeStrategy>,
     regime_tx: RegimeSender,
     alert: AlertRouter,

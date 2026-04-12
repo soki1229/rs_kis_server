@@ -152,12 +152,17 @@ pub struct MarketAdapters {
 
 impl MarketAdapters {
     /// Create market adapters from KIS API clients.
-    pub fn new(kr_client: Arc<dyn KisDomesticApi>, us_client: Arc<dyn KisApi>) -> Self {
+    pub fn new(
+        kr_real: Arc<dyn KisDomesticApi>,
+        us_real: Arc<dyn KisApi>,
+        kr_vts: Arc<dyn KisDomesticApi>,
+        us_vts: Arc<dyn KisApi>,
+    ) -> Self {
         Self {
-            kr_real: Arc::new(KrRealAdapter::new(Arc::clone(&kr_client))),
-            kr_vts: Arc::new(KrVtsAdapter::new(kr_client)),
-            us_real: Arc::new(UsRealAdapter::new(Arc::clone(&us_client))),
-            us_vts: Arc::new(UsVtsAdapter::new(us_client)),
+            kr_real: Arc::new(KrRealAdapter::new(kr_real)),
+            kr_vts: Arc::new(KrVtsAdapter::new(kr_vts)),
+            us_real: Arc::new(UsRealAdapter::new(us_real)),
+            us_vts: Arc::new(UsVtsAdapter::new(us_vts)),
         }
     }
 }

@@ -1,3 +1,4 @@
+use crate::market::MarketAdapter;
 use crate::monitoring::alert::AlertRouter;
 use crate::pipeline::{QuoteSnapshot, TickData};
 use crate::state::BotState;
@@ -7,7 +8,7 @@ use crate::strategy::{
 };
 use crate::types::MarketRegime;
 use crate::types::{OrderRequest, Side, WatchlistSet};
-use kis_api::{CandleBar, DomesticExchange, KisApi, KisDomesticApi};
+use kis_api::CandleBar;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicU32;
@@ -98,7 +99,6 @@ struct SignalState {
     watchlist: WatchlistSet,
     candle_start: HashMap<String, Instant>,
     cached_balance: Option<(Decimal, Instant)>,
-    symbol_exchange: HashMap<String, DomesticExchange>,
     us_exchange: HashMap<String, String>,
     pending_symbols: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     llm_fail_count: Arc<AtomicU32>,
@@ -345,7 +345,7 @@ pub async fn run_signal_task(
     order_tx: mpsc::Sender<OrderRequest>,
     regime_rx: watch::Receiver<MarketRegime>,
     db_pool: sqlx::SqlitePool,
-    client: Arc<dyn KisApi>,
+    adapter: Arc<dyn MarketAdapter>,
     mut watchlist_rx: watch::Receiver<WatchlistSet>,
     summary: Arc<StdRwLock<crate::state::MarketSummary>>,
     alert: AlertRouter,
@@ -370,7 +370,6 @@ pub async fn run_signal_task(
         watchlist: WatchlistSet::default(),
         candle_start: HashMap::new(),
         cached_balance: None,
-        symbol_exchange: HashMap::new(),
         us_exchange: HashMap::new(),
         pending_symbols: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         llm_fail_count: Arc::new(AtomicU32::new(0)),
@@ -385,6 +384,8 @@ pub async fn run_signal_task(
             .insert(sym.clone(), CandleAccumulator::new(&sym));
     }
 
+    let market_label = adapter.market_id().label().to_string();
+
     loop {
         tokio::select! {
             _ = token.cancelled() => return,
@@ -395,7 +396,7 @@ pub async fn run_signal_task(
                 state.watchlist = wl_set;
                 if !new_syms.is_empty() {
                     let mut news_cache = HashMap::new();
-                    let (exch_map, _bad): (HashMap<String, String>, std::collections::HashSet<String>) = seed_symbols(&new_syms, &client, &db_pool, &mut news_cache, false).await;
+                    let (exch_map, _bad): (HashMap<String, String>, std::collections::HashSet<String>) = seed_symbols(&new_syms, adapter.as_ref(), &db_pool, &mut news_cache, false).await;
                     state.us_exchange.extend(exch_map);
                 }
                 for sym in &new_wl { if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new(sym)); } }
@@ -410,15 +411,14 @@ pub async fn run_signal_task(
                     let completed_candle = CompletedCandle { open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume, ts: tick.timestamp };
                     let cq = state.completed.entry(tick.symbol.clone()).or_default();
                     cq.push_back(completed_candle); if cq.len() > MAX_COMPLETED_CANDLES { cq.pop_front(); }
-                    let mins_until_close = { use chrono_tz::America::New_York; let et_now = chrono::Utc::now().with_timezone(&New_York);
-                        let market_close = et_now.date_naive().and_hms_opt(16, 0, 0).unwrap();
-                        let market_close_utc = chrono::NaiveDateTime::and_local_timezone(&market_close, New_York).unwrap().to_utc();
-                        (market_close_utc - chrono::Utc::now()).num_minutes().max(0)
-                    };
+
+                    let timing = adapter.market_timing();
+                    let mins_until_close = timing.mins_until_close;
+
                     if state.cached_balance.map(|(_, t)| t.elapsed().as_secs() >= BALANCE_CACHE_TTL_SECS).unwrap_or(true) {
-                        match client.balance().await {
-                            Ok(resp) => { state.cached_balance = Some((resp.summary.purchase_amount, Instant::now())); }
-                            Err(e) => { tracing::error!("UsSignalTask: balance() failed: {e}"); }
+                        match adapter.balance().await {
+                            Ok(resp) => { state.cached_balance = Some((resp.available_cash, Instant::now())); }
+                            Err(e) => { tracing::error!(market = %market_label, "SignalTask: balance() failed: {e}"); }
                         }
                     }
                     let account_balance = state.cached_balance.map(|(v, _)| v).unwrap_or(Decimal::ZERO);
@@ -427,7 +427,8 @@ pub async fn run_signal_task(
                     let pool = db_pool.clone(); let order_tx = order_tx.clone(); let regime = regime_rx.borrow().clone();
                     let completed_snap = cq.iter().cloned().collect::<Vec<_>>(); let quote_snap = state.latest_quotes.get(&sym_for_eval).cloned();
                     let summary_clone = summary.clone(); let sem = llm_semaphore.clone();
-                    let pc = pending_count.clone(); let us_exchange_code = Some(state.us_exchange.get(&sym_for_eval).cloned().unwrap_or_else(|| "NASD".to_string()));
+                    let pc = pending_count.clone();
+                    let ex_code = state.us_exchange.get(&sym_for_eval).cloned();
                     let rc = risk_cfg.clone(); let sc = signal_cfg.clone(); let ps_clone = Arc::clone(&state.pending_symbols);
                     let permit = eval_sem.clone().acquire_owned().await.unwrap();
                     let llm_fail_count = Arc::clone(&state.llm_fail_count); let act = activity.clone(); let strategies_snap = strategies.clone(); let notion_clone = notion.clone();
@@ -436,6 +437,7 @@ pub async fn run_signal_task(
                     let q_strat = Arc::clone(&qual_strategy);
                     let r_strat = Arc::clone(&risk_strategy);
                     let live_rx = live_state_rx.clone();
+                    let market_name_inner = market_label.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
@@ -443,131 +445,9 @@ pub async fn run_signal_task(
                         let _guard = PendingGuard(ps_clone, sym_for_guard);
                         for strategy in strategies_snap {
                             evaluate_and_maybe_order(SignalContext {
-                                symbol: sym_for_eval.clone(), market: "US".to_string(), db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
+                                symbol: sym_for_eval.clone(), market: market_name_inner.clone(), db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
                                 completed: completed_snap.clone(), quote: quote_snap.clone(), rolling_highs: vec![],
-                                summary: summary_clone.clone(), mins_until_close, account_balance, exchange_code: us_exchange_code.clone(),
-                                risk_cfg: rc.clone(), signal_cfg: sc.clone(), strategy, activity: act.clone(), notion: notion_clone.clone(),
-                                alert: alert_router.clone(), llm_sem: sem.clone(), llm_fail_count: llm_fail_count.clone(), pending_count: pc.clone(),
-                                signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
-                                live_state_rx: live_rx.clone(),
-                            }).await;
-                        }
-                    });
-                    candle.reset(); state.candle_start.insert(tick.symbol.clone(), Instant::now());
-                }
-            }
-            snap = quote_rx.recv() => if let Some(s) = snap { state.latest_quotes.insert(s.symbol.clone(), s); }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_kr_signal_task(
-    mut tick_rx: broadcast::Receiver<TickData>,
-    mut quote_rx: mpsc::Receiver<QuoteSnapshot>,
-    order_tx: mpsc::Sender<OrderRequest>,
-    regime_rx: watch::Receiver<MarketRegime>,
-    db_pool: sqlx::SqlitePool,
-    client: Arc<dyn KisDomesticApi>,
-    mut watchlist_rx: watch::Receiver<WatchlistSet>,
-    summary: Arc<StdRwLock<crate::state::MarketSummary>>,
-    alert: AlertRouter,
-    pending_count: Arc<AtomicU32>,
-    risk_cfg: crate::config::RiskConfig,
-    signal_cfg: crate::config::SignalConfig,
-    strategies: Vec<crate::config::StrategyProfile>,
-    activity: crate::shared::activity::ActivityLog,
-    notion: Option<Arc<TokioRwLock<crate::notion::NotionClient>>>,
-    live_state_rx: watch::Receiver<crate::state::MarketLiveState>,
-    signal_strategy: Arc<dyn SignalStrategy>,
-    qual_strategy: Arc<dyn QualificationStrategy>,
-    risk_strategy: Arc<dyn RiskStrategy>,
-    token: tokio_util::sync::CancellationToken,
-) {
-    let eval_sem = Arc::new(tokio::sync::Semaphore::new(20));
-    let mut state = SignalState {
-        candles: HashMap::new(),
-        completed: HashMap::new(),
-        latest_quotes: HashMap::new(),
-        rolling_highs: HashMap::new(),
-        watchlist: WatchlistSet::default(),
-        candle_start: HashMap::new(),
-        cached_balance: None,
-        symbol_exchange: HashMap::new(),
-        us_exchange: HashMap::new(),
-        pending_symbols: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        llm_fail_count: Arc::new(AtomicU32::new(0)),
-    };
-    let llm_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-    let candle_interval = Duration::from_secs(signal_cfg.candle_interval_secs);
-    let initial_wl = watchlist_rx.borrow().clone();
-    state.watchlist = initial_wl.clone();
-    for sym in initial_wl.all_unique() {
-        state
-            .candles
-            .insert(sym.clone(), CandleAccumulator::new(&sym));
-    }
-
-    loop {
-        tokio::select! {
-            _ = token.cancelled() => return,
-            Ok(_) = watchlist_rx.changed() => {
-                let wl_set = watchlist_rx.borrow().clone();
-                let new_wl = wl_set.all_unique();
-                let new_syms: Vec<String> = new_wl.iter().filter(|s| !state.watchlist.all_unique().contains(s)).cloned().collect();
-                state.watchlist = wl_set;
-                if !new_syms.is_empty() {
-                    let (ex_map, _bad): (HashMap<String, DomesticExchange>, std::collections::HashSet<String>) = seed_kr_symbols(&new_syms, &client, &db_pool, false).await;
-                    state.symbol_exchange.extend(ex_map);
-                }
-                for sym in &new_wl { if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new(sym)); } }
-            }
-            Ok(tick) = tick_rx.recv() => {
-                if state.watchlist.all_unique().is_empty() { state.watchlist = watchlist_rx.borrow().clone(); }
-                if !state.watchlist.all_unique().contains(&tick.symbol) { continue; }
-                let candle = state.candles.entry(tick.symbol.clone()).or_insert_with(|| CandleAccumulator::new(&tick.symbol));
-                candle.push(tick.clone());
-                if state.candle_start.entry(tick.symbol.clone()).or_insert_with(Instant::now).elapsed() >= candle_interval && candle.is_signal_eligible() {
-                    tracing::info!(symbol = %tick.symbol, "🕯️ 캔들 완성 (분석 시작)");
-                    let completed_candle = CompletedCandle { open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume, ts: tick.timestamp };
-                    let cq = state.completed.entry(tick.symbol.clone()).or_default();
-                    cq.push_back(completed_candle); if cq.len() > MAX_COMPLETED_CANDLES { cq.pop_front(); }
-                    let mins_until_close = { use chrono_tz::Asia::Seoul; let kst_now = chrono::Utc::now().with_timezone(&Seoul);
-                        let market_close = kst_now.date_naive().and_hms_opt(15, 30, 0).unwrap();
-                        let market_close_utc = chrono::NaiveDateTime::and_local_timezone(&market_close, Seoul).unwrap().to_utc();
-                        (market_close_utc - chrono::Utc::now()).num_minutes().max(0)
-                    };
-                    if state.cached_balance.map(|(_, t)| t.elapsed().as_secs() >= BALANCE_CACHE_TTL_SECS).unwrap_or(true) {
-                        match client.domestic_balance().await {
-                            Ok(resp) => { state.cached_balance = Some((resp.summary.purchase_amount, Instant::now())); }
-                            Err(e) => { tracing::error!("KrSignalTask: domestic_balance() failed: {e}"); }
-                        }
-                    }
-                    let kr_account_balance = state.cached_balance.map(|(v, _)| v).unwrap_or(Decimal::ZERO);
-                    { let mut ps = state.pending_symbols.lock().unwrap(); if ps.contains(&tick.symbol) { candle.reset(); continue; } ps.insert(tick.symbol.clone()); }
-                    let sym_for_eval = tick.symbol.clone(); let sym_for_guard = tick.symbol.clone();
-                    let pool = db_pool.clone(); let order_tx = order_tx.clone(); let regime = regime_rx.borrow().clone();
-                    let completed_snap = cq.iter().cloned().collect::<Vec<_>>(); let quote_snap = state.latest_quotes.get(&sym_for_eval).cloned();
-                    let summary_clone = summary.clone(); let sem = llm_semaphore.clone();
-                    let pc = pending_count.clone(); let kr_exchange_code = Some(state.symbol_exchange.get(&sym_for_eval).map(|ex| ex.market_code().to_string()).unwrap_or_else(|| "J".to_string()));
-                    let rc = risk_cfg.clone(); let sc = signal_cfg.clone(); let ps_clone = Arc::clone(&state.pending_symbols);
-                    let permit = eval_sem.clone().acquire_owned().await.unwrap();
-                    let llm_fail_count = Arc::clone(&state.llm_fail_count); let act = activity.clone(); let strategies_snap = strategies.clone(); let notion_clone = notion.clone();
-                    let alert_router = alert.clone();
-                    let sig_strat = Arc::clone(&signal_strategy);
-                    let q_strat = Arc::clone(&qual_strategy);
-                    let r_strat = Arc::clone(&risk_strategy);
-                    let live_rx = live_state_rx.clone();
-                    tokio::spawn(async move {
-                        let _permit = permit;
-                        struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
-                        impl Drop for PendingGuard { fn drop(&mut self) { self.0.lock().unwrap().remove(&self.1); } }
-                        let _guard = PendingGuard(ps_clone, sym_for_guard);
-                        for strategy in strategies_snap {
-                            evaluate_and_maybe_order(SignalContext {
-                                symbol: sym_for_eval.clone(), market: "KR".to_string(), db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
-                                completed: completed_snap.clone(), quote: quote_snap.clone(), rolling_highs: vec![],
-                                summary: summary_clone.clone(), mins_until_close, account_balance: kr_account_balance, exchange_code: kr_exchange_code.clone(),
+                                summary: summary_clone.clone(), mins_until_close, account_balance, exchange_code: ex_code.clone(),
                                 risk_cfg: rc.clone(), signal_cfg: sc.clone(), strategy, activity: act.clone(), notion: notion_clone.clone(),
                                 alert: alert_router.clone(), llm_sem: sem.clone(), llm_fail_count: llm_fail_count.clone(), pending_count: pc.clone(),
                                 signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
@@ -585,7 +465,7 @@ pub async fn run_kr_signal_task(
 
 pub async fn seed_symbols(
     wl: &[String],
-    client: &Arc<dyn KisApi>,
+    adapter: &dyn MarketAdapter,
     pool: &sqlx::SqlitePool,
     _news_cache: &mut HashMap<String, (bool, Instant)>,
     force: bool,
@@ -605,84 +485,16 @@ pub async fn seed_symbols(
             continue;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
-        match client
-            .daily_chart(kis_api::DailyChartRequest {
-                symbol: sym.clone(),
-                exchange: kis_api::Exchange::NASD,
-                period: kis_api::ChartPeriod::Daily,
-                adj_price: true,
-            })
-            .await
-        {
+        match adapter.daily_chart(sym, 150).await {
             Ok(bars) => {
                 let bar_count = bars.len();
                 for b in bars {
+                    let date_str = b.date.format("%Y%m%d").to_string();
                     let _ = sqlx::query("INSERT OR REPLACE INTO daily_ohlc (symbol, date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)")
-                        .bind(sym).bind(b.date).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
-                }
-                tracing::info!(symbol = %sym, bars = bar_count, "US History seeded successfully");
-                exch_map.insert(sym.clone(), "NASD".to_string());
-            }
-            Err(_) => {
-                bad.insert(sym.clone());
-            }
-        }
-    }
-    (exch_map, bad)
-}
-
-pub async fn seed_kr_symbols(
-    wl: &[String],
-    client: &Arc<dyn KisDomesticApi>,
-    pool: &sqlx::SqlitePool,
-    force: bool,
-) -> (
-    HashMap<String, DomesticExchange>,
-    std::collections::HashSet<String>,
-) {
-    let mut exch_map = HashMap::new();
-    let mut bad = std::collections::HashSet::new();
-    for sym in wl {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM daily_ohlc WHERE symbol = ? AND date != '0000-00-00'",
-        )
-        .bind(sym)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-        let exchange = if sym.starts_with('0') || sym.starts_with('3') {
-            DomesticExchange::KOSPI
-        } else {
-            DomesticExchange::KOSDAQ
-        };
-        if !force && count >= 30 {
-            exch_map.insert(sym.clone(), exchange);
-            continue;
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let today_str = chrono::Local::now().format("%Y%m%d").to_string();
-        let start_date_str = (chrono::Local::now() - chrono::Duration::days(150))
-            .format("%Y%m%d")
-            .to_string();
-        match client
-            .domestic_daily_chart(kis_api::DomesticDailyChartRequest {
-                symbol: sym.clone(),
-                exchange,
-                period: kis_api::ChartPeriod::Daily,
-                adj_price: true,
-                start_date: Some(start_date_str),
-                end_date: Some(today_str),
-            })
-            .await
-        {
-            Ok(bars) => {
-                let bar_count = bars.len();
-                for b in bars {
-                    let _ = sqlx::query("INSERT OR REPLACE INTO daily_ohlc (symbol, date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)")
-                        .bind(sym).bind(b.date).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
+                        .bind(sym).bind(date_str).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
                 }
                 tracing::info!(symbol = %sym, bars = bar_count, "History seeded successfully");
-                exch_map.insert(sym.clone(), exchange);
+                exch_map.insert(sym.clone(), "NASD".to_string());
             }
             Err(_) => {
                 bad.insert(sym.clone());

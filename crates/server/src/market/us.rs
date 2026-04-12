@@ -88,7 +88,7 @@ impl UsMarketBase {
             }
             Err(e) => {
                 tracing::warn!(
-                    "UsMarketAdapter: order_history error for {}: {}",
+                    "UsMarketBase: order_history error for {}: {}",
                     broker_order_no,
                     e
                 );

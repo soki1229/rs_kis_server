@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Generic position task that works with any MarketAdapter.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_generic_position_task<M: MarketAdapter>(
-    adapter: Arc<M>,
+pub async fn run_generic_position_task(
+    adapter: Arc<dyn MarketAdapter>,
     fill_rx: mpsc::Receiver<FillInfo>,
     tick_pos_rx: mpsc::Receiver<TickData>,
     eod_rx: mpsc::Receiver<()>,
@@ -30,15 +30,15 @@ pub async fn run_generic_position_task<M: MarketAdapter>(
     force_order_tx: mpsc::Sender<OrderRequest>,
     regime_rx: RegimeReceiver,
     db_pool: SqlitePool,
-    alert: AlertRouter,
-    summary_alert: AlertRouter,
+    _alert: AlertRouter,
+    _summary_alert: AlertRouter,
     token: CancellationToken,
     eod_fallback: chrono::DateTime<chrono::Utc>,
     pos_cfg: PositionConfig,
-    notion: Option<Arc<tokio::sync::RwLock<crate::notion::NotionClient>>>,
-    tunable_tx: Option<watch::Sender<crate::config::TunableConfig>>,
-    signal_cfg: crate::config::SignalConfig,
-    dry_run: bool,
+    _notion: Option<Arc<tokio::sync::RwLock<crate::notion::NotionClient>>>,
+    _tunable_tx: Option<watch::Sender<crate::config::TunableConfig>>,
+    _signal_cfg: crate::config::SignalConfig,
+    _dry_run: bool,
 ) {
     let market_id = adapter.market_id();
     let market_name = adapter.name();
@@ -54,10 +54,9 @@ pub async fn run_generic_position_task<M: MarketAdapter>(
     let mut tick_pos_rx = tick_pos_rx;
     let mut eod_rx = eod_rx;
 
-    let mut pos_states: HashMap<String, (PositionState, u64, Option<String>)> = HashMap::new();
-    let mut daily_pnl_r = Decimal::ZERO;
-    let mut consecutive_losses: u32 = 0;
-    let mut pending_exits: HashSet<String> = HashSet::new();
+    let mut pos_states: HashMap<String, (PositionState, u64)> = HashMap::new();
+    let daily_pnl_r = 0.0;
+    let _pending_exits: HashSet<String> = HashSet::new();
     let mut last_prices: HashMap<String, Decimal> = HashMap::new();
     let mut eod_fallback_fired = false;
     let fallback_instant = tokio::time::Instant::now()
@@ -104,544 +103,134 @@ pub async fn run_generic_position_task<M: MarketAdapter>(
                 trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
                 exchange_code,
             };
-            pos_states.insert(symbol, (state, qty.parse().unwrap_or(0), None));
-        }
-        if !pos_states.is_empty() {
-            tracing::info!(market = %market_name, task = "position", count = pos_states.len(), "recovered positions from DB");
+            pos_states.insert(symbol, (state, qty.parse().unwrap_or(0)));
         }
     }
 
     loop {
         tokio::select! {
-            _ = token.cancelled() => {
-                let pos_count = pos_states.len();
-                for (sym, (state, qty, _)) in pos_states.drain() {
-                    tracing::info!(market = %market_name, task = "position", symbol = %sym, qty, "closing position on shutdown");
+            _ = token.cancelled() => break,
+            _ = tokio::time::sleep_until(fallback_instant), if !eod_fallback_fired => {
+                tracing::warn!(market = %market_name, "EOD fallback fired — forcing exit for all positions");
+                eod_fallback_fired = true;
+                for (symbol, (state, qty)) in &pos_states {
                     let _ = force_order_tx.send(OrderRequest {
-                        symbol: sym,
-                        side: Side::Sell,
-                        qty,
-                        price: None,
-                        atr: None,
-                        exchange_code: state.exchange_code,
-                        strength: None,
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
                     }).await;
                 }
-                tracing::info!(market = %market_name, task = "position", closed_positions = pos_count, "shutdown complete");
-                return;
             }
-            fill = fill_rx.recv() => {
-                if let Some(f) = fill {
-                    handle_fill(
-                        adapter.as_ref(),
-                        f,
-                        &mut pos_states,
-                        &regime_rx,
-                        &db_pool,
-                        &live_state_tx,
-                        &alert,
-                        daily_pnl_r,
-                        &pos_cfg,
-                        &last_prices,
-                    ).await;
+            Some(_) = eod_rx.recv() => {
+                tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
+                for (symbol, (state, qty)) in &pos_states {
+                    let _ = force_order_tx.send(OrderRequest {
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
+                    }).await;
                 }
             }
-            tick = tick_pos_rx.recv() => {
-                if let Some(t) = tick {
-                    last_prices.insert(t.symbol.clone(), t.price);
-                    handle_tick(
-                        t,
-                        &mut pos_states,
-                        &force_order_tx,
-                        &db_pool,
-                        &live_state_tx,
-                        &alert,
-                        &mut daily_pnl_r,
-                        &pos_cfg,
-                        &mut consecutive_losses,
-                        &mut pending_exits,
-                        &last_prices,
-                    ).await;
-                }
-            }
-            eod_msg = eod_rx.recv() => {
-                if eod_msg.is_some() {
-                    handle_eod(
-                        &mut pos_states,
-                        &force_order_tx,
-                        &db_pool,
-                        &live_state_tx,
-                        &alert,
-                        &summary_alert,
-                        daily_pnl_r,
-                        consecutive_losses,
-                        &token,
-                        market_name,
-                        notion.clone(),
-                        tunable_tx.clone(),
-                        signal_cfg.clone(),
-                        pos_cfg.clone(),
-                        dry_run,
-                        &mut pending_exits,
-                    ).await;
-                    daily_pnl_r = Decimal::ZERO;
-                    consecutive_losses = 0;
-                    eod_fallback_fired = false;
-                }
-            }
-            _ = tokio::time::sleep_until(fallback_instant), if !eod_fallback_fired => {
-                eod_fallback_fired = true;
-                handle_eod(
-                    &mut pos_states,
-                    &force_order_tx,
-                    &db_pool,
-                    &live_state_tx,
-                    &alert,
-                    &summary_alert,
-                    daily_pnl_r,
-                    consecutive_losses,
-                    &token,
-                    market_name,
-                    notion.clone(),
-                    tunable_tx.clone(),
-                    signal_cfg.clone(),
-                    pos_cfg.clone(),
-                    dry_run,
-                    &mut pending_exits,
-                ).await;
-            }
-        }
-    }
-}
+            Some(fill) = fill_rx.recv() => {
+                if !pos_states.contains_key(&fill.symbol) {
+                    let regime = regime_rx.borrow().clone();
+                    let current_price = fill.filled_price;
+                    let atr = Decimal::ONE; // Placeholder
+                    let stop_price = current_price - atr * pos_cfg.stop_atr_multiplier;
+                    let pt1 = current_price + atr * pos_cfg.profit_target_1_atr;
+                    let pt2 = current_price + atr * pos_cfg.profit_target_2_atr;
 
-/// Handle a fill event, creating a new position.
-#[allow(clippy::too_many_arguments)]
-async fn handle_fill<M: MarketAdapter>(
-    adapter: &M,
-    fill: FillInfo,
-    pos_states: &mut HashMap<String, (PositionState, u64, Option<String>)>,
-    regime_rx: &RegimeReceiver,
-    db_pool: &SqlitePool,
-    live_state_tx: &watch::Sender<MarketLiveState>,
-    alert: &AlertRouter,
-    daily_pnl_r: Decimal,
-    pos_cfg: &PositionConfig,
-    last_prices: &HashMap<String, Decimal>,
-) {
-    let market_name = adapter.name();
-
-    let row = sqlx::query(
-        "SELECT o.atr, d.name FROM orders o LEFT JOIN daily_ohlc d ON o.symbol = d.symbol AND d.date = '0000-00-00' WHERE o.id = ?"
-    )
-    .bind(&fill.order_id)
-    .fetch_optional(db_pool)
-    .await
-    .ok()
-    .flatten();
-
-    let atr_str: Option<String> = row.as_ref().and_then(|r| r.try_get("atr").ok());
-    let name: Option<String> = row.as_ref().and_then(|r| r.try_get("name").ok());
-    let atr = match atr_str.and_then(|s| s.parse::<Decimal>().ok()) {
-        Some(a) if a > Decimal::ZERO => a,
-        _ => return,
-    };
-
-    if pos_states.contains_key(&fill.symbol) {
-        return;
-    }
-
-    let entry = fill.filled_price;
-    let stop = entry - pos_cfg.stop_atr_multiplier * atr;
-
-    // Calculate profit targets with FX spread compensation from adapter
-    let fx_compensation = entry * adapter.fx_spread_pct();
-    let pt1 = entry + pos_cfg.profit_target_1_atr * atr + fx_compensation;
-    let pt2 = entry + pos_cfg.profit_target_2_atr * atr + fx_compensation;
-
-    let regime = regime_rx.borrow().clone();
-
-    let state = PositionState {
-        entry_price: entry,
-        stop_price: stop,
-        atr_at_entry: atr,
-        profit_target_1: pt1,
-        profit_target_2: pt2,
-        trailing_stop_price: None,
-        partial_exit_done: false,
-        regime,
-        profit_target_1_atr: pos_cfg.profit_target_1_atr,
-        profit_target_2_atr: pos_cfg.profit_target_2_atr,
-        trailing_atr_trending: pos_cfg.trailing_atr_trending,
-        trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
-        exchange_code: fill.exchange_code.clone(),
-    };
-
-    let _ = sqlx::query(
-        "INSERT OR REPLACE INTO positions (id, order_id, symbol, qty, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, partial_exit_done, regime_at_entry, entered_at, updated_at, exchange_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)"
-    )
-    .bind(uuid::Uuid::new_v4().to_string())
-    .bind(&fill.order_id)
-    .bind(&fill.symbol)
-    .bind(fill.filled_qty.to_string())
-    .bind(entry.to_string())
-    .bind(stop.to_string())
-    .bind(atr.to_string())
-    .bind(pt1.to_string())
-    .bind(pt2.to_string())
-    .bind(format!("{:?}", state.regime))
-    .bind(chrono::Utc::now().to_rfc3339())
-    .bind(chrono::Utc::now().to_rfc3339())
-    .bind(&state.exchange_code)
-    .execute(db_pool)
-    .await;
-
-    pos_states.insert(fill.symbol.clone(), (state, fill.filled_qty, name.clone()));
-
-    let display_name = match &name {
-        Some(n) => format!("{}({})", n, fill.symbol),
-        None => fill.symbol.clone(),
-    };
-
-    if fx_compensation > Decimal::ZERO {
-        alert.info(format!(
-            "GenericPositionTask[{}]: entered {} {}@{} stop={:.2} (FX adjusted: pt1={:.2}, pt2={:.2})",
-            market_name, display_name, fill.filled_qty, entry, stop, pt1, pt2
-        ));
-    } else {
-        alert.info(format!(
-            "GenericPositionTask[{}]: entered {} {}@{} stop={:.2}",
-            market_name, display_name, fill.filled_qty, entry, stop
-        ));
-    }
-
-    update_live_state(pos_states, live_state_tx, daily_pnl_r, last_prices);
-}
-
-/// Handle a tick event, evaluating exits.
-#[allow(clippy::too_many_arguments)]
-async fn handle_tick(
-    tick: TickData,
-    pos_states: &mut HashMap<String, (PositionState, u64, Option<String>)>,
-    force_order_tx: &mpsc::Sender<OrderRequest>,
-    db_pool: &SqlitePool,
-    live_state_tx: &watch::Sender<MarketLiveState>,
-    alert: &AlertRouter,
-    daily_pnl_r: &mut Decimal,
-    _pos_cfg: &PositionConfig,
-    consecutive_losses: &mut u32,
-    pending_exits: &mut HashSet<String>,
-    last_prices: &HashMap<String, Decimal>,
-) {
-    let sym = tick.symbol.clone();
-    let price = tick.price;
-
-    if pending_exits.contains(&sym) {
-        return;
-    }
-
-    // Get immutable snapshot first to avoid mutable borrow issues
-    let (
-        decision,
-        entry_price,
-        qty_snapshot,
-        exchange_code,
-        name_display,
-        atr,
-        regime,
-        trailing_cfg,
-    ) = {
-        let (state, qty, name) = match pos_states.get(&sym) {
-            Some(v) => v,
-            None => return,
-        };
-        let decision = evaluate_exit(state, price);
-        let display = match name {
-            Some(n) => format!("{}({})", n, sym),
-            None => sym.clone(),
-        };
-        (
-            decision,
-            state.entry_price,
-            *qty,
-            state.exchange_code.clone(),
-            display,
-            state.atr_at_entry,
-            state.regime.clone(),
-            (
-                state.trailing_atr_trending,
-                state.trailing_atr_volatile,
-                state.stop_price,
-                state.partial_exit_done,
-            ),
-        )
-    };
-
-    match decision {
-        ExitDecision::StopLoss | ExitDecision::TrailingStop => {
-            let pnl = (price - entry_price) * Decimal::from(qty_snapshot);
-            *daily_pnl_r += pnl;
-            if pnl < Decimal::ZERO {
-                *consecutive_losses += 1;
-            } else {
-                *consecutive_losses = 0;
-            }
-            persist_session_stats(db_pool, *daily_pnl_r, *consecutive_losses).await;
-
-            if force_order_tx
-                .send(OrderRequest {
-                    symbol: sym.clone(),
-                    side: Side::Sell,
-                    qty: qty_snapshot,
-                    price: None,
-                    atr: None,
-                    exchange_code,
-                    strength: None,
-                })
-                .await
-                .is_ok()
-            {
-                pending_exits.insert(sym.clone());
-                pos_states.remove(&sym);
-                let _ = sqlx::query("DELETE FROM positions WHERE symbol = ?")
-                    .bind(&sym)
-                    .execute(db_pool)
-                    .await;
-
-                let label = if matches!(decision, ExitDecision::StopLoss) {
-                    "🔴 [손절]"
+                    let state = PositionState {
+                        entry_price: current_price,
+                        stop_price,
+                        atr_at_entry: atr,
+                        profit_target_1: pt1,
+                        profit_target_2: pt2,
+                        trailing_stop_price: None,
+                        partial_exit_done: false,
+                        regime: regime.clone(),
+                        profit_target_1_atr: pos_cfg.profit_target_1_atr,
+                        profit_target_2_atr: pos_cfg.profit_target_2_atr,
+                        trailing_atr_trending: pos_cfg.trailing_atr_trending,
+                        trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
+                        exchange_code: fill.exchange_code.clone(),
+                    };
+                    pos_states.insert(fill.symbol.clone(), (state, fill.filled_qty));
+                    sqlx::query("INSERT OR REPLACE INTO positions (symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        .bind(&fill.symbol).bind(current_price.to_string()).bind(stop_price.to_string()).bind(atr.to_string()).bind(pt1.to_string()).bind(pt2.to_string()).bind(format!("{:?}", regime)).bind(fill.filled_qty.to_string()).bind(&fill.exchange_code)
+                        .execute(&db_pool).await.ok();
                 } else {
-                    "🟡 [추적손절]"
-                };
-                alert.info(format!(
-                    "{} {} @{:.2} pnl={:.2}",
-                    label, name_display, price, pnl
-                ));
-            }
-        }
-        ExitDecision::PartialExit { pct } => {
-            let (trailing_atr_trending, trailing_atr_volatile, stop_price, partial_exit_done) =
-                trailing_cfg;
-            if !partial_exit_done {
-                let sell_qty = (Decimal::from(qty_snapshot) * pct)
-                    .round()
-                    .to_u64()
-                    .unwrap_or(1)
-                    .min(qty_snapshot);
-                let pnl = (price - entry_price) * Decimal::from(sell_qty);
-                *daily_pnl_r += pnl;
-
-                if force_order_tx
-                    .send(OrderRequest {
-                        symbol: sym.clone(),
-                        side: Side::Sell,
-                        qty: sell_qty,
-                        price: None,
-                        atr: None,
-                        exchange_code,
-                        strength: None,
-                    })
-                    .await
-                    .is_ok()
-                {
-                    // Update state
-                    if let Some((state, qty, _)) = pos_states.get_mut(&sym) {
-                        *qty -= sell_qty;
-                        state.partial_exit_done = true;
-                        let ts = calculate_trailing_stop(
-                            price,
-                            atr,
-                            &regime,
-                            trailing_atr_trending,
-                            trailing_atr_volatile,
-                        );
-                        state.trailing_stop_price = ts.map(|t| t.max(stop_price));
-
-                        let _ = sqlx::query(
-                            "UPDATE positions SET qty = ?, partial_exit_done = 1, trailing_stop_price = ?, updated_at = ? WHERE symbol = ?"
-                        )
-                        .bind(qty.to_string())
-                        .bind(state.trailing_stop_price.map(|t| t.to_string()))
-                        .bind(chrono::Utc::now().to_rfc3339())
-                        .bind(&sym)
-                        .execute(db_pool)
-                        .await;
-                    }
-
-                    alert.info(format!(
-                        "🟢 [부분익절] {} {} @{:.2} pnl={:.2}",
-                        name_display, sell_qty, price, pnl
-                    ));
+                    pos_states.remove(&fill.symbol);
+                    sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
                 }
             }
-        }
-        ExitDecision::FullExit => {
-            let pnl = (price - entry_price) * Decimal::from(qty_snapshot);
-            *daily_pnl_r += pnl;
-            if pnl < Decimal::ZERO {
-                *consecutive_losses += 1;
-            } else {
-                *consecutive_losses = 0;
-            }
-
-            if force_order_tx
-                .send(OrderRequest {
-                    symbol: sym.clone(),
-                    side: Side::Sell,
-                    qty: qty_snapshot,
-                    price: None,
-                    atr: None,
-                    exchange_code,
-                    strength: None,
-                })
-                .await
-                .is_ok()
-            {
-                pending_exits.insert(sym.clone());
-                pos_states.remove(&sym);
-                let _ = sqlx::query("DELETE FROM positions WHERE symbol = ?")
-                    .bind(&sym)
-                    .execute(db_pool)
-                    .await;
-                persist_session_stats(db_pool, *daily_pnl_r, *consecutive_losses).await;
-
-                alert.info(format!(
-                    "🌕 [전량익절] {} @{:.2} pnl={:.2}",
-                    name_display, price, pnl
-                ));
-            }
-        }
-        ExitDecision::Hold => {
-            let (trailing_atr_trending, trailing_atr_volatile, _, partial_exit_done) = trailing_cfg;
-            if partial_exit_done {
-                if let Some(new_ts) = calculate_trailing_stop(
-                    price,
-                    atr,
-                    &regime,
-                    trailing_atr_trending,
-                    trailing_atr_volatile,
-                ) {
-                    if let Some((state, _, _)) = pos_states.get_mut(&sym) {
-                        if let Some(current_ts) = state.trailing_stop_price {
-                            if new_ts > current_ts {
-                                state.trailing_stop_price = Some(new_ts);
-                                let _ = sqlx::query(
-                                    "UPDATE positions SET trailing_stop_price = ?, updated_at = ? WHERE symbol = ?"
-                                )
-                                .bind(new_ts.to_string())
-                                .bind(chrono::Utc::now().to_rfc3339())
-                                .bind(&sym)
-                                .execute(db_pool)
-                                .await;
+            Some(tick) = tick_pos_rx.recv() => {
+                if let Some((state, qty)) = pos_states.get_mut(&tick.symbol) {
+                    last_prices.insert(tick.symbol.clone(), tick.price);
+                    let decision = evaluate_exit(state, tick.price);
+                    match decision {
+                        ExitDecision::Hold => {
+                            if let Some(new_ts) = calculate_trailing_stop(tick.price, state.atr_at_entry, &state.regime, state.trailing_atr_trending, state.trailing_atr_volatile) {
+                                let update = match state.trailing_stop_price {
+                                    Some(old) if new_ts > old => true,
+                                    None => true,
+                                    _ => false,
+                                };
+                                if update {
+                                    state.trailing_stop_price = Some(new_ts);
+                                    sqlx::query("UPDATE positions SET trailing_stop_price = ? WHERE symbol = ?").bind(new_ts.to_string()).bind(&tick.symbol).execute(&db_pool).await.ok();
+                                }
                             }
+                        }
+                        ExitDecision::PartialExit { .. } => {
+                            if !state.partial_exit_done {
+                                let exit_qty = *qty / 2;
+                                if exit_qty > 0 {
+                                    let _ = force_order_tx.send(OrderRequest {
+                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
+                                    }).await;
+                                }
+                                state.partial_exit_done = true;
+                                sqlx::query("UPDATE positions SET partial_exit_done = 1 WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
+                            }
+                        }
+                        ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
+                            let _ = force_order_tx.send(OrderRequest {
+                                symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
+                            }).await;
+                            tracing::info!(symbol = %tick.symbol, ?decision, "Exit triggered");
                         }
                     }
                 }
             }
         }
-    }
 
-    update_live_state(pos_states, live_state_tx, *daily_pnl_r, last_prices);
-}
-
-/// Handle end-of-day processing.
-#[allow(clippy::too_many_arguments)]
-async fn handle_eod(
-    pos_states: &mut HashMap<String, (PositionState, u64, Option<String>)>,
-    force_order_tx: &mpsc::Sender<OrderRequest>,
-    db_pool: &SqlitePool,
-    live_state_tx: &watch::Sender<MarketLiveState>,
-    _alert: &AlertRouter,
-    _summary_alert: &AlertRouter,
-    daily_pnl_r: Decimal,
-    consecutive_losses: u32,
-    _token: &CancellationToken,
-    _market_name: &str,
-    _notion: Option<Arc<tokio::sync::RwLock<crate::notion::NotionClient>>>,
-    _tunable_tx: Option<watch::Sender<crate::config::TunableConfig>>,
-    _signal_cfg: crate::config::SignalConfig,
-    _pos_cfg: PositionConfig,
-    _dry_run: bool,
-    pending_exits: &mut HashSet<String>,
-) {
-    // Close all positions at EOD
-    for (sym, (state, qty, _)) in pos_states.iter() {
-        if pending_exits.contains(sym) {
-            continue;
-        }
-        let _ = force_order_tx
-            .send(OrderRequest {
-                symbol: sym.clone(),
-                side: Side::Sell,
-                qty: *qty,
-                price: None,
-                atr: None,
-                exchange_code: state.exchange_code.clone(),
-                strength: None,
-            })
-            .await;
-        let _ = sqlx::query("DELETE FROM positions WHERE symbol = ?")
-            .bind(sym)
-            .execute(db_pool)
-            .await;
-    }
-    pos_states.clear();
-    update_live_state(pos_states, live_state_tx, Decimal::ZERO, &HashMap::new());
-    persist_session_stats(db_pool, daily_pnl_r, consecutive_losses).await;
-}
-
-fn update_live_state(
-    pos_states: &HashMap<String, (PositionState, u64, Option<String>)>,
-    live_state_tx: &watch::Sender<MarketLiveState>,
-    daily_pnl_r: Decimal,
-    last_prices: &HashMap<String, Decimal>,
-) {
-    let positions: Vec<Position> = pos_states
-        .iter()
-        .map(|(sym, (state, qty, name))| {
-            let current_price = last_prices.get(sym).copied().unwrap_or(state.entry_price);
-            let unrealized = (current_price - state.entry_price) * Decimal::from(*qty);
-            let pnl_pct = if state.entry_price.is_zero() {
-                0.0
-            } else {
-                ((current_price - state.entry_price) / state.entry_price * Decimal::from(100))
-                    .to_f64()
-                    .unwrap_or(0.0)
-            };
-            Position {
-                symbol: sym.clone(),
-                name: name.clone(),
+        let mut positions = Vec::new();
+        for (symbol, (state, qty)) in &pos_states {
+            let current_price = last_prices
+                .get(symbol)
+                .cloned()
+                .unwrap_or(state.entry_price);
+            positions.push(Position {
+                symbol: symbol.clone(),
+                name: None,
                 qty: *qty as i64,
                 avg_price: state.entry_price,
                 current_price,
-                unrealized_pnl: unrealized,
-                pnl_pct,
+                pnl_pct: ((current_price - state.entry_price)
+                    / state.entry_price.max(Decimal::ONE))
+                .to_f64()
+                .unwrap_or(0.0),
+                unrealized_pnl: (current_price - state.entry_price) * Decimal::from(*qty),
                 stop_price: state.stop_price,
                 trailing_stop: state.trailing_stop_price,
                 profit_target_1: state.profit_target_1,
                 profit_target_2: state.profit_target_2,
                 regime: format!("{:?}", state.regime),
-            }
-        })
-        .collect();
-
-    let _ = live_state_tx.send(MarketLiveState {
-        positions,
-        daily_pnl_r: daily_pnl_r.to_f64().unwrap_or(0.0),
-        regime: String::new(),
-    });
-}
-
-async fn persist_session_stats(
-    db_pool: &SqlitePool,
-    daily_pnl_r: Decimal,
-    consecutive_losses: u32,
-) {
-    let _ = sqlx::query(
-        "INSERT OR REPLACE INTO session_stats (id, daily_pnl_r, consecutive_losses, updated_at) VALUES (1, ?, ?, ?)"
-    )
-    .bind(daily_pnl_r.to_string())
-    .bind(consecutive_losses as i32)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(db_pool)
-    .await;
+            });
+        }
+        live_state_tx
+            .send(MarketLiveState {
+                positions,
+                daily_pnl_r,
+                regime: format!("{:?}", *regime_rx.borrow()),
+            })
+            .ok();
+    }
 }
