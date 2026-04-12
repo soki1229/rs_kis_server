@@ -1382,6 +1382,7 @@ mod tests {
                 items: vec![],
                 summary: kis_api::BalanceSummary {
                     purchase_amount: rust_decimal::Decimal::ZERO,
+                    available_cash: rust_decimal::Decimal::ZERO,
                     realized_pnl: rust_decimal::Decimal::ZERO,
                     total_pnl: rust_decimal::Decimal::ZERO,
                 },
@@ -1450,6 +1451,7 @@ mod tests {
                 items: vec![],
                 summary: kis_api::BalanceSummary {
                     purchase_amount: rust_decimal::Decimal::ZERO,
+                    available_cash: rust_decimal::Decimal::ZERO,
                     realized_pnl: rust_decimal::Decimal::ZERO,
                     total_pnl: rust_decimal::Decimal::ZERO,
                 },
@@ -1700,6 +1702,7 @@ mod tests {
                     items: vec![],
                     summary: kis_api::BalanceSummary {
                         purchase_amount: rust_decimal::Decimal::ZERO,
+                        available_cash: rust_decimal::Decimal::ZERO,
                         realized_pnl: rust_decimal::Decimal::ZERO,
                         total_pnl: rust_decimal::Decimal::ZERO,
                     },
@@ -1870,6 +1873,7 @@ mod tests {
                     items: vec![],
                     summary: kis_api::BalanceSummary {
                         purchase_amount: rust_decimal::Decimal::ZERO,
+                        available_cash: rust_decimal::Decimal::ZERO,
                         realized_pnl: rust_decimal::Decimal::ZERO,
                         total_pnl: rust_decimal::Decimal::ZERO,
                     },
@@ -2038,6 +2042,7 @@ mod tests {
                 items: vec![],
                 summary: kis_api::BalanceSummary {
                     purchase_amount: rust_decimal::Decimal::ZERO,
+                    available_cash: rust_decimal::Decimal::ZERO,
                     realized_pnl: rust_decimal::Decimal::ZERO,
                     total_pnl: rust_decimal::Decimal::ZERO,
                 },

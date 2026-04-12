@@ -29,7 +29,7 @@
 //! Filter logs by task: `grep 'task=execution'`
 
 use crate::config::{PositionConfig, SignalConfig};
-use crate::market::{KrMarketAdapter, MarketAdapter, UsMarketAdapter};
+use crate::market::{KrRealAdapter, KrVtsAdapter, MarketAdapter, UsRealAdapter, UsVtsAdapter};
 use crate::monitoring::alert::AlertRouter;
 use crate::pipeline;
 use crate::regime::RegimeReceiver;
@@ -142,18 +142,22 @@ pub fn spawn_generic_position_task<M: MarketAdapter + Clone>(
     })
 }
 
-/// Build market adapters for both KR and US markets.
+/// Build market adapters for both KR and US markets (Real and VTS).
 pub struct MarketAdapters {
-    pub kr: Arc<KrMarketAdapter>,
-    pub us: Arc<UsMarketAdapter>,
+    pub kr_real: Arc<KrRealAdapter>,
+    pub kr_vts: Arc<KrVtsAdapter>,
+    pub us_real: Arc<UsRealAdapter>,
+    pub us_vts: Arc<UsVtsAdapter>,
 }
 
 impl MarketAdapters {
     /// Create market adapters from KIS API clients.
     pub fn new(kr_client: Arc<dyn KisDomesticApi>, us_client: Arc<dyn KisApi>) -> Self {
         Self {
-            kr: Arc::new(KrMarketAdapter::new(kr_client)),
-            us: Arc::new(UsMarketAdapter::new(us_client)),
+            kr_real: Arc::new(KrRealAdapter::new(Arc::clone(&kr_client))),
+            kr_vts: Arc::new(KrVtsAdapter::new(kr_client)),
+            us_real: Arc::new(UsRealAdapter::new(Arc::clone(&us_client))),
+            us_vts: Arc::new(UsVtsAdapter::new(us_client)),
         }
     }
 }

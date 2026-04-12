@@ -8,15 +8,31 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MarketId {
     Kr,
+    KrVts,
     Us,
+    UsVts,
 }
 
 impl MarketId {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Kr => "KR",
+            Self::KrVts => "KR-VTS",
             Self::Us => "US",
+            Self::UsVts => "US-VTS",
         }
+    }
+
+    pub fn is_vts(&self) -> bool {
+        matches!(self, Self::KrVts | Self::UsVts)
+    }
+
+    pub fn is_kr(&self) -> bool {
+        matches!(self, Self::Kr | Self::KrVts)
+    }
+
+    pub fn is_us(&self) -> bool {
+        matches!(self, Self::Us | Self::UsVts)
     }
 }
 

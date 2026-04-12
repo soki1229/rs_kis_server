@@ -2,7 +2,7 @@
 //!
 //! This module implements the Ports and Adapters (Hexagonal Architecture) pattern:
 //! - `MarketAdapter` trait defines the port (interface)
-//! - `KrMarketAdapter` and `UsMarketAdapter` are the adapters (implementations)
+//! - `KrRealAdapter`, `KrVtsAdapter`, `UsRealAdapter`, `UsVtsAdapter` are the adapters (implementations)
 
 mod adapter;
 mod kr;
@@ -10,6 +10,6 @@ mod types;
 mod us;
 
 pub use adapter::MarketAdapter;
-pub use kr::KrMarketAdapter;
+pub use kr::{KrRealAdapter, KrVtsAdapter};
 pub use types::*;
-pub use us::UsMarketAdapter;
+pub use us::{UsRealAdapter, UsVtsAdapter};

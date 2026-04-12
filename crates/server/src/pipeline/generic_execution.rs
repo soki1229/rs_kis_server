@@ -574,8 +574,8 @@ mod tests {
 
         fn name(&self) -> &'static str {
             match self.market_id {
-                MarketId::Kr => "KR",
-                MarketId::Us => "US",
+                MarketId::Kr | MarketId::KrVts => "KR",
+                MarketId::Us | MarketId::UsVts => "US",
             }
         }
 

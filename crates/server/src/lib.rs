@@ -20,6 +20,8 @@ pub mod strategy;
 pub mod types;
 
 pub use config::ServerConfig;
-pub use market::{KrMarketAdapter, MarketAdapter, MarketId, UsMarketAdapter};
+pub use market::{
+    KrRealAdapter, KrVtsAdapter, MarketAdapter, MarketId, UsRealAdapter, UsVtsAdapter,
+};
 pub use run::run;
 pub use strategy::StrategyBundle;
