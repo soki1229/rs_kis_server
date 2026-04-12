@@ -1,5 +1,4 @@
 use crate::market::MarketAdapter;
-use crate::monitoring::alert::AlertRouter;
 use crate::pipeline::{QuoteSnapshot, TickData};
 use crate::state::BotState;
 use crate::strategy::{
@@ -11,7 +10,6 @@ use crate::types::{OrderRequest, Side, WatchlistSet};
 use kis_api::CandleBar;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use tokio::sync::{broadcast, mpsc, watch, RwLock as TokioRwLock};
@@ -30,20 +28,7 @@ pub struct CompletedCandle {
     pub ts: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DailyBar {
-    #[allow(dead_code)]
-    pub date: String,
-    pub open: Decimal,
-    pub high: Decimal,
-    pub low: Decimal,
-    pub close: Decimal,
-    pub volume: Decimal,
-}
-
 struct CandleAccumulator {
-    #[allow(dead_code)]
-    symbol: String,
     open: Decimal,
     high: Decimal,
     low: Decimal,
@@ -53,9 +38,8 @@ struct CandleAccumulator {
 }
 
 impl CandleAccumulator {
-    fn new(symbol: &str) -> Self {
+    fn new(_symbol: &str) -> Self {
         Self {
-            symbol: symbol.to_string(),
             open: Decimal::ZERO,
             high: Decimal::MIN,
             low: Decimal::MAX,
@@ -91,8 +75,6 @@ struct SignalState {
     candles: HashMap<String, CandleAccumulator>,
     completed: HashMap<String, VecDeque<CompletedCandle>>,
     latest_quotes: HashMap<String, QuoteSnapshot>,
-    #[allow(dead_code)]
-    rolling_highs: HashMap<String, VecDeque<(chrono::DateTime<chrono::Utc>, Decimal)>>,
     watchlist: WatchlistSet,
     candle_start: HashMap<String, Instant>,
     cached_balance: Option<(Decimal, Instant)>,
@@ -260,9 +242,6 @@ pub async fn run_signal_task(
     adapter: Arc<dyn MarketAdapter>,
     mut watchlist_rx: watch::Receiver<WatchlistSet>,
     summary: Arc<StdRwLock<crate::state::MarketSummary>>,
-    _alert: AlertRouter,
-    _pending_count: Arc<AtomicU32>,
-    _risk_cfg: crate::config::RiskConfig,
     signal_cfg: crate::config::SignalConfig,
     strategies: Vec<crate::config::StrategyProfile>,
     activity: crate::shared::activity::ActivityLog,
@@ -278,7 +257,6 @@ pub async fn run_signal_task(
         candles: HashMap::new(),
         completed: HashMap::new(),
         latest_quotes: HashMap::new(),
-        rolling_highs: HashMap::new(),
         watchlist: WatchlistSet::default(),
         candle_start: HashMap::new(),
         cached_balance: None,
