@@ -13,7 +13,7 @@ use crate::types::{FillInfo, OrderRequest, Position, Side};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -48,8 +48,6 @@ pub async fn run_generic_position_task(
     let mut eod_rx = eod_rx;
 
     let mut pos_states: HashMap<String, (PositionState, u64)> = HashMap::new();
-    let daily_pnl_r = 0.0;
-    let _pending_exits: HashSet<String> = HashSet::new();
     let mut last_prices: HashMap<String, Decimal> = HashMap::new();
     let mut eod_fallback_fired = false;
     let fallback_instant = tokio::time::Instant::now()
@@ -124,6 +122,9 @@ pub async fn run_generic_position_task(
                 if !pos_states.contains_key(&fill.symbol) {
                     let regime = regime_rx.borrow().clone();
                     let current_price = fill.filled_price;
+                    // ATR is required for calculating stop loss and profit targets.
+                    // If missing (e.g. manual fill or error), default to Decimal::ONE to avoid panic,
+                    // although strategy should have provided it during Signal stage.
                     let atr = fill.atr.unwrap_or(Decimal::ONE);
                     let stop_price = current_price - atr * pos_cfg.stop_atr_multiplier;
                     let pt1 = current_price + atr * pos_cfg.profit_target_1_atr;
@@ -145,8 +146,21 @@ pub async fn run_generic_position_task(
                         exchange_code: fill.exchange_code.clone(),
                     };
                     pos_states.insert(fill.symbol.clone(), (state, fill.filled_qty));
-                    sqlx::query("INSERT OR REPLACE INTO positions (symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                        .bind(&fill.symbol).bind(current_price.to_string()).bind(stop_price.to_string()).bind(atr.to_string()).bind(pt1.to_string()).bind(pt2.to_string()).bind(format!("{:?}", regime)).bind(fill.filled_qty.to_string()).bind(&fill.exchange_code)
+                    let now = chrono::Utc::now().to_rfc3339();
+                    sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        .bind(uuid::Uuid::new_v4().to_string())
+                        .bind(&fill.order_id)
+                        .bind(&fill.symbol)
+                        .bind(current_price.to_string())
+                        .bind(stop_price.to_string())
+                        .bind(atr.to_string())
+                        .bind(pt1.to_string())
+                        .bind(pt2.to_string())
+                        .bind(format!("{:?}", regime))
+                        .bind(fill.filled_qty.to_string())
+                        .bind(&fill.exchange_code)
+                        .bind(&now)
+                        .bind(&now)
                         .execute(&db_pool).await.ok();
                 } else {
                     pos_states.remove(&fill.symbol);
@@ -196,20 +210,14 @@ pub async fn run_generic_position_task(
 
         let mut positions = Vec::new();
         for (symbol, (state, qty)) in &pos_states {
-            let current_price = last_prices
-                .get(symbol)
-                .cloned()
-                .unwrap_or(state.entry_price);
+            let current_price = last_prices.get(symbol).cloned().unwrap_or(state.entry_price);
             positions.push(Position {
                 symbol: symbol.clone(),
                 name: None,
                 qty: *qty as i64,
                 avg_price: state.entry_price,
                 current_price,
-                pnl_pct: ((current_price - state.entry_price)
-                    / state.entry_price.max(Decimal::ONE))
-                .to_f64()
-                .unwrap_or(0.0),
+                pnl_pct: ((current_price - state.entry_price) / state.entry_price.max(Decimal::ONE)).to_f64().unwrap_or(0.0),
                 unrealized_pnl: (current_price - state.entry_price) * Decimal::from(*qty),
                 stop_price: state.stop_price,
                 trailing_stop: state.trailing_stop_price,
@@ -218,12 +226,10 @@ pub async fn run_generic_position_task(
                 regime: format!("{:?}", state.regime),
             });
         }
-        live_state_tx
-            .send(MarketLiveState {
-                positions,
-                daily_pnl_r,
-                regime: format!("{:?}", *regime_rx.borrow()),
-            })
-            .ok();
+        live_state_tx.send(MarketLiveState {
+            positions,
+            daily_pnl_r: 0.0, // Placeholder for actual stats calculation
+            regime: format!("{:?}", *regime_rx.borrow()),
+        }).ok();
     }
 }
