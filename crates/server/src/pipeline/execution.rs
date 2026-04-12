@@ -297,6 +297,7 @@ async fn poll_until_filled(
                                     filled_qty,
                                     filled_price,
                                     exchange_code: exchange_code.clone(),
+                                    atr: None,
                                 })
                                 .await;
                         }
@@ -329,6 +330,7 @@ async fn poll_until_filled(
                                     filled_qty,
                                     filled_price,
                                     exchange_code: exchange_code.clone(),
+                                    atr: None,
                                 })
                                 .await;
                         }
@@ -881,6 +883,7 @@ async fn poll_kr_until_filled(
                                     filled_qty,
                                     filled_price,
                                     exchange_code: exchange_code.clone(),
+                                    atr: None,
                                 })
                                 .await;
                         }
@@ -913,6 +916,7 @@ async fn poll_kr_until_filled(
                                     filled_qty,
                                     filled_price,
                                     exchange_code: exchange_code.clone(),
+                                    atr: None,
                                 })
                                 .await;
                         }
@@ -981,6 +985,7 @@ async fn poll_kr_until_filled(
                                 filled_qty,
                                 filled_price,
                                 exchange_code: exchange_code.clone(),
+                                atr: None,
                             })
                             .await;
                         return;

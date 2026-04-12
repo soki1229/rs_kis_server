@@ -115,15 +115,17 @@ pub struct OrderResult {
     pub price: Decimal,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FillInfo {
     pub order_id: String,
     pub symbol: String,
     pub filled_qty: u64,
     pub filled_price: Decimal,
+    pub atr: Option<Decimal>,
     /// KIS exchange code: "J"=KOSPI, "Q"=KOSDAQ. None for US orders.
     pub exchange_code: Option<String>,
 }
+
 
 // ── PnL ───────────────────────────────────────────────────────────────────
 

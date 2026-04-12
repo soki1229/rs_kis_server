@@ -231,6 +231,7 @@ impl From<UnifiedFill> for crate::types::FillInfo {
             filled_qty: fill.filled_qty,
             filled_price: fill.filled_price,
             exchange_code: fill.metadata.exchange_code,
+            atr: None,
         }
     }
 }

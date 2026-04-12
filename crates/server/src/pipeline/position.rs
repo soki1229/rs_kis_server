@@ -684,6 +684,7 @@ mod tests {
                 filled_qty: 1,
                 filled_price: dec!(130.00),
                 exchange_code: None,
+                atr: None,
             })
             .await
             .unwrap();

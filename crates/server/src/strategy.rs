@@ -73,6 +73,7 @@ pub struct TradeSignal {
     pub llm_verdict: Option<LlmVerdict>,
     pub entry_price: Decimal,
     pub quantity: Decimal,
+    pub atr: Decimal,
     /// Signal 레벨에서 계산된 setup score (Qualification 중복 계산 방지용)
     pub setup_score: Option<i32>,
     /// 시장 레짐 (Risk sizing에서 사용)

@@ -131,7 +131,7 @@ pub async fn run_generic_position_task(
                 if !pos_states.contains_key(&fill.symbol) {
                     let regime = regime_rx.borrow().clone();
                     let current_price = fill.filled_price;
-                    let atr = Decimal::ONE; // Placeholder
+                    let atr = fill.atr.unwrap_or(Decimal::ONE);
                     let stop_price = current_price - atr * pos_cfg.stop_atr_multiplier;
                     let pt1 = current_price + atr * pos_cfg.profit_target_1_atr;
                     let pt2 = current_price + atr * pos_cfg.profit_target_2_atr;

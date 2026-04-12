@@ -8,6 +8,7 @@ use crate::market::{MarketAdapter, OrderMetadata, PollOutcome, UnifiedOrderReque
 use crate::monitoring::alert::AlertRouter;
 use crate::state::{BotState, MarketSummary};
 use crate::types::{FillInfo, OrderRequest, Side};
+use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
@@ -170,6 +171,7 @@ async fn process_order(
                                         filled_qty,
                                         filled_price,
                                         exchange_code: req.exchange_code.clone(),
+                                        atr: req.atr,
                                     })
                                     .await
                                     .ok();
@@ -228,7 +230,7 @@ async fn reconcile_submitted_orders(
     _alert: &AlertRouter,
     poll_sem: &Arc<Semaphore>,
 ) {
-    let rows = sqlx::query("SELECT id, broker_order_id, symbol, qty, exchange_code FROM orders WHERE state = 'Submitted'")
+    let rows = sqlx::query("SELECT id, broker_order_id, symbol, qty, atr, exchange_code FROM orders WHERE state = 'Submitted'")
         .fetch_all(db_pool).await.unwrap_or_default();
 
     for row in rows {
@@ -236,6 +238,7 @@ async fn reconcile_submitted_orders(
         let broker_id: String = row.get("broker_order_id");
         let symbol: String = row.get("symbol");
         let qty: i64 = row.get("qty");
+        let atr: Option<Decimal> = row.try_get::<Option<String>, _>("atr").ok().flatten().and_then(|s| s.parse().ok());
         let ex_code: Option<String> = row.get("exchange_code");
 
         let _permit = poll_sem.acquire().await.unwrap();
@@ -256,6 +259,7 @@ async fn reconcile_submitted_orders(
                             symbol,
                             filled_qty,
                             filled_price,
+                            atr,
                             exchange_code: ex_code,
                         })
                         .await
