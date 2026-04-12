@@ -13,23 +13,6 @@ use std::sync::{atomic::AtomicU32, Arc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-fn is_market_active(market: &str) -> bool {
-    let now = chrono::Utc::now();
-    if market == "KR" {
-        use chrono_tz::Asia::Seoul;
-        let kst = now.with_timezone(&Seoul).time();
-        let start = chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap();
-        let end = chrono::NaiveTime::from_hms_opt(16, 30, 0).unwrap();
-        kst >= start && kst <= end
-    } else {
-        use chrono_tz::America::New_York;
-        let et = now.with_timezone(&New_York).time();
-        let start = chrono::NaiveTime::from_hms_opt(8, 30, 0).unwrap();
-        let end = chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap();
-        et >= start && et <= end
-    }
-}
-
 /// Framework entry point. Call this from your binary after assembling a StrategyBundle.
 pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Result<()> {
     let regime_strategy: Arc<dyn crate::strategy::RegimeStrategy> = Arc::from(strategies.regime);
@@ -210,7 +193,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     // ── KR pipeline ──────────────────────────────────────────────────────
     let kr_db_pool = crate::db::connect(&cfg.kr.db_path).await?;
-    let kr_active = is_market_active("KR");
+    let kr_active = kr_adapter.market_timing().is_open;
 
     // Recovery (KR)
     let kr_recovery_failed = if kr_active {
@@ -288,7 +271,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     ));
 
     let kr_pending = Arc::new(AtomicU32::new(0));
-    let poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
+    let kr_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
 
     let t = token.clone();
     let h_kr_signal: JoinHandle<()> = tokio::spawn(pipeline::signal::run_signal_task(
@@ -325,7 +308,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         kr_alert.clone(),
         t,
         kr_pending,
-        poll_sem.clone(),
+        kr_poll_sem,
     ));
 
     let t = token.clone();
@@ -351,7 +334,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     // ── US pipeline ──────────────────────────────────────────────────────
     let us_db_pool = crate::db::connect(&cfg.us.db_path).await?;
-    let us_active = is_market_active("US");
+    let us_active = us_adapter.market_timing().is_open;
 
     // Recovery (US)
     let us_recovery_failed = if us_active {
@@ -429,6 +412,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     ));
 
     let us_pending = Arc::new(AtomicU32::new(0));
+    let us_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
     let t = token.clone();
     let h_us_signal: JoinHandle<()> = tokio::spawn(pipeline::signal::run_signal_task(
         us_pipeline.tick_tx.subscribe(),
@@ -464,7 +448,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         us_alert.clone(),
         t,
         us_pending,
-        poll_sem,
+        us_poll_sem,
     ));
 
     let t = token.clone();

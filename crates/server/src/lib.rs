@@ -2,7 +2,6 @@ pub mod auth;
 pub mod config;
 pub mod control;
 pub mod db;
-pub mod dual_client;
 pub mod error;
 pub mod execution;
 pub mod market;

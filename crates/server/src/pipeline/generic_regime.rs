@@ -68,7 +68,11 @@ pub async fn run_generic_regime_task(
         let timing = adapter.market_timing();
 
         // Only update regime during market hours (with buffer)
-        if timing.is_open || timing.mins_since_open < 60 || timing.mins_until_close > -30 {
+        let is_active_window = timing.is_open
+            || (timing.mins_since_open < 60 && timing.mins_since_open != i64::MAX)
+            || (timing.mins_until_close > -30 && timing.mins_until_close != i64::MAX);
+
+        if is_active_window {
             match adapter.daily_chart(benchmark_symbol, 25).await {
                 Ok(bars) => {
                     if let Some(input) = build_regime_input(&bars) {
