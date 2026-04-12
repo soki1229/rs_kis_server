@@ -1,3 +1,8 @@
 /target
 **/*.rs.bk
 Cargo.lock
+
+# AI agent config (workspace-local, not for version control)
+AGENTS.md
+GEMINI.md
+.cursor/
