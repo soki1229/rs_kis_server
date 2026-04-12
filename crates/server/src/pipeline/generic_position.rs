@@ -5,7 +5,6 @@
 
 use crate::config::PositionConfig;
 use crate::market::MarketAdapter;
-use crate::monitoring::alert::AlertRouter;
 use crate::pipeline::TickData;
 use crate::position::{calculate_trailing_stop, evaluate_exit, ExitDecision, PositionState};
 use crate::regime::RegimeReceiver;
@@ -30,15 +29,9 @@ pub async fn run_generic_position_task(
     force_order_tx: mpsc::Sender<OrderRequest>,
     regime_rx: RegimeReceiver,
     db_pool: SqlitePool,
-    _alert: AlertRouter,
-    _summary_alert: AlertRouter,
     token: CancellationToken,
     eod_fallback: chrono::DateTime<chrono::Utc>,
     pos_cfg: PositionConfig,
-    _notion: Option<Arc<tokio::sync::RwLock<crate::notion::NotionClient>>>,
-    _tunable_tx: Option<watch::Sender<crate::config::TunableConfig>>,
-    _signal_cfg: crate::config::SignalConfig,
-    _dry_run: bool,
 ) {
     let market_id = adapter.market_id();
     let market_name = adapter.name();

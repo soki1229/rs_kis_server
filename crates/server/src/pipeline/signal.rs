@@ -281,8 +281,7 @@ pub async fn run_signal_task(
                 let new_syms: Vec<String> = new_wl.iter().filter(|s| !state.watchlist.all_unique().contains(s)).cloned().collect();
                 state.watchlist = wl_set;
                 if !new_syms.is_empty() {
-                    let mut news_cache = HashMap::new();
-                    let (exch_map, _bad): (HashMap<String, String>, std::collections::HashSet<String>) = seed_symbols(&new_syms, adapter.as_ref(), &db_pool, &mut news_cache, false).await;
+                    let (exch_map, _bad): (HashMap<String, String>, std::collections::HashSet<String>) = seed_symbols(&new_syms, adapter.as_ref(), &db_pool, false).await;
                     state.symbol_exchange.extend(exch_map);
                 }
                 for sym in &new_wl { if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new()); } }
@@ -347,7 +346,6 @@ pub async fn seed_symbols(
     wl: &[String],
     adapter: &dyn MarketAdapter,
     pool: &sqlx::SqlitePool,
-    _news_cache: &mut HashMap<String, (bool, Instant)>,
     force: bool,
 ) -> (HashMap<String, String>, std::collections::HashSet<String>) {
     let mut exch_map = HashMap::new();

@@ -230,8 +230,10 @@ impl From<UnifiedFill> for crate::types::FillInfo {
             symbol: fill.symbol,
             filled_qty: fill.filled_qty,
             filled_price: fill.filled_price,
-            exchange_code: fill.metadata.exchange_code,
+            // UnifiedFill lacks ATR metadata; current pipeline retrieves ATR from DB/OrderRequest.
             atr: None,
+            exchange_code: fill.metadata.exchange_code,
         }
+
     }
 }
