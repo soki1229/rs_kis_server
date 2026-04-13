@@ -311,7 +311,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         kr_regime_rx,
         kr_db_pool.clone(),
         t,
-        pipeline::position::market_close_utc(15, 30, Asia::Seoul),
+        pipeline::scheduler::kr_market_close_utc(chrono::Utc::now().with_timezone(&Asia::Seoul).date_naive()).unwrap(),
         cfg.position.clone(),
     ));
 
@@ -440,7 +440,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         us_regime_rx,
         us_db_pool.clone(),
         t,
-        pipeline::position::market_close_utc(16, 0, America::New_York),
+        pipeline::scheduler::us_market_close_utc(chrono::Utc::now().with_timezone(&America::New_York).date_naive()).unwrap(),
         cfg.position.clone(),
     ));
 
