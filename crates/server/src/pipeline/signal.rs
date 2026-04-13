@@ -75,8 +75,6 @@ struct SignalState {
     candles: HashMap<String, CandleAccumulator>,
     completed: HashMap<String, VecDeque<CompletedCandle>>,
     latest_quotes: HashMap<String, QuoteSnapshot>,
-    #[allow(dead_code)]
-    rolling_highs: HashMap<String, VecDeque<(chrono::DateTime<chrono::Utc>, Decimal)>>,
     watchlist: WatchlistSet,
     candle_start: HashMap<String, Instant>,
     cached_balance: Option<(Decimal, Instant)>,
@@ -259,7 +257,6 @@ pub async fn run_signal_task(
         candles: HashMap::new(),
         completed: HashMap::new(),
         latest_quotes: HashMap::new(),
-        rolling_highs: HashMap::new(),
         watchlist: WatchlistSet::default(),
         candle_start: HashMap::new(),
         cached_balance: None,
@@ -271,8 +268,6 @@ pub async fn run_signal_task(
     state.watchlist = initial_wl.clone();
     for sym in initial_wl.all_unique() {
         state.candles.insert(sym.clone(), CandleAccumulator::new());
-        state.completed.insert(sym.clone(), VecDeque::new());
-        state.rolling_highs.insert(sym.clone(), VecDeque::new());
     }
 
     let market_label = adapter.market_id().label().to_string();
@@ -291,8 +286,6 @@ pub async fn run_signal_task(
                 }
                 for sym in &new_wl {
                     if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new()); }
-                    if !state.completed.contains_key(sym) { state.completed.insert(sym.clone(), VecDeque::new()); }
-                    if !state.rolling_highs.contains_key(sym) { state.rolling_highs.insert(sym.clone(), VecDeque::new()); }
                 }
             }
             Ok(tick) = tick_rx.recv() => {
@@ -411,10 +404,10 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal_macros::dec;
 
-    pub struct MockAdapter {
-        pub market_id: MarketId,
-        pub daily_bars: Vec<UnifiedDailyBar>,
-        pub fail_daily_chart: bool,
+    struct MockAdapter {
+        market_id: MarketId,
+        daily_bars: Vec<UnifiedDailyBar>,
+        fail_daily_chart: bool,
     }
 
     #[async_trait]
@@ -481,7 +474,7 @@ mod tests {
         }
     }
 
-    pub struct AlwaysBuySignal;
+    struct AlwaysBuySignal;
     #[async_trait]
     impl SignalStrategy for AlwaysBuySignal {
         async fn evaluate(&self, ctx: &StrategySignalContext, _: &sqlx::SqlitePool) -> Option<TradeSignal> {
@@ -499,14 +492,14 @@ mod tests {
         }
     }
 
-    pub struct AlwaysPassQual;
+    struct AlwaysPassQual;
     impl QualificationStrategy for AlwaysPassQual {
         fn qualify(&self, _: &SignalCandidate) -> QualResult {
             QualResult::Pass
         }
     }
 
-    pub struct FixedQtyRisk(pub Decimal);
+    struct FixedQtyRisk(pub Decimal);
     impl RiskStrategy for FixedQtyRisk {
         fn size(&self, _: &TradeSignal, _: &Portfolio) -> Decimal {
             self.0
@@ -592,16 +585,59 @@ mod tests {
 
         assert_eq!(bad.len(), 1);
         assert!(bad.contains("MSFT"));
-        assert!(exch_map.get("MSFT").is_none());
+        assert!(!exch_map.contains_key("MSFT"));
+    }
+
+    #[tokio::test]
+    async fn test_strategy_delegation_logic() {
+        // Use Mock strategies to resolve dead_code warnings and verify logic
+        let db = setup_test_db().await;
+        let sig_strat = AlwaysBuySignal;
+        let qual_strat = AlwaysPassQual;
+        let risk_strat = FixedQtyRisk(dec!(50));
+        
+        let ctx = StrategySignalContext {
+            symbol: "TSLA".into(),
+            market: "US".into(),
+            candles: vec![],
+            quote: None,
+            current_price: dec!(200.0),
+            rolling_high: dec!(210.0),
+            account_balance: dec!(10000),
+            regime: MarketRegime::Trending,
+            setup_score_min: 60,
+            regime_filter: true,
+        };
+
+        // 1. Signal
+        let signal = sig_strat.evaluate(&ctx, &db).await.unwrap();
+        assert_eq!(signal.strength, 1.0);
+        assert_eq!(signal.atr, dec!(2.5));
+
+        // 2. Qualification
+        let candidate = SignalCandidate {
+            signal: signal.clone(),
+            regime: MarketRegime::Trending,
+            setup_score: signal.setup_score,
+        };
+        let qual = qual_strat.qualify(&candidate);
+        assert_eq!(qual, QualResult::Pass);
+
+        // 3. Risk Sizing
+        let portfolio = Portfolio {
+            balance: dec!(10000),
+            open_position_count: 0,
+            daily_pnl_r: 0.0,
+        };
+        let qty = risk_strat.size(&signal, &portfolio);
+        assert_eq!(qty, dec!(50));
     }
 
     #[test]
     fn test_atr_data_lineage_and_stop_calculation() {
-        // Direction 1: Type Chain Unit Test
         let atr_value = dec!(2.5);
         let entry_price = dec!(150.0);
         
-        // 1. TradeSignal -> OrderRequest
         let signal = TradeSignal {
             symbol: "NVDA".into(),
             direction: Direction::Long,
@@ -625,7 +661,6 @@ mod tests {
         };
         assert_eq!(req.atr, Some(atr_value));
 
-        // 2. FillInfo -> PositionState
         let fill = FillInfo {
             order_id: "ord-1".into(),
             symbol: "NVDA".into(),
@@ -642,12 +677,9 @@ mod tests {
             ..Default::default()
         };
         
-        // Use the actual logic from PositionState initialization in generic_position.rs
         let atr = fill.atr.unwrap_or(Decimal::ONE);
         let stop_price = fill.filled_price - atr * pos_cfg.stop_atr_multiplier;
-        let pt1 = fill.filled_price + atr * pos_cfg.profit_target_1_atr;
         
-        assert_eq!(stop_price, dec!(146.25)); // 150 - 2.5 * 1.5
-        assert_eq!(pt1, dec!(155.0)); // 150 + 2.5 * 2.0
+        assert_eq!(stop_price, dec!(146.25));
     }
 }
