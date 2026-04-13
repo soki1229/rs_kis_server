@@ -1,7 +1,6 @@
 pub mod generic_execution;
 pub mod generic_position;
 pub mod generic_regime;
-pub mod regime;
 pub mod review;
 pub mod scheduler;
 pub mod signal;
