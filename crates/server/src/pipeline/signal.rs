@@ -353,13 +353,16 @@ pub async fn seed_symbols(
     let mut exch_map = HashMap::new();
     let mut bad = std::collections::HashSet::new();
     let market_id = adapter.market_id();
-    let default_exch = if market_id.is_kr() {
-        "J".to_string()
-    } else {
-        "NASD".to_string()
-    };
 
     for sym in wl {
+        let exch = if market_id.is_kr() {
+            "J".to_string()
+        } else if sym.len() <= 3 {
+            "NYSE".to_string()
+        } else {
+            "NASD".to_string()
+        };
+
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM daily_ohlc WHERE symbol = ? AND date != '0000-00-00'",
         )
@@ -368,7 +371,7 @@ pub async fn seed_symbols(
         .await
         .unwrap_or(0);
         if !force && count >= 30 {
-            exch_map.insert(sym.clone(), default_exch.clone());
+            exch_map.insert(sym.clone(), exch);
             continue;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -381,7 +384,7 @@ pub async fn seed_symbols(
                         .bind(sym).bind(date_str).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
                 }
                 tracing::info!(symbol = %sym, bars = bar_count, "History seeded successfully");
-                exch_map.insert(sym.clone(), default_exch.clone());
+                exch_map.insert(sym.clone(), exch);
             }
             Err(_) => {
                 bad.insert(sym.clone());
@@ -543,11 +546,13 @@ mod tests {
             fail_daily_chart: false,
         };
 
-        let symbols = vec!["AAPL".to_string()];
+        // AAPL (4) -> NASD, IBM (3) -> NYSE
+        let symbols = vec!["AAPL".to_string(), "IBM".to_string()];
         let (exch_map, bad) = seed_symbols(&symbols, &adapter, &db, false).await;
 
         assert_eq!(bad.len(), 0);
         assert_eq!(exch_map.get("AAPL").unwrap(), "NASD");
+        assert_eq!(exch_map.get("IBM").unwrap(), "NYSE");
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = 'AAPL'")
@@ -555,6 +560,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1);
+        let count2: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = 'IBM'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count2, 1);
     }
 
     #[tokio::test]
