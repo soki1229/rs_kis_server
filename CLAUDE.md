@@ -25,7 +25,6 @@ crates/server/src/
   execution/         ← 주문 실행, OrderState
   monitoring/        ← 알림, 전략 모니터
   position/          ← 포지션 관리
-  qualification/     ← setup_score (pub(crate) — 파이프라인 내부 전용)
   pipeline/          ← tick, signal, execution, position, scheduler, regime, tuner, review
   shared/            ← telegram, rest, control, activity
   notion.rs          ← Notion 연동

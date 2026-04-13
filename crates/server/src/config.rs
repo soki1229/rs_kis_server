@@ -406,7 +406,6 @@ impl Default for LlmConfig {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct Secrets {
     pub alert_bot_token: String,
     pub alert_chat_id: i64,
