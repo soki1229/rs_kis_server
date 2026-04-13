@@ -499,7 +499,7 @@ mod tests {
         }
     }
 
-    struct FixedQtyRisk(pub Decimal);
+    struct FixedQtyRisk(Decimal);
     impl RiskStrategy for FixedQtyRisk {
         fn size(&self, _: &TradeSignal, _: &Portfolio) -> Decimal {
             self.0
@@ -679,7 +679,9 @@ mod tests {
         
         let atr = fill.atr.unwrap_or(Decimal::ONE);
         let stop_price = fill.filled_price - atr * pos_cfg.stop_atr_multiplier;
+        let pt1 = fill.filled_price + atr * pos_cfg.profit_target_1_atr;
         
         assert_eq!(stop_price, dec!(146.25));
+        assert_eq!(pt1, dec!(155.0));
     }
 }
