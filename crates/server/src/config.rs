@@ -21,7 +21,6 @@ pub struct StrategyProfile {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct MarketConfig {
     pub watchlist: Vec<String>,
     pub dynamic_watchlist_size: usize,
@@ -58,7 +57,6 @@ fn default_watchlist_refresh_interval() -> u64 {
 pub struct RiskConfig {
     pub max_open_positions: u32,
     pub daily_loss_limit_pct: Decimal,
-    #[allow(dead_code)]
     pub consecutive_loss_limit: u32,
     pub pending_order_limit_pct: Decimal,
     pub risk_per_trade_pct: Decimal,
@@ -71,13 +69,10 @@ pub struct RiskConfig {
     #[serde(default)]
     pub earnings_blackout_symbols: Vec<String>,
     #[serde(default = "default_entry_blackout_open_mins")]
-    #[allow(dead_code)]
     pub entry_blackout_open_mins: i64,
     #[serde(default = "default_mdd_soft_kill_pct")]
-    #[allow(dead_code)]
     pub mdd_soft_kill_pct: Decimal,
     #[serde(default = "default_mdd_hard_kill_pct")]
-    #[allow(dead_code)]
     pub mdd_hard_kill_pct: Decimal,
 }
 

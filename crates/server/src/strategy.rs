@@ -72,7 +72,6 @@ pub struct TradeSignal {
     pub strength: f64,
     pub llm_verdict: Option<LlmVerdict>,
     pub entry_price: Decimal,
-    pub quantity: Decimal,
     /// 진입 시점의 ATR(14) 값. 손절/익절가 계산의 기준이 됨.
     /// 만약 데이터 부족 등으로 ATR 계산이 불가능한 경우 evaluate()는 None을 반환해야 함.
     pub atr: Decimal,
