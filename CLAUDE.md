@@ -19,13 +19,12 @@ crates/server/src/
   error.rs           ← BotError
   state.rs           ← PipelineConfig, PipelineState, BotState
   regime.rs          ← RegimeInput, regime_channel (classify_regime은 테스트 전용 pub(crate))
-  dual_client.rs     ← KR/US 듀얼 토큰 클라이언트 래퍼
+  run_generic.rs     ← KR/US 듀얼 토큰 클라이언트 래퍼 및 어댑터 생성 로직
   db/                ← SQLite DB (sqlx), 마이그레이션
   control/           ← 킬스위치, 복구
   execution/         ← 주문 실행, OrderState
   monitoring/        ← 알림, 전략 모니터
   position/          ← 포지션 관리
-  qualification/     ← setup_score (pub(crate) — 파이프라인 내부 전용)
   pipeline/          ← tick, signal, execution, position, scheduler, regime, tuner, review
   shared/            ← telegram, rest, control, activity
   notion.rs          ← Notion 연동

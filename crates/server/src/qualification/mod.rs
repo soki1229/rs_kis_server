@@ -1,1 +1,1 @@
-pub mod setup_score;
+// Module for qualification logic
