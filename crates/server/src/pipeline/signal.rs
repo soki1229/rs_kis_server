@@ -418,7 +418,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        async fn place_order(&self, _: UnifiedOrderRequest) -> Result<UnifiedOrderResult, BotError> {
+        async fn place_order(
+            &self,
+            _: UnifiedOrderRequest,
+        ) -> Result<UnifiedOrderResult, BotError> {
             unimplemented!()
         }
         async fn cancel_order(&self, _: &UnifiedUnfilledOrder) -> Result<bool, BotError> {
@@ -434,7 +437,12 @@ mod tests {
         ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
             Ok(vec![])
         }
-        async fn poll_order_status(&self, _: &str, _: &str, _: u64) -> Result<PollOutcome, BotError> {
+        async fn poll_order_status(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<PollOutcome, BotError> {
             unimplemented!()
         }
         async fn balance(&self) -> Result<UnifiedBalance, BotError> {
@@ -446,7 +454,9 @@ mod tests {
         }
         async fn daily_chart(&self, _: &str, _: u32) -> Result<Vec<UnifiedDailyBar>, BotError> {
             if self.fail_daily_chart {
-                Err(BotError::ApiError { msg: "API Down".into() })
+                Err(BotError::ApiError {
+                    msg: "API Down".into(),
+                })
             } else {
                 Ok(self.daily_bars.clone())
             }
@@ -477,7 +487,11 @@ mod tests {
     struct AlwaysBuySignal;
     #[async_trait]
     impl SignalStrategy for AlwaysBuySignal {
-        async fn evaluate(&self, ctx: &StrategySignalContext, _: &sqlx::SqlitePool) -> Option<TradeSignal> {
+        async fn evaluate(
+            &self,
+            ctx: &StrategySignalContext,
+            _: &sqlx::SqlitePool,
+        ) -> Option<TradeSignal> {
             Some(TradeSignal {
                 symbol: ctx.symbol.clone(),
                 direction: Direction::Long,
@@ -535,10 +549,11 @@ mod tests {
         assert_eq!(bad.len(), 0);
         assert_eq!(exch_map.get("AAPL").unwrap(), "NASD");
 
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = 'AAPL'")
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = 'AAPL'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -564,10 +579,11 @@ mod tests {
         assert_eq!(bad.len(), 0);
         assert_eq!(exch_map.get("005930").unwrap(), "J");
 
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = '005930'")
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = '005930'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -595,7 +611,7 @@ mod tests {
         let sig_strat = AlwaysBuySignal;
         let qual_strat = AlwaysPassQual;
         let risk_strat = FixedQtyRisk(dec!(50));
-        
+
         let ctx = StrategySignalContext {
             symbol: "TSLA".into(),
             market: "US".into(),
@@ -637,7 +653,7 @@ mod tests {
     fn test_atr_data_lineage_and_stop_calculation() {
         let atr_value = dec!(2.5);
         let entry_price = dec!(150.0);
-        
+
         let signal = TradeSignal {
             symbol: "NVDA".into(),
             direction: Direction::Long,
@@ -649,7 +665,7 @@ mod tests {
             setup_score: None,
             regime: None,
         };
-        
+
         let req = OrderRequest {
             symbol: signal.symbol.clone(),
             side: Side::Buy,
@@ -669,18 +685,18 @@ mod tests {
             atr: req.atr,
             exchange_code: None,
         };
-        
+
         let pos_cfg = crate::config::PositionConfig {
             stop_atr_multiplier: dec!(1.5),
             profit_target_1_atr: dec!(2.0),
             profit_target_2_atr: dec!(4.0),
             ..Default::default()
         };
-        
+
         let atr = fill.atr.unwrap_or(Decimal::ONE);
         let stop_price = fill.filled_price - atr * pos_cfg.stop_atr_multiplier;
         let pt1 = fill.filled_price + atr * pos_cfg.profit_target_1_atr;
-        
+
         assert_eq!(stop_price, dec!(146.25));
         assert_eq!(pt1, dec!(155.0));
     }
