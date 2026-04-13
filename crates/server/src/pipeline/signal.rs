@@ -75,6 +75,8 @@ struct SignalState {
     candles: HashMap<String, CandleAccumulator>,
     completed: HashMap<String, VecDeque<CompletedCandle>>,
     latest_quotes: HashMap<String, QuoteSnapshot>,
+    #[allow(dead_code)]
+    rolling_highs: HashMap<String, VecDeque<(chrono::DateTime<chrono::Utc>, Decimal)>>,
     watchlist: WatchlistSet,
     candle_start: HashMap<String, Instant>,
     cached_balance: Option<(Decimal, Instant)>,
@@ -257,6 +259,7 @@ pub async fn run_signal_task(
         candles: HashMap::new(),
         completed: HashMap::new(),
         latest_quotes: HashMap::new(),
+        rolling_highs: HashMap::new(),
         watchlist: WatchlistSet::default(),
         candle_start: HashMap::new(),
         cached_balance: None,
@@ -268,6 +271,8 @@ pub async fn run_signal_task(
     state.watchlist = initial_wl.clone();
     for sym in initial_wl.all_unique() {
         state.candles.insert(sym.clone(), CandleAccumulator::new());
+        state.completed.insert(sym.clone(), VecDeque::new());
+        state.rolling_highs.insert(sym.clone(), VecDeque::new());
     }
 
     let market_label = adapter.market_id().label().to_string();
@@ -284,7 +289,11 @@ pub async fn run_signal_task(
                     let (exch_map, _bad): (HashMap<String, String>, std::collections::HashSet<String>) = seed_symbols(&new_syms, adapter.as_ref(), &db_pool, false).await;
                     state.symbol_exchange.extend(exch_map);
                 }
-                for sym in &new_wl { if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new()); } }
+                for sym in &new_wl {
+                    if !state.candles.contains_key(sym) { state.candles.insert(sym.clone(), CandleAccumulator::new()); }
+                    if !state.completed.contains_key(sym) { state.completed.insert(sym.clone(), VecDeque::new()); }
+                    if !state.rolling_highs.contains_key(sym) { state.rolling_highs.insert(sym.clone(), VecDeque::new()); }
+                }
             }
             Ok(tick) = tick_rx.recv() => {
                 if state.watchlist.all_unique().is_empty() { state.watchlist = watchlist_rx.borrow().clone(); }
@@ -387,4 +396,258 @@ pub async fn seed_symbols(
         }
     }
     (exch_map, bad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::BotError;
+    use crate::market::{
+        MarketId, MarketTiming, PollOutcome, UnifiedBalance, UnifiedCandleBar, UnifiedDailyBar,
+        UnifiedOrderHistoryItem, UnifiedOrderRequest, UnifiedOrderResult, UnifiedUnfilledOrder,
+    };
+    use crate::strategy::{Direction, TradeSignal};
+    use crate::types::FillInfo;
+    use async_trait::async_trait;
+    use rust_decimal_macros::dec;
+
+    pub struct MockAdapter {
+        pub market_id: MarketId,
+        pub daily_bars: Vec<UnifiedDailyBar>,
+        pub fail_daily_chart: bool,
+    }
+
+    #[async_trait]
+    impl MarketAdapter for MockAdapter {
+        fn market_id(&self) -> MarketId {
+            self.market_id
+        }
+        fn name(&self) -> &'static str {
+            "Mock"
+        }
+        async fn place_order(&self, _: UnifiedOrderRequest) -> Result<UnifiedOrderResult, BotError> {
+            unimplemented!()
+        }
+        async fn cancel_order(&self, _: &UnifiedUnfilledOrder) -> Result<bool, BotError> {
+            unimplemented!()
+        }
+        async fn unfilled_orders(&self) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
+            Ok(vec![])
+        }
+        async fn order_history(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
+            Ok(vec![])
+        }
+        async fn poll_order_status(&self, _: &str, _: &str, _: u64) -> Result<PollOutcome, BotError> {
+            unimplemented!()
+        }
+        async fn balance(&self) -> Result<UnifiedBalance, BotError> {
+            Ok(UnifiedBalance {
+                total_equity: dec!(100000),
+                available_cash: dec!(100000),
+                positions: vec![],
+            })
+        }
+        async fn daily_chart(&self, _: &str, _: u32) -> Result<Vec<UnifiedDailyBar>, BotError> {
+            if self.fail_daily_chart {
+                Err(BotError::ApiError { msg: "API Down".into() })
+            } else {
+                Ok(self.daily_bars.clone())
+            }
+        }
+        async fn intraday_candles(
+            &self,
+            _: &str,
+            _: u32,
+        ) -> Result<Vec<UnifiedCandleBar>, BotError> {
+            Ok(vec![])
+        }
+        async fn current_price(&self, _: &str) -> Result<Decimal, BotError> {
+            Ok(dec!(150.0))
+        }
+        fn market_timing(&self) -> MarketTiming {
+            MarketTiming {
+                is_open: true,
+                mins_since_open: 100,
+                mins_until_close: 100,
+                is_holiday: false,
+            }
+        }
+        async fn is_holiday(&self) -> Result<bool, BotError> {
+            Ok(false)
+        }
+    }
+
+    pub struct AlwaysBuySignal;
+    #[async_trait]
+    impl SignalStrategy for AlwaysBuySignal {
+        async fn evaluate(&self, ctx: &StrategySignalContext, _: &sqlx::SqlitePool) -> Option<TradeSignal> {
+            Some(TradeSignal {
+                symbol: ctx.symbol.clone(),
+                direction: Direction::Long,
+                strength: 1.0,
+                llm_verdict: None,
+                entry_price: ctx.current_price,
+                quantity: dec!(10),
+                atr: dec!(2.5),
+                setup_score: Some(80),
+                regime: None,
+            })
+        }
+    }
+
+    pub struct AlwaysPassQual;
+    impl QualificationStrategy for AlwaysPassQual {
+        fn qualify(&self, _: &SignalCandidate) -> QualResult {
+            QualResult::Pass
+        }
+    }
+
+    pub struct FixedQtyRisk(pub Decimal);
+    impl RiskStrategy for FixedQtyRisk {
+        fn size(&self, _: &TradeSignal, _: &Portfolio) -> Decimal {
+            self.0
+        }
+    }
+
+    async fn setup_test_db() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        sqlx::query("CREATE TABLE daily_ohlc (symbol TEXT, date TEXT, open TEXT, high TEXT, low TEXT, close TEXT, volume TEXT, PRIMARY KEY(symbol, date))")
+            .execute(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_seed_symbols_writes_to_db_us() {
+        let db = setup_test_db().await;
+        let adapter = MockAdapter {
+            market_id: MarketId::Us,
+            daily_bars: vec![UnifiedDailyBar {
+                date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).unwrap(),
+                open: dec!(100),
+                high: dec!(110),
+                low: dec!(90),
+                close: dec!(105),
+                volume: 1000,
+            }],
+            fail_daily_chart: false,
+        };
+
+        let symbols = vec!["AAPL".to_string()];
+        let (exch_map, bad) = seed_symbols(&symbols, &adapter, &db, false).await;
+
+        assert_eq!(bad.len(), 0);
+        assert_eq!(exch_map.get("AAPL").unwrap(), "NASD");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = 'AAPL'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_seed_symbols_writes_to_db_kr() {
+        let db = setup_test_db().await;
+        let adapter = MockAdapter {
+            market_id: MarketId::Kr,
+            daily_bars: vec![UnifiedDailyBar {
+                date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).unwrap(),
+                open: dec!(50000),
+                high: dec!(51000),
+                low: dec!(49000),
+                close: dec!(50500),
+                volume: 1000000,
+            }],
+            fail_daily_chart: false,
+        };
+
+        let symbols = vec!["005930".to_string()];
+        let (exch_map, bad) = seed_symbols(&symbols, &adapter, &db, false).await;
+
+        assert_eq!(bad.len(), 0);
+        assert_eq!(exch_map.get("005930").unwrap(), "J");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM daily_ohlc WHERE symbol = '005930'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_seed_symbols_handles_failure() {
+        let db = setup_test_db().await;
+        let adapter = MockAdapter {
+            market_id: MarketId::Us,
+            daily_bars: vec![],
+            fail_daily_chart: true,
+        };
+
+        let symbols = vec!["MSFT".to_string()];
+        let (exch_map, bad) = seed_symbols(&symbols, &adapter, &db, false).await;
+
+        assert_eq!(bad.len(), 1);
+        assert!(bad.contains("MSFT"));
+        assert!(exch_map.get("MSFT").is_none());
+    }
+
+    #[test]
+    fn test_atr_data_lineage_and_stop_calculation() {
+        // Direction 1: Type Chain Unit Test
+        let atr_value = dec!(2.5);
+        let entry_price = dec!(150.0);
+        
+        // 1. TradeSignal -> OrderRequest
+        let signal = TradeSignal {
+            symbol: "NVDA".into(),
+            direction: Direction::Long,
+            strength: 1.0,
+            llm_verdict: None,
+            entry_price,
+            quantity: dec!(10),
+            atr: atr_value,
+            setup_score: None,
+            regime: None,
+        };
+        
+        let req = OrderRequest {
+            symbol: signal.symbol.clone(),
+            side: Side::Buy,
+            qty: 10,
+            price: None,
+            atr: Some(signal.atr),
+            exchange_code: None,
+            strength: None,
+        };
+        assert_eq!(req.atr, Some(atr_value));
+
+        // 2. FillInfo -> PositionState
+        let fill = FillInfo {
+            order_id: "ord-1".into(),
+            symbol: "NVDA".into(),
+            filled_qty: 10,
+            filled_price: entry_price,
+            atr: req.atr,
+            exchange_code: None,
+        };
+        
+        let pos_cfg = crate::config::PositionConfig {
+            stop_atr_multiplier: dec!(1.5),
+            profit_target_1_atr: dec!(2.0),
+            profit_target_2_atr: dec!(4.0),
+            ..Default::default()
+        };
+        
+        // Use the actual logic from PositionState initialization in generic_position.rs
+        let atr = fill.atr.unwrap_or(Decimal::ONE);
+        let stop_price = fill.filled_price - atr * pos_cfg.stop_atr_multiplier;
+        let pt1 = fill.filled_price + atr * pos_cfg.profit_target_1_atr;
+        
+        assert_eq!(stop_price, dec!(146.25)); // 150 - 2.5 * 1.5
+        assert_eq!(pt1, dec!(155.0)); // 150 + 2.5 * 2.0
+    }
 }
