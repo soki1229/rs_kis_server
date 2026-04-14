@@ -135,6 +135,19 @@ pub struct PnLReport {
     pub date: chrono::NaiveDate,
 }
 
+// ── Candle ─────────────────────────────────────────────────────────────────
+
+/// Strategy 인터페이스용 캔들 데이터. kis_api::CandleBar와 독립적.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandleBar {
+    pub date: String, // "YYYYMMDD" 또는 "YYYYMMDDHHMMSS"
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub volume: u64,
+}
+
 // ── Signal ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

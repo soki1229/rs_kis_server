@@ -1,5 +1,7 @@
 use crate::config::ProfileName;
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MonitoringInput {
     pub current_profile: ProfileName,
     /// 최근 7일 누적 R (손절 기준 R 배수)
@@ -22,7 +24,25 @@ pub struct MonitoringInput {
     pub conservative_7d_r: f64,
 }
 
-#[derive(Debug, Clone)]
+impl Default for MonitoringInput {
+    fn default() -> Self {
+        Self {
+            current_profile: ProfileName::Default,
+            rolling_7d_r: 0.0,
+            mdd_pct: 0.0,
+            regime_consecutive_losses: 0,
+            rolling_30d_r: 0.0,
+            llm_win_rate_vs_rule: 0.0,
+            score_80plus_win_rate: 0.5,
+            conservative_days_elapsed: 0,
+            consecutive_losses: 0,
+            conservative_7d_r: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MonitoringDecision {
     /// Default → Conservative 강제 전환
     ForceConservative { reason: String },
@@ -38,6 +58,7 @@ pub enum MonitoringDecision {
 
 /// 스펙 Section 15 경보 vs 강제 전환 평가. 순수 함수.
 /// 하나의 상황에 여러 MonitoringDecision이 동시에 반환될 수 있음.
+#[allow(dead_code)]
 pub fn evaluate_monitoring(input: &MonitoringInput) -> Vec<MonitoringDecision> {
     let mut decisions = Vec::new();
 
@@ -100,4 +121,82 @@ pub fn evaluate_monitoring(input: &MonitoringInput) -> Vec<MonitoringDecision> {
     }
 
     decisions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn force_conservative_when_7d_r_below_minus_2() {
+        let input = MonitoringInput {
+            rolling_7d_r: -2.1,
+            ..Default::default()
+        };
+        let d = evaluate_monitoring(&input);
+        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::ForceConservative { .. })));
+    }
+
+    #[test]
+    fn force_conservative_when_mdd_5pct() {
+        let input = MonitoringInput {
+            mdd_pct: 0.051,
+            ..Default::default()
+        };
+        let d = evaluate_monitoring(&input);
+        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::ForceConservative { .. })));
+    }
+
+    #[test]
+    fn regime_suspend_when_5_consecutive_losses() {
+        let input = MonitoringInput {
+            regime_consecutive_losses: 5,
+            ..Default::default()
+        };
+        let d = evaluate_monitoring(&input);
+        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::SuspendRegime { .. })));
+    }
+
+    #[test]
+    fn return_to_default_after_cooldown_and_recovery() {
+        let input = MonitoringInput {
+            current_profile: ProfileName::Conservative,
+            conservative_days_elapsed: 3,
+            conservative_7d_r: 1.1,
+            consecutive_losses: 0,
+            ..Default::default()
+        };
+        let d = evaluate_monitoring(&input);
+        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::ReturnToDefault)));
+    }
+
+    #[test]
+    fn no_return_to_default_before_cooldown() {
+        let input = MonitoringInput {
+            current_profile: ProfileName::Conservative,
+            conservative_days_elapsed: 2,
+            conservative_7d_r: 1.5,
+            consecutive_losses: 0,
+            ..Default::default()
+        };
+        let d = evaluate_monitoring(&input);
+        assert!(!d.iter().any(|x| matches!(x, MonitoringDecision::ReturnToDefault)));
+    }
+
+    #[test]
+    fn warn_alert_when_30d_r_below_minus_5() {
+        let input = MonitoringInput {
+            rolling_30d_r: -5.1,
+            ..Default::default()
+        };
+        let d = evaluate_monitoring(&input);
+        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::WarnAlert { .. })));
+    }
+
+    #[test]
+    fn no_action_when_all_clear() {
+        let input = MonitoringInput::default();
+        let d = evaluate_monitoring(&input);
+        assert!(d.is_empty());
+    }
 }

@@ -212,4 +212,54 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(summary.read().unwrap().bot_state, BotState::HardBlocked);
     }
+
+    /// KR + US ControlTask가 독립적으로 상태 전이를 수행하는지
+    #[tokio::test]
+    async fn kr_and_us_control_tasks_are_independent() {
+        let (kr_summary, token_kr, kr_ks) = make_state();
+        let (us_summary, token_us, us_ks) = make_state();
+
+        let (kr_cmd_tx, kr_cmd_rx) = mpsc::channel(8);
+        let (us_cmd_tx, us_cmd_rx) = mpsc::channel(8);
+        let (kr_force_tx, _) = mpsc::channel(8);
+        let (us_force_tx, _) = mpsc::channel(8);
+
+        let t_kr = token_kr.clone();
+        let s_kr = kr_summary.clone();
+        tokio::spawn(async move { run_control_task(kr_cmd_rx, kr_force_tx, s_kr, kr_ks, t_kr).await });
+
+        let t_us = token_us.clone();
+        let s_us = us_summary.clone();
+        tokio::spawn(async move { run_control_task(us_cmd_rx, us_force_tx, s_us, us_ks, t_us).await });
+
+        // KR은 Active, US는 Suspended
+        kr_cmd_tx.send(BotCommand::Start).await.unwrap();
+        us_cmd_tx.send(BotCommand::Stop).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        assert_eq!(kr_summary.read().unwrap().bot_state, BotState::Active);
+        assert_eq!(us_summary.read().unwrap().bot_state, BotState::Suspended);
+
+        token_kr.cancel();
+        token_us.cancel();
+    }
+
+    /// 동일 명령을 여러 번 보내도 상태가 멱등적인지
+    #[tokio::test]
+    async fn stop_command_is_idempotent() {
+        let (summary, token, ks_path) = make_state();
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (force_tx, _) = mpsc::channel(8);
+        let s = summary.clone();
+        let t = token.clone();
+        tokio::spawn(async move { run_control_task(cmd_rx, force_tx, s, ks_path, t).await });
+
+        for _ in 0..5 {
+            cmd_tx.send(BotCommand::Stop).await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(summary.read().unwrap().bot_state, BotState::Suspended);
+        token.cancel();
+    }
 }

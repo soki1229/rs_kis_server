@@ -1,6 +1,6 @@
 use crate::pipeline::QuoteSnapshot;
 use crate::regime::RegimeInput;
-use crate::types::MarketRegime;
+use crate::types::{CandleBar, MarketRegime};
 use async_trait::async_trait;
 use kis_api::{KisApi, KisDomesticApi};
 use rust_decimal::Decimal;
@@ -34,7 +34,7 @@ pub struct SignalContext {
     /// "US" | "KR"
     pub market: String,
     /// 완성된 캔들 (최신 순)
-    pub candles: Vec<kis_api::CandleBar>,
+    pub candles: Vec<CandleBar>,
     /// 현재 호가 정보
     pub quote: Option<QuoteSnapshot>,
     /// 현재 틱 가격

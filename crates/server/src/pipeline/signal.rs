@@ -5,9 +5,8 @@ use crate::strategy::{
     Portfolio, QualResult, QualificationStrategy, RiskStrategy, SignalCandidate,
     SignalContext as StrategySignalContext, SignalStrategy,
 };
-use crate::types::MarketRegime;
+use crate::types::{CandleBar, MarketRegime};
 use crate::types::{OrderRequest, Side, WatchlistSet};
-use kis_api::CandleBar;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -140,12 +139,12 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let candles: Vec<CandleBar> = completed
         .iter()
         .map(|c| CandleBar {
-            date: c.ts.format("%Y%m%d").to_string(),
+            date: c.ts.format("%Y%m%d%H%M%S").to_string(), // YYYYMMDDHHMMSS for intraday
             open: c.open,
             high: c.high,
             low: c.low,
             close: c.close,
-            volume: Decimal::from(c.volume),
+            volume: c.volume,
         })
         .collect();
 

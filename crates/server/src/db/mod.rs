@@ -41,3 +41,55 @@ pub async fn connect(db_path: &str) -> Result<SqlitePool, BotError> {
 
     Ok(pool)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_creates_schema() {
+        let db_path = format!(
+            "target/test_db_{}.db",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let pool = connect(&db_path).await.expect("connect should succeed");
+
+        // Verify some tables exist
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orders'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, 1);
+
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='positions'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, 1);
+
+        let _ = tokio::fs::remove_file(db_path).await;
+    }
+
+    #[tokio::test]
+    async fn connect_idempotent() {
+        let db_path = format!(
+            "target/test_db_idemp_{}.db",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let _pool1 = connect(&db_path).await.unwrap();
+        let pool2 = connect(&db_path).await.unwrap();
+
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='signal_log'",
+        )
+        .fetch_one(&pool2)
+        .await
+        .unwrap();
+        assert_eq!(row.0, 1);
+
+        let _ = tokio::fs::remove_file(db_path).await;
+    }
+}

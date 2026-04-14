@@ -52,3 +52,61 @@ impl AlertRouter {
         let _ = self.sender.send(AlertMessage { severity, message });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn critical_event_received_by_subscriber() {
+        let router = AlertRouter::new(10);
+        let mut rx = router.subscribe();
+
+        router.critical("system crash".to_string());
+
+        let event: AlertMessage = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.severity, AlertSeverity::Critical);
+        assert_eq!(event.message, "system crash");
+    }
+
+    #[tokio::test]
+    async fn warn_event_received() {
+        let router = AlertRouter::new(10);
+        let mut rx = router.subscribe();
+
+        router.warn("slippage high".to_string());
+
+        let event: AlertMessage = rx.recv().await.unwrap();
+        assert_eq!(event.severity, AlertSeverity::Warn);
+    }
+
+    #[tokio::test]
+    async fn info_event_received() {
+        let router = AlertRouter::new(10);
+        let mut rx = router.subscribe();
+
+        router.info("starting".to_string());
+
+        let event: AlertMessage = rx.recv().await.unwrap();
+        assert_eq!(event.severity, AlertSeverity::Info);
+    }
+
+    #[tokio::test]
+    async fn multiple_subscribers_all_receive() {
+        let router = AlertRouter::new(10);
+        let mut rx1 = router.subscribe();
+        let mut rx2 = router.subscribe();
+
+        router.critical("alert".to_string());
+
+        let e1: AlertMessage = rx1.recv().await.unwrap();
+        let e2: AlertMessage = rx2.recv().await.unwrap();
+
+        assert_eq!(e1.message, "alert");
+        assert_eq!(e2.message, "alert");
+    }
+}

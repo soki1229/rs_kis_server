@@ -224,6 +224,7 @@ impl NotionClient {
             .ok_or_else(|| anyhow::anyhow!("failed to create database"))
     }
 
+    #[allow(dead_code)]
     pub async fn add_daily_report(&self, report: &DailyReportRow) -> anyhow::Result<()> {
         let db_id = self
             .ids
@@ -247,6 +248,7 @@ impl NotionClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn add_param_change(&self, row: &ParamChangeRow) -> anyhow::Result<()> {
         let db_id = self
             .ids
@@ -334,6 +336,7 @@ impl NotionClient {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct DailyReportRow {
     pub date: String,
     pub market: String,
@@ -351,6 +354,7 @@ pub struct DailyReportRow {
     pub suggestions: String,
 }
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ParamChangeRow {
     pub timestamp: String,
     pub market: String,

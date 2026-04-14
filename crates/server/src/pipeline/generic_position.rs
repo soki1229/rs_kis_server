@@ -6,10 +6,9 @@
 use crate::config::PositionConfig;
 use crate::market::MarketAdapter;
 use crate::pipeline::TickData;
-use crate::position::{calculate_trailing_stop, evaluate_exit, ExitDecision, PositionState};
 use crate::regime::RegimeReceiver;
 use crate::state::MarketLiveState;
-use crate::types::{FillInfo, OrderRequest, Position, Side};
+use crate::types::{FillInfo, MarketRegime, OrderRequest, Position, Side};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -17,6 +16,88 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+
+pub struct PositionState {
+    pub entry_price: Decimal,
+    pub stop_price: Decimal,
+    pub atr_at_entry: Decimal,
+    pub profit_target_1: Decimal,
+    pub profit_target_2: Decimal,
+    pub trailing_stop_price: Option<Decimal>,
+    pub partial_exit_done: bool,
+    pub regime: MarketRegime,
+    #[allow(dead_code)]
+    pub profit_target_1_atr: Decimal,
+    #[allow(dead_code)]
+    pub profit_target_2_atr: Decimal,
+    pub trailing_atr_trending: Decimal,
+    pub trailing_atr_volatile: Decimal,
+    /// KIS 시장분류코드: "J"=KOSPI, "Q"=KOSDAQ. US는 None.
+    pub exchange_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExitDecision {
+    /// 손절가 도달 → 시장가 전량 청산
+    StopLoss,
+    /// 1차 목표가 도달 → 50% 부분 익절. pct = 0.5
+    PartialExit { pct: Decimal },
+    /// 2차 목표가 도달 (1차 익절 후) → 잔여 전량 청산
+    FullExit,
+    /// Trailing stop 도달 → 잔여 전량 청산
+    TrailingStop,
+    /// 아무 조건도 해당 없음 → 보유 유지
+    Hold,
+}
+
+/// 스펙 Section 7 기반 익절/손절 판정. 순수 함수.
+/// 우선순위: StopLoss > FullExit > TrailingStop > PartialExit > Hold
+pub fn evaluate_exit(pos: &PositionState, current_price: Decimal) -> ExitDecision {
+    // 손절가 도달
+    if current_price <= pos.stop_price {
+        return ExitDecision::StopLoss;
+    }
+
+    if pos.partial_exit_done {
+        // 2차 목표가 도달
+        if current_price >= pos.profit_target_2 {
+            return ExitDecision::FullExit;
+        }
+        // Trailing stop 도달 (1차 익절 후에만 적용)
+        if let Some(ts) = pos.trailing_stop_price {
+            if current_price <= ts {
+                return ExitDecision::TrailingStop;
+            }
+        }
+    } else {
+        // 1차 목표가 도달
+        if current_price >= pos.profit_target_1 {
+            return ExitDecision::PartialExit {
+                pct: Decimal::new(5, 1),
+            }; // 0.5
+        }
+    }
+
+    ExitDecision::Hold
+}
+
+/// 레짐별 trailing stop 가격 계산. 스펙 Section 7 기반.
+/// Quiet 레짐은 trailing stop 없음 → None 반환.
+pub fn calculate_trailing_stop(
+    high_price: Decimal,
+    atr: Decimal,
+    regime: &MarketRegime,
+    trending_multiplier: Decimal,
+    volatile_multiplier: Decimal,
+) -> Option<Decimal> {
+    let multiplier = match regime {
+        MarketRegime::Trending => trending_multiplier,
+        MarketRegime::Volatile => volatile_multiplier,
+        MarketRegime::Quiet => return None,
+    };
+    Some(high_price - atr * multiplier)
+}
+
 
 /// Generic position task that works with any MarketAdapter.
 #[allow(clippy::too_many_arguments)]
@@ -239,5 +320,106 @@ pub async fn run_generic_position_task(
                 regime: format!("{:?}", *regime_rx.borrow()),
             })
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::MarketRegime;
+    use rust_decimal_macros::dec;
+
+    fn make_position(entry: f64, atr: f64) -> PositionState {
+        let entry = Decimal::try_from(entry).unwrap();
+        let atr = Decimal::try_from(atr).unwrap();
+        PositionState {
+            entry_price: entry,
+            stop_price: entry - atr * dec!(2.0),
+            atr_at_entry: atr,
+            profit_target_1: entry + atr * dec!(2.0),
+            profit_target_2: entry + atr * dec!(4.0),
+            trailing_stop_price: None,
+            partial_exit_done: false,
+            regime: MarketRegime::Trending,
+            profit_target_1_atr: dec!(2.0),
+            profit_target_2_atr: dec!(4.0),
+            trailing_atr_trending: dec!(2.0),
+            trailing_atr_volatile: dec!(1.0),
+            exchange_code: None,
+        }
+    }
+
+    #[test]
+    fn no_exit_when_in_normal_range() {
+        let pos = make_position(100.0, 5.0);
+        let decision = evaluate_exit(&pos, dec!(102));
+        assert!(matches!(decision, ExitDecision::Hold));
+    }
+
+    #[test]
+    fn stop_hit_triggers_full_exit() {
+        let pos = make_position(100.0, 5.0);
+        let decision = evaluate_exit(&pos, dec!(90));
+        assert!(matches!(decision, ExitDecision::StopLoss));
+    }
+
+    #[test]
+    fn first_target_hit_triggers_partial() {
+        let pos = make_position(100.0, 5.0);
+        let decision = evaluate_exit(&pos, dec!(110));
+        assert!(matches!(decision, ExitDecision::PartialExit { .. }));
+    }
+
+    #[test]
+    fn second_target_hit_triggers_full_exit() {
+        let mut pos = make_position(100.0, 5.0);
+        pos.partial_exit_done = true;
+        let decision = evaluate_exit(&pos, dec!(120));
+        assert!(matches!(decision, ExitDecision::FullExit));
+    }
+
+    #[test]
+    fn trailing_stop_hit_after_partial_exit() {
+        let mut pos = make_position(100.0, 5.0);
+        pos.partial_exit_done = true;
+        pos.trailing_stop_price = Some(dec!(105));
+        let decision = evaluate_exit(&pos, dec!(104));
+        assert!(matches!(decision, ExitDecision::TrailingStop));
+    }
+
+    #[test]
+    fn trailing_stop_price_for_trending_regime() {
+        let stop = calculate_trailing_stop(
+            dec!(120),
+            dec!(5),
+            &MarketRegime::Trending,
+            dec!(2.0),
+            dec!(1.0),
+        );
+        assert_eq!(stop, Some(dec!(110)));
+    }
+
+    #[test]
+    fn trailing_stop_price_for_volatile_regime() {
+        let stop = calculate_trailing_stop(
+            dec!(120),
+            dec!(5),
+            &MarketRegime::Volatile,
+            dec!(2.0),
+            dec!(1.0),
+        );
+        assert_eq!(stop, Some(dec!(115)));
+    }
+
+    #[test]
+    fn trailing_stop_returns_none_for_quiet_regime() {
+        let stop = calculate_trailing_stop(
+            dec!(120),
+            dec!(5),
+            &MarketRegime::Quiet,
+            dec!(2.0),
+            dec!(1.0),
+        );
+        assert_eq!(stop, None);
     }
 }
