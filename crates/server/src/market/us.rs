@@ -192,6 +192,10 @@ impl MarketAdapter for UsRealAdapter {
         us_current_price(&self.base.client, symbol).await
     }
 
+    async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
+        us_volume_ranking(&self.base.client, count).await
+    }
+
     fn market_timing(&self) -> MarketTiming {
         us_market_timing()
     }
@@ -299,6 +303,10 @@ impl MarketAdapter for UsVtsAdapter {
 
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError> {
         us_current_price(&self.base.client, symbol).await
+    }
+
+    async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
+        us_volume_ranking(&self.base.client, count).await
     }
 
     fn market_timing(&self) -> MarketTiming {
@@ -565,4 +573,17 @@ async fn us_is_holiday(client: &Arc<dyn KisApi>) -> Result<bool, BotError> {
         .format("%Y%m%d")
         .to_string();
     Ok(holidays.iter().any(|h| h.date == today))
+}
+
+async fn us_volume_ranking(
+    client: &Arc<dyn KisApi>,
+    count: u32,
+) -> Result<Vec<String>, BotError> {
+    let items = client
+        .volume_ranking(&Exchange::NASD, count)
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("volume_ranking failed: {}", e),
+        })?;
+    Ok(items.into_iter().map(|i| i.symbol).collect())
 }

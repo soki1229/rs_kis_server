@@ -1,8 +1,8 @@
+use crate::market::MarketAdapter;
 use crate::pipeline::QuoteSnapshot;
 use crate::regime::RegimeInput;
 use crate::types::{CandleBar, MarketRegime};
 use async_trait::async_trait;
-use kis_api::{KisApi, KisDomesticApi};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 
@@ -11,10 +11,8 @@ use std::sync::Arc;
 /// 워치리스트 구성 전략. 어떤 종목을 감시할지 결정한다.
 #[async_trait]
 pub trait DiscoveryStrategy: Send + Sync {
-    /// US 워치리스트 빌드
-    async fn build_us_watchlist(&self, client: Arc<dyn KisApi>) -> Vec<String>;
-    /// KR 워치리스트 빌드
-    async fn build_kr_watchlist(&self, client: Arc<dyn KisDomesticApi>) -> Vec<String>;
+    /// 워치리스트 빌드 (KR/US 통합)
+    async fn build_watchlist(&self, adapter: Arc<dyn MarketAdapter>) -> Vec<String>;
 }
 
 // ── Regime ────────────────────────────────────────────────────────────────
@@ -35,6 +33,8 @@ pub struct SignalContext {
     pub market: String,
     /// 완성된 캔들 (최신 순)
     pub candles: Vec<CandleBar>,
+    /// 일봉 데이터 (신규, 최신 순 최대 30개)
+    pub daily_bars: Vec<CandleBar>,
     /// 현재 호가 정보
     pub quote: Option<QuoteSnapshot>,
     /// 현재 틱 가격
@@ -85,7 +85,7 @@ pub struct TradeSignal {
 #[async_trait]
 pub trait SignalStrategy: Send + Sync {
     /// None 반환 시 진입 없음
-    async fn evaluate(&self, ctx: &SignalContext, db: &sqlx::SqlitePool) -> Option<TradeSignal>;
+    async fn evaluate(&self, ctx: &SignalContext) -> Option<TradeSignal>;
 }
 
 // ── Qualification ─────────────────────────────────────────────────────────

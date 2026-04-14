@@ -105,7 +105,7 @@ async fn sleep_until_next_day(token: &CancellationToken) {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kr_scheduler_task(
     adapter: Arc<dyn MarketAdapter>,
-    _discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
+    discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
@@ -143,10 +143,15 @@ pub async fn run_kr_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("KR", if now >= open { "Trading" } else { "Pre-market" });
-            // DiscoveryStrategy building still expects specific clients for now
-            // This will be fixed in a later phase. For now, use static watchlist.
+            
+            let dynamic = discovery_strategy.build_watchlist(adapter.clone()).await;
+            let stable = if dynamic.is_empty() {
+                config.watchlist.clone()
+            } else {
+                dynamic
+            };
             let fresh = WatchlistSet {
-                stable: config.watchlist.clone(),
+                stable,
                 aggressive: vec![],
             };
             let merged: WatchlistSet =
@@ -175,7 +180,7 @@ pub async fn run_kr_scheduler_task(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_scheduler_task(
     adapter: Arc<dyn MarketAdapter>,
-    _discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
+    discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
@@ -213,8 +218,15 @@ pub async fn run_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("US", if now >= open { "Trading" } else { "Pre-market" });
+            
+            let dynamic = discovery_strategy.build_watchlist(adapter.clone()).await;
+            let stable = if dynamic.is_empty() {
+                config.watchlist.clone()
+            } else {
+                dynamic
+            };
             let fresh = WatchlistSet {
-                stable: config.watchlist.clone(),
+                stable,
                 aggressive: vec![],
             };
             let merged: WatchlistSet =
@@ -305,6 +317,9 @@ mod tests {
         }
         async fn current_price(&self, _: &str) -> Result<Decimal, BotError> {
             Ok(Decimal::ZERO)
+        }
+        async fn volume_ranking(&self, _: u32) -> Result<Vec<String>, BotError> {
+            Ok(vec![])
         }
         fn market_timing(&self) -> MarketTiming {
             MarketTiming {

@@ -148,10 +148,40 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         })
         .collect();
 
+    // daily_bars 로드 (strategy trait의 db 의존성 제거를 위해 파이프라인이 사전 로드)
+    use sqlx::Row;
+    let daily_bars: Vec<CandleBar> = {
+        let rows = sqlx::query(
+            "SELECT date, open, high, low, close, volume FROM daily_ohlc \
+             WHERE symbol = ? AND date != '0000-00-00' ORDER BY date DESC LIMIT 30",
+        )
+        .bind(&symbol)
+        .fetch_all(&db_pool)
+        .await
+        .unwrap_or_default();
+
+        rows.iter()
+            .map(|r| CandleBar {
+                date: r.get::<String, _>(0),
+                open: r.get::<String, _>(1).parse().unwrap_or(Decimal::ZERO),
+                high: r.get::<String, _>(2).parse().unwrap_or(Decimal::ZERO),
+                low: r.get::<String, _>(3).parse().unwrap_or(Decimal::ZERO),
+                close: r.get::<String, _>(4).parse().unwrap_or(Decimal::ZERO),
+                volume: r
+                    .get::<String, _>(5)
+                    .parse::<Decimal>()
+                    .unwrap_or(Decimal::ZERO)
+                    .to_u64()
+                    .unwrap_or(0),
+            })
+            .collect()
+    };
+
     let strategy_ctx = StrategySignalContext {
         symbol: symbol.clone(),
         market: market.clone(),
         candles,
+        daily_bars,
         quote,
         current_price,
         rolling_high,
@@ -161,7 +191,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         regime_filter: strategy.regime_filter,
     };
 
-    let trade_signal = match signal_strategy.evaluate(&strategy_ctx, &db_pool).await {
+    let trade_signal = match signal_strategy.evaluate(&strategy_ctx).await {
         Some(sig) => sig,
         None => {
             activity.record_eval(&market, &symbol, 0, "skip", "no_signal");
@@ -489,11 +519,7 @@ mod tests {
     struct AlwaysBuySignal;
     #[async_trait]
     impl SignalStrategy for AlwaysBuySignal {
-        async fn evaluate(
-            &self,
-            ctx: &StrategySignalContext,
-            _: &sqlx::SqlitePool,
-        ) -> Option<TradeSignal> {
+        async fn evaluate(&self, ctx: &StrategySignalContext) -> Option<TradeSignal> {
             Some(TradeSignal {
                 symbol: ctx.symbol.clone(),
                 direction: Direction::Long,
@@ -625,6 +651,7 @@ mod tests {
             symbol: "TSLA".into(),
             market: "US".into(),
             candles: vec![],
+            daily_bars: vec![],
             quote: None,
             current_price: dec!(200.0),
             rolling_high: dec!(210.0),
@@ -635,7 +662,7 @@ mod tests {
         };
 
         // 1. Signal
-        let signal = sig_strat.evaluate(&ctx, &db).await.unwrap();
+        let signal = sig_strat.evaluate(&ctx).await.unwrap();
         assert_eq!(signal.strength, 1.0);
         assert_eq!(signal.atr, dec!(2.5));
 

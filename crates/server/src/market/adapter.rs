@@ -72,6 +72,14 @@ pub trait MarketAdapter: Send + Sync + 'static {
     /// Get current price for a symbol.
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError>;
 
+    /// Get top N symbols by trading volume.
+    /// Returns symbol strings only (ticker codes).
+    /// Default implementation returns empty vec (adapters may override).
+    async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
+        let _ = count;
+        Ok(vec![])
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Market Timing
     // ─────────────────────────────────────────────────────────────────────────
@@ -170,6 +178,10 @@ impl MarketAdapter for Arc<dyn MarketAdapter> {
 
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError> {
         (**self).current_price(symbol).await
+    }
+
+    async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
+        (**self).volume_ranking(count).await
     }
 
     fn market_timing(&self) -> MarketTiming {

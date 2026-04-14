@@ -177,6 +177,10 @@ impl MarketAdapter for KrRealAdapter {
         kr_current_price(&self.base.client, symbol).await
     }
 
+    async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
+        kr_volume_ranking(&self.base.client, count).await
+    }
+
     fn market_timing(&self) -> MarketTiming {
         kr_market_timing()
     }
@@ -319,6 +323,10 @@ impl MarketAdapter for KrVtsAdapter {
 
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError> {
         kr_current_price(&self.base.client, symbol).await
+    }
+
+    async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
+        kr_volume_ranking(&self.base.client, count).await
     }
 
     fn market_timing(&self) -> MarketTiming {
@@ -592,4 +600,43 @@ async fn kr_is_holiday(client: &Arc<dyn KisDomesticApi>) -> Result<bool, BotErro
         })?;
 
     Ok(!holidays.is_empty())
+}
+
+async fn kr_volume_ranking(
+    client: &Arc<dyn KisDomesticApi>,
+    count: u32,
+) -> Result<Vec<String>, BotError> {
+    let (kospi_count, kosdaq_count) = if count >= 20 {
+        (count * 3 / 4, count / 4)
+    } else {
+        (count, 0)
+    };
+
+    let mut symbols = match client
+        .domestic_volume_ranking(&DomesticExchange::KOSPI, kospi_count)
+        .await
+    {
+        Ok(items) => items.into_iter().map(|i| i.symbol).collect::<Vec<_>>(),
+        Err(e) => {
+            return Err(BotError::ApiError {
+                msg: format!("KOSPI volume_ranking failed: {}", e),
+            })
+        }
+    };
+
+    if kosdaq_count > 0 {
+        match client
+            .domestic_volume_ranking(&DomesticExchange::KOSDAQ, kosdaq_count)
+            .await
+        {
+            Ok(items) => {
+                symbols.extend(items.into_iter().map(|i| i.symbol));
+            }
+            Err(e) => {
+                tracing::warn!("KOSDAQ volume_ranking failed (non-fatal): {}", e);
+            }
+        }
+    }
+
+    Ok(symbols)
 }
