@@ -23,12 +23,6 @@ fn kill_switch_mode_debug() {
 }
 
 #[test]
-fn market_label() {
-    assert_eq!(Market::Us.label(), "US");
-    assert_eq!(Market::Kr.label(), "KR");
-}
-
-#[test]
 fn watchlist_all_unique_deduplicates() {
     let wl = WatchlistSet {
         stable: vec!["NVDA".into(), "AAPL".into()],

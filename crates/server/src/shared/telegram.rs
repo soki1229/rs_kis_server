@@ -3,15 +3,9 @@ use crate::monitoring::alert::AlertRouter;
 use crate::monitoring::alert::AlertSeverity;
 use crate::shared::activity::ActivityLog;
 use crate::state::{BotState, PipelineState};
-use crate::types::BotCommand;
+use crate::types::{BotCommand, Market};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Market {
-    Kr,
-    Us,
-}
 
 /// 텍스트에서 (Market, BotCommand) 파싱.
 pub fn parse_command(text: &str) -> Option<(Market, BotCommand)> {

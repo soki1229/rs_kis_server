@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 // ── Market ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Market {
+pub(crate) enum Market {
     Kr,
     Us,
 }
@@ -236,4 +236,15 @@ pub struct QuoteSnapshot {
     pub symbol: String,
     pub bid_qty: u64,
     pub ask_qty: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn market_label() {
+        assert_eq!(Market::Us.label(), "US");
+        assert_eq!(Market::Kr.label(), "KR");
+    }
 }
