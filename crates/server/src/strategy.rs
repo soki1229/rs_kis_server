@@ -1,8 +1,7 @@
 use crate::config::MarketConfig;
 use crate::market::MarketAdapter;
-use crate::pipeline::QuoteSnapshot;
 use crate::regime::RegimeInput;
-use crate::types::{CandleBar, MarketRegime};
+use crate::types::{CandleBar, MarketRegime, QuoteSnapshot};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use std::sync::Arc;

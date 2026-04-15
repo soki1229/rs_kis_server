@@ -10,17 +10,9 @@ pub use generic_position::run_generic_position_task;
 pub use generic_regime::run_generic_regime_task;
 
 use crate::monitoring::alert::AlertRouter;
-use crate::types::{FillInfo, OrderRequest};
+use crate::types::{FillInfo, OrderRequest, QuoteSnapshot};
 use rust_decimal::Decimal;
 use tokio::sync::{broadcast, mpsc, watch};
-
-/// 호가 스냅샷 (TickTask → SignalTask)
-#[derive(Debug, Clone)]
-pub struct QuoteSnapshot {
-    pub symbol: String,
-    pub bid_qty: u64,
-    pub ask_qty: u64,
-}
 
 /// 틱 데이터 (TickTask → SignalTask, PositionTask)
 #[derive(Debug, Clone)]

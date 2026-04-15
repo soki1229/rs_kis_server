@@ -12,9 +12,6 @@ pub enum BotError {
     #[error("Database migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 
-    #[error("KIS API error: {0}")]
-    KisApi(#[from] kis_api::KisError),
-
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 

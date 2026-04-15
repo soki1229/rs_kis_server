@@ -229,3 +229,11 @@ pub enum BotEvent {
     DailyPnL(PnLReport),
     Alert { level: AlertLevel, msg: String },
 }
+
+/// 호가 스냅샷 (TickTask → SignalTask)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuoteSnapshot {
+    pub symbol: String,
+    pub bid_qty: u64,
+    pub ask_qty: u64,
+}

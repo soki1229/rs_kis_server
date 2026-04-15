@@ -1,11 +1,11 @@
 use crate::market::MarketAdapter;
-use crate::pipeline::{QuoteSnapshot, TickData};
+use crate::pipeline::TickData;
 use crate::state::BotState;
 use crate::strategy::{
     Portfolio, QualResult, QualificationStrategy, RiskStrategy, SignalCandidate,
     SignalContext as StrategySignalContext, SignalStrategy,
 };
-use crate::types::{CandleBar, MarketRegime};
+use crate::types::{CandleBar, MarketRegime, QuoteSnapshot};
 use crate::types::{OrderRequest, Side, WatchlistSet};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};

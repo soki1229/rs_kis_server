@@ -1,6 +1,6 @@
 use crate::monitoring::alert::AlertRouter;
 use crate::pipeline::TickData;
-use crate::types::{Market, WatchlistSet};
+use crate::types::{Market, QuoteSnapshot, WatchlistSet};
 use kis_api::{KisError, KisEvent, KisStream, SubscriptionKind, TransactionData};
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashSet;
@@ -27,7 +27,7 @@ pub async fn run_tick_task(
     mut watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
     tick_tx: broadcast::Sender<TickData>,
     tick_pos_tx: mpsc::Sender<TickData>,
-    quote_tx: mpsc::Sender<crate::pipeline::QuoteSnapshot>,
+    quote_tx: mpsc::Sender<QuoteSnapshot>,
     alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: sqlx::SqlitePool,
@@ -69,7 +69,7 @@ pub async fn run_tick_task(
                         forward_tick(tx.into(), &tick_tx, &tick_pos_tx).await;
                     }
                     Ok(KisEvent::Quote(q)) if current_syms.contains(&q.symbol) => {
-                        let snapshot = crate::pipeline::QuoteSnapshot { symbol: q.symbol.clone(), bid_qty: q.bid_qty.to_u64().unwrap_or(0), ask_qty: q.ask_qty.to_u64().unwrap_or(0) };
+                        let snapshot = QuoteSnapshot { symbol: q.symbol.clone(), bid_qty: q.bid_qty.to_u64().unwrap_or(0), ask_qty: q.ask_qty.to_u64().unwrap_or(0) };
                         quote_tx.send(snapshot).await.ok();
                     }
                     Ok(_) => {}
@@ -197,7 +197,7 @@ pub async fn run_us_tick_task(
     watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
     tick_tx: broadcast::Sender<TickData>,
     tick_pos_tx: mpsc::Sender<TickData>,
-    quote_tx: mpsc::Sender<crate::pipeline::QuoteSnapshot>,
+    quote_tx: mpsc::Sender<QuoteSnapshot>,
     alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: sqlx::SqlitePool,
@@ -224,7 +224,7 @@ pub async fn run_kr_tick_task(
     watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
     tick_tx: broadcast::Sender<TickData>,
     tick_pos_tx: mpsc::Sender<TickData>,
-    quote_tx: mpsc::Sender<crate::pipeline::QuoteSnapshot>,
+    quote_tx: mpsc::Sender<QuoteSnapshot>,
     alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: sqlx::SqlitePool,
