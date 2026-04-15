@@ -642,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn test_strategy_delegation_logic() {
         // Use Mock strategies to resolve dead_code warnings and verify logic
-        let db = setup_test_db().await;
+        let _db = setup_test_db().await;
         let sig_strat = AlwaysBuySignal;
         let qual_strat = AlwaysPassQual;
         let risk_strat = FixedQtyRisk(dec!(50));

@@ -267,6 +267,7 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
+    #[allow(dead_code)]
     struct MockAdapter {
         holiday: bool,
     }
