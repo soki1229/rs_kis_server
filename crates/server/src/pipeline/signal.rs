@@ -229,7 +229,13 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         return;
     }
 
-    activity.record_eval(market.label(), &symbol, score, "order", &format!("{:?}", regime));
+    activity.record_eval(
+        market.label(),
+        &symbol,
+        score,
+        "order",
+        &format!("{:?}", regime),
+    );
     if let Some(nc) = notion {
         let row = crate::notion::SignalEvalRow {
             timestamp: chrono::Utc::now().to_rfc3339(),
