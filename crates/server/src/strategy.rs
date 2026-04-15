@@ -1,5 +1,4 @@
-use crate::config::MarketConfig;
-use crate::market::MarketAdapter;
+use crate::market::{MarketAdapter, MarketId};
 use crate::regime::RegimeInput;
 use crate::types::{CandleBar, MarketRegime, QuoteSnapshot};
 use async_trait::async_trait;
@@ -15,7 +14,7 @@ pub trait DiscoveryStrategy: Send + Sync {
     async fn build_watchlist(
         &self,
         adapter: Arc<dyn MarketAdapter>,
-        config: &MarketConfig,
+        max_symbols: usize,
     ) -> Vec<String>;
 }
 
@@ -33,8 +32,7 @@ pub trait RegimeStrategy: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SignalContext {
     pub symbol: String,
-    /// "US" | "KR"
-    pub market: String,
+    pub market: MarketId,
     /// 완성된 캔들 (최신 순)
     pub candles: Vec<CandleBar>,
     /// 일봉 데이터 (신규, 최신 순 최대 30개)

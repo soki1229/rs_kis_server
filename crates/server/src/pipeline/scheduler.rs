@@ -121,7 +121,7 @@ pub async fn run_kr_scheduler_task(
 
             let dynamic = match timeout(
                 Duration::from_secs(30),
-                discovery_strategy.build_watchlist(adapter.clone(), &config),
+                discovery_strategy.build_watchlist(adapter.clone(), config.dynamic_watchlist_size),
             )
             .await
             {
@@ -210,7 +210,7 @@ pub async fn run_scheduler_task(
 
             let dynamic = match timeout(
                 Duration::from_secs(30),
-                discovery_strategy.build_watchlist(adapter.clone(), &config),
+                discovery_strategy.build_watchlist(adapter.clone(), config.dynamic_watchlist_size),
             )
             .await
             {

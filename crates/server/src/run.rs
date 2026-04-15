@@ -232,7 +232,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     if kr_active {
         let kr_wl = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            discovery_strategy.build_watchlist(kr_adapter.clone(), &cfg.kr),
+            discovery_strategy.build_watchlist(kr_adapter.clone(), cfg.kr.dynamic_watchlist_size),
         )
         .await
         {
@@ -384,7 +384,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     if us_active {
         let us_wl = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            discovery_strategy.build_watchlist(us_adapter.clone(), &cfg.us),
+            discovery_strategy.build_watchlist(us_adapter.clone(), cfg.us.dynamic_watchlist_size),
         )
         .await
         {

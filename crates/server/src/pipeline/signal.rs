@@ -1,4 +1,4 @@
-use crate::market::MarketAdapter;
+use crate::market::{MarketAdapter, MarketId};
 use crate::pipeline::TickData;
 use crate::state::BotState;
 use crate::strategy::{
@@ -83,7 +83,7 @@ struct SignalState {
 
 struct SignalContext {
     symbol: String,
-    market: String,
+    market: MarketId,
     db_pool: sqlx::SqlitePool,
     order_tx: mpsc::Sender<OrderRequest>,
     regime: MarketRegime,
@@ -179,7 +179,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     let strategy_ctx = StrategySignalContext {
         symbol: symbol.clone(),
-        market: market.clone(),
+        market,
         candles,
         daily_bars,
         quote,
@@ -194,7 +194,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let trade_signal = match signal_strategy.evaluate(&strategy_ctx).await {
         Some(sig) => sig,
         None => {
-            activity.record_eval(&market, &symbol, 0, "skip", "no_signal");
+            activity.record_eval(market.label(), &symbol, 0, "skip", "no_signal");
             return;
         }
     };
@@ -209,7 +209,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let qual_result = qual_strategy.qualify(&candidate);
 
     if let QualResult::Block { reason } = qual_result {
-        activity.record_eval(&market, &symbol, score, "blocked", &reason);
+        activity.record_eval(market.label(), &symbol, score, "blocked", &reason);
         return;
     }
 
@@ -225,17 +225,17 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     let qty = sized_qty.to_u64().unwrap_or(0);
     if qty == 0 {
-        activity.record_eval(&market, &symbol, score, "skip", "qty_zero");
+        activity.record_eval(market.label(), &symbol, score, "skip", "qty_zero");
         return;
     }
 
-    activity.record_eval(&market, &symbol, score, "order", &format!("{:?}", regime));
+    activity.record_eval(market.label(), &symbol, score, "order", &format!("{:?}", regime));
     if let Some(nc) = notion {
         let row = crate::notion::SignalEvalRow {
             timestamp: chrono::Utc::now().to_rfc3339(),
             symbol: symbol.clone(),
             score,
-            market: market.clone(),
+            market: market.label().to_string(),
             regime: format!("{:?}", regime),
             action: "order".into(),
             strategy: strategy_id.clone(),
@@ -299,7 +299,7 @@ pub async fn run_signal_task(
         state.candles.insert(sym.clone(), CandleAccumulator::new());
     }
 
-    let market_label = adapter.market_id().label().to_string();
+    let market_id = adapter.market_id();
 
     loop {
         tokio::select! {
@@ -331,7 +331,7 @@ pub async fn run_signal_task(
                     if state.cached_balance.map(|(_, t)| t.elapsed().as_secs() >= BALANCE_CACHE_TTL_SECS).unwrap_or(true) {
                         match adapter.balance().await {
                             Ok(resp) => { state.cached_balance = Some((resp.available_cash, Instant::now())); }
-                            Err(e) => { tracing::error!(market = %market_label, "SignalTask: balance() failed: {e}"); }
+                            Err(e) => { tracing::error!(market = %market_id, "SignalTask: balance() failed: {e}"); }
                         }
                     }
                     let account_balance = state.cached_balance.map(|(v, _)| v).unwrap_or(Decimal::ZERO);
@@ -348,7 +348,6 @@ pub async fn run_signal_task(
                     let q_strat = Arc::clone(&qual_strategy);
                     let r_strat = Arc::clone(&risk_strategy);
                     let live_rx = live_state_rx.clone();
-                    let market_name_inner = market_label.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
@@ -356,7 +355,7 @@ pub async fn run_signal_task(
                         let _guard = PendingGuard(ps_clone, sym_for_guard);
                         for strategy in strategies_snap {
                             evaluate_and_maybe_order(SignalContext {
-                                symbol: sym_for_eval.clone(), market: market_name_inner.clone(), db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
+                                symbol: sym_for_eval.clone(), market: market_id, db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
                                 completed: completed_snap.clone(), quote: quote_snap.clone(),
                                 summary: summary_clone.clone(), account_balance, exchange_code: ex_code.clone(),
                                 strategy, activity: act.clone(), notion: notion_clone.clone(),
@@ -649,7 +648,7 @@ mod tests {
 
         let ctx = StrategySignalContext {
             symbol: "TSLA".into(),
-            market: "US".into(),
+            market: MarketId::Us,
             candles: vec![],
             daily_bars: vec![],
             quote: None,
