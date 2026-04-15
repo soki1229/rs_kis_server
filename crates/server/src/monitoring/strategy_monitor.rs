@@ -134,7 +134,9 @@ mod tests {
             ..Default::default()
         };
         let d = evaluate_monitoring(&input);
-        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::ForceConservative { .. })));
+        assert!(d
+            .iter()
+            .any(|x| matches!(x, MonitoringDecision::ForceConservative { .. })));
     }
 
     #[test]
@@ -144,7 +146,9 @@ mod tests {
             ..Default::default()
         };
         let d = evaluate_monitoring(&input);
-        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::ForceConservative { .. })));
+        assert!(d
+            .iter()
+            .any(|x| matches!(x, MonitoringDecision::ForceConservative { .. })));
     }
 
     #[test]
@@ -154,7 +158,9 @@ mod tests {
             ..Default::default()
         };
         let d = evaluate_monitoring(&input);
-        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::SuspendRegime { .. })));
+        assert!(d
+            .iter()
+            .any(|x| matches!(x, MonitoringDecision::SuspendRegime { .. })));
     }
 
     #[test]
@@ -167,7 +173,9 @@ mod tests {
             ..Default::default()
         };
         let d = evaluate_monitoring(&input);
-        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::ReturnToDefault)));
+        assert!(d
+            .iter()
+            .any(|x| matches!(x, MonitoringDecision::ReturnToDefault)));
     }
 
     #[test]
@@ -180,7 +188,9 @@ mod tests {
             ..Default::default()
         };
         let d = evaluate_monitoring(&input);
-        assert!(!d.iter().any(|x| matches!(x, MonitoringDecision::ReturnToDefault)));
+        assert!(!d
+            .iter()
+            .any(|x| matches!(x, MonitoringDecision::ReturnToDefault)));
     }
 
     #[test]
@@ -190,7 +200,9 @@ mod tests {
             ..Default::default()
         };
         let d = evaluate_monitoring(&input);
-        assert!(d.iter().any(|x| matches!(x, MonitoringDecision::WarnAlert { .. })));
+        assert!(d
+            .iter()
+            .any(|x| matches!(x, MonitoringDecision::WarnAlert { .. })));
     }
 
     #[test]

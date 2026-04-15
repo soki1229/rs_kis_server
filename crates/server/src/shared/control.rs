@@ -226,11 +226,15 @@ mod tests {
 
         let t_kr = token_kr.clone();
         let s_kr = kr_summary.clone();
-        tokio::spawn(async move { run_control_task(kr_cmd_rx, kr_force_tx, s_kr, kr_ks, t_kr).await });
+        tokio::spawn(
+            async move { run_control_task(kr_cmd_rx, kr_force_tx, s_kr, kr_ks, t_kr).await },
+        );
 
         let t_us = token_us.clone();
         let s_us = us_summary.clone();
-        tokio::spawn(async move { run_control_task(us_cmd_rx, us_force_tx, s_us, us_ks, t_us).await });
+        tokio::spawn(
+            async move { run_control_task(us_cmd_rx, us_force_tx, s_us, us_ks, t_us).await },
+        );
 
         // KR은 Active, US는 Suspended
         kr_cmd_tx.send(BotCommand::Start).await.unwrap();

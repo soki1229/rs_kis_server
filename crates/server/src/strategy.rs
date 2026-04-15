@@ -1,3 +1,4 @@
+use crate::config::MarketConfig;
 use crate::market::MarketAdapter;
 use crate::pipeline::QuoteSnapshot;
 use crate::regime::RegimeInput;
@@ -12,7 +13,11 @@ use std::sync::Arc;
 #[async_trait]
 pub trait DiscoveryStrategy: Send + Sync {
     /// 워치리스트 빌드 (KR/US 통합)
-    async fn build_watchlist(&self, adapter: Arc<dyn MarketAdapter>) -> Vec<String>;
+    async fn build_watchlist(
+        &self,
+        adapter: Arc<dyn MarketAdapter>,
+        config: &MarketConfig,
+    ) -> Vec<String>;
 }
 
 // ── Regime ────────────────────────────────────────────────────────────────

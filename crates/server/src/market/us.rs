@@ -575,10 +575,7 @@ async fn us_is_holiday(client: &Arc<dyn KisApi>) -> Result<bool, BotError> {
     Ok(holidays.iter().any(|h| h.date == today))
 }
 
-async fn us_volume_ranking(
-    client: &Arc<dyn KisApi>,
-    count: u32,
-) -> Result<Vec<String>, BotError> {
+async fn us_volume_ranking(client: &Arc<dyn KisApi>, count: u32) -> Result<Vec<String>, BotError> {
     let items = client
         .volume_ranking(&Exchange::NASD, count)
         .await

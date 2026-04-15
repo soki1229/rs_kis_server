@@ -230,13 +230,32 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     ));
 
     if kr_active {
-        let kr_wl = pipeline::scheduler::build_kr_watchlist(
-            kr_adapter.as_ref(),
-            &cfg.kr,
-            &kr_alert,
-            &kr_db_pool,
+        let kr_wl = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            discovery_strategy.build_watchlist(kr_adapter.clone(), &cfg.kr),
         )
-        .await;
+        .await
+        {
+            Ok(dynamic) => {
+                let stable = if dynamic.is_empty() {
+                    cfg.kr.watchlist.clone()
+                } else {
+                    dynamic
+                };
+                crate::types::WatchlistSet {
+                    stable,
+                    aggressive: vec![],
+                }
+            }
+            Err(_) => {
+                tracing::warn!("KR initial watchlist building timed out, using static fallback");
+                crate::types::WatchlistSet {
+                    stable: cfg.kr.watchlist.clone(),
+                    aggressive: vec![],
+                }
+            }
+        };
+
         if !kr_wl.all_unique().is_empty() {
             let _ = pipeline::signal::seed_symbols(
                 &kr_wl.all_unique(),
@@ -363,13 +382,32 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     ));
 
     if us_active {
-        let us_wl = pipeline::scheduler::build_watchlist(
-            us_adapter.as_ref(),
-            &cfg.us,
-            &us_alert,
-            &us_db_pool,
+        let us_wl = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            discovery_strategy.build_watchlist(us_adapter.clone(), &cfg.us),
         )
-        .await;
+        .await
+        {
+            Ok(dynamic) => {
+                let stable = if dynamic.is_empty() {
+                    cfg.us.watchlist.clone()
+                } else {
+                    dynamic
+                };
+                crate::types::WatchlistSet {
+                    stable,
+                    aggressive: vec![],
+                }
+            }
+            Err(_) => {
+                tracing::warn!("US initial watchlist building timed out, using static fallback");
+                crate::types::WatchlistSet {
+                    stable: cfg.us.watchlist.clone(),
+                    aggressive: vec![],
+                }
+            }
+        };
+
         if !us_wl.all_unique().is_empty() {
             let _ = pipeline::signal::seed_symbols(
                 &us_wl.all_unique(),

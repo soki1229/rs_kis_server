@@ -55,11 +55,12 @@ mod tests {
         let pool = connect(&db_path).await.expect("connect should succeed");
 
         // Verify some tables exist
-        let row: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orders'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orders'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(row.0, 1);
 
         let row: (i64,) = sqlx::query_as(

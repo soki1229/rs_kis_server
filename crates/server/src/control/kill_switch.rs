@@ -76,7 +76,8 @@ mod tests {
     fn hard_kill_switch_persists() {
         let path = temp_ks_path();
         let ks = KillSwitch::new(path.clone());
-        ks.activate(KillSwitchMode::Hard, "test", "details").unwrap();
+        ks.activate(KillSwitchMode::Hard, "test", "details")
+            .unwrap();
 
         let ks2 = KillSwitch::new(path);
         assert_eq!(ks2.current_mode(), Some(KillSwitchMode::Hard));
@@ -85,14 +86,16 @@ mod tests {
     #[test]
     fn soft_kill_switch_persists_to_file() {
         let ks = KillSwitch::new(temp_ks_path());
-        ks.activate(KillSwitchMode::Soft, "test", "details").unwrap();
+        ks.activate(KillSwitchMode::Soft, "test", "details")
+            .unwrap();
         assert_eq!(ks.current_mode(), Some(KillSwitchMode::Soft));
     }
 
     #[test]
     fn clear_removes_file() {
         let ks = KillSwitch::new(temp_ks_path());
-        ks.activate(KillSwitchMode::Hard, "test", "details").unwrap();
+        ks.activate(KillSwitchMode::Hard, "test", "details")
+            .unwrap();
         ks.clear().unwrap();
         assert!(ks.current_mode().is_none());
     }
@@ -101,7 +104,8 @@ mod tests {
     fn file_content_includes_reason() {
         let path = temp_ks_path();
         let ks = KillSwitch::new(path.clone());
-        ks.activate(KillSwitchMode::Hard, "test reason", "details").unwrap();
+        ks.activate(KillSwitchMode::Hard, "test reason", "details")
+            .unwrap();
 
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("test reason"));

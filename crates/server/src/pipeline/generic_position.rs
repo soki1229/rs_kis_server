@@ -98,7 +98,6 @@ pub fn calculate_trailing_stop(
     Some(high_price - atr * multiplier)
 }
 
-
 /// Generic position task that works with any MarketAdapter.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_generic_position_task(

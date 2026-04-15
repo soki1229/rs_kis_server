@@ -7,6 +7,7 @@ use chrono_tz::America::New_York;
 use chrono_tz::Asia::Seoul;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
 pub fn us_market_open_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
@@ -39,32 +40,6 @@ pub fn kr_market_close_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
         .from_local_datetime(&date.and_time(close_time))
         .earliest()
         .map(|dt| dt.with_timezone(&Utc))
-}
-
-pub async fn build_watchlist(
-    _client: &dyn MarketAdapter,
-    config: &MarketConfig,
-    _alert: &AlertRouter,
-    _db: &sqlx::SqlitePool,
-) -> WatchlistSet {
-    // For now, fallback to static watchlist since volume_ranking is market-specific
-    WatchlistSet {
-        stable: config.watchlist.clone(),
-        aggressive: vec![],
-    }
-}
-
-pub async fn build_kr_watchlist(
-    _client: &dyn MarketAdapter,
-    config: &MarketConfig,
-    _alert: &AlertRouter,
-    _db: &sqlx::SqlitePool,
-) -> WatchlistSet {
-    // For now, fallback to static watchlist
-    WatchlistSet {
-        stable: config.watchlist.clone(),
-        aggressive: vec![],
-    }
 }
 
 async fn merge_with_protected_symbols(
@@ -143,8 +118,22 @@ pub async fn run_kr_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("KR", if now >= open { "Trading" } else { "Pre-market" });
-            
-            let dynamic = discovery_strategy.build_watchlist(adapter.clone()).await;
+
+            let dynamic = match timeout(
+                Duration::from_secs(30),
+                discovery_strategy.build_watchlist(adapter.clone(), &config),
+            )
+            .await
+            {
+                Ok(symbols) => symbols,
+                Err(_) => {
+                    tracing::warn!(
+                        "KR build_watchlist timed out — falling back to static watchlist"
+                    );
+                    vec![]
+                }
+            };
+
             let stable = if dynamic.is_empty() {
                 config.watchlist.clone()
             } else {
@@ -218,8 +207,22 @@ pub async fn run_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase("US", if now >= open { "Trading" } else { "Pre-market" });
-            
-            let dynamic = discovery_strategy.build_watchlist(adapter.clone()).await;
+
+            let dynamic = match timeout(
+                Duration::from_secs(30),
+                discovery_strategy.build_watchlist(adapter.clone(), &config),
+            )
+            .await
+            {
+                Ok(symbols) => symbols,
+                Err(_) => {
+                    tracing::warn!(
+                        "US build_watchlist timed out — falling back to static watchlist"
+                    );
+                    vec![]
+                }
+            };
+
             let stable = if dynamic.is_empty() {
                 config.watchlist.clone()
             } else {
@@ -359,10 +362,19 @@ mod tests {
 
     #[tokio::test]
     async fn build_kr_watchlist_merges_and_dedups() {
-        let adapter = MockAdapter { holiday: false };
         let config = test_config(vec!["000660"]);
         let db = test_db().await;
-        let res = build_kr_watchlist(&adapter, &config, &AlertRouter::new(1), &db).await;
+        sqlx::query("INSERT INTO positions (symbol) VALUES ('005930')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let fresh = WatchlistSet {
+            stable: config.watchlist.clone(),
+            aggressive: vec![],
+        };
+        let res = merge_with_protected_symbols(fresh, &db, &config).await;
         assert!(res.stable.contains(&"000660".to_string()));
+        assert!(res.stable.contains(&"005930".to_string()));
     }
 }
