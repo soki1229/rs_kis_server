@@ -679,6 +679,7 @@ mod tests {
             signal: signal.clone(),
             regime: MarketRegime::Trending,
             setup_score: signal.setup_score,
+            // TODO: 파이프라인 레벨에서 실적/FOMC 캘린더 연동 후 실제 값 반영 필요
             has_earnings_event: false,
             has_fomc_today: false,
         };
