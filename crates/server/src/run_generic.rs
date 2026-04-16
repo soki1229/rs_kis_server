@@ -4,7 +4,7 @@
 //! with any implementation of the MarketAdapter trait.
 
 use crate::market::{KrRealAdapter, KrVtsAdapter, UsRealAdapter, UsVtsAdapter};
-use kis_api::{KisApi, KisDomesticApi};
+use kis_api::KisClient;
 use std::sync::Arc;
 
 /// Build and manage market adapters for all supported environments.
@@ -25,10 +25,10 @@ impl MarketAdapters {
     /// Loads four distinct clients to support both production and mock environments
     /// simultaneously if needed.
     pub fn new(
-        kr_real: Arc<dyn KisDomesticApi>,
-        us_real: Arc<dyn KisApi>,
-        kr_vts: Arc<dyn KisDomesticApi>,
-        us_vts: Arc<dyn KisApi>,
+        kr_real: KisClient,
+        us_real: KisClient,
+        kr_vts: KisClient,
+        us_vts: KisClient,
     ) -> Self {
         Self {
             kr_real: Arc::new(KrRealAdapter::new(kr_real)),

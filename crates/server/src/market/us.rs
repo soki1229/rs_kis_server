@@ -6,48 +6,40 @@ use crate::error::BotError;
 use async_trait::async_trait;
 use chrono::{Datelike, Timelike, Utc};
 use chrono_tz::America::New_York;
-use kis_api::{
-    CancelKind, CancelOrderRequest, ChartPeriod, DailyChartRequest, Exchange, KisApi,
-    OrderHistoryRequest, OrderSide, OrderType, PlaceOrderRequest,
-};
-use rust_decimal::prelude::ToPrimitive;
+use kis_api::models::*;
+use kis_api::KisClient;
 use rust_decimal::Decimal;
-use std::sync::Arc;
 
 /// Base logic for US market shared by Real and VTS adapters.
 struct UsMarketBase {
-    client: Arc<dyn KisApi>,
+    client: KisClient,
+    cano: String,
+    acnt_prdt_cd: String,
     fx_spread_pct: Decimal,
 }
 
 impl UsMarketBase {
-    fn new(client: Arc<dyn KisApi>) -> Self {
+    fn new(client: KisClient) -> Self {
         Self {
+            cano: std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
+            acnt_prdt_cd: std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
+            fx_spread_pct: Decimal::new(5, 3),
             client,
-            fx_spread_pct: Decimal::new(5, 3), // 0.5% default
         }
     }
 
-    fn exchange_from_hint(hint: Option<&str>, symbol: &str) -> Exchange {
+    fn exchange_from_hint(hint: Option<&str>, symbol: &str) -> String {
         match hint {
-            Some("NYSE") => Exchange::NYSE,
-            Some("AMEX") => Exchange::AMEX,
-            Some("NASD") | Some("NASDAQ") => Exchange::NASD,
+            Some("NYSE") => "NYSE".to_string(),
+            Some("AMEX") => "AMEX".to_string(),
+            Some("NASD") | Some("NASDAQ") => "NASD".to_string(),
             _ => {
                 if symbol.len() <= 3 {
-                    Exchange::NYSE
+                    "NYSE".to_string()
                 } else {
-                    Exchange::NASD
+                    "NASD".to_string()
                 }
             }
-        }
-    }
-
-    fn exchange_code_to_exchange(code: Option<&str>) -> Exchange {
-        match code {
-            Some("NYS") | Some("NYSE") => Exchange::NYSE,
-            Some("AMS") | Some("AMEX") => Exchange::AMEX,
-            _ => Exchange::NASD,
         }
     }
 
@@ -60,18 +52,10 @@ impl UsMarketBase {
             .with_timezone(&New_York)
             .format("%Y%m%d")
             .to_string();
-        match self
-            .client
-            .order_history(OrderHistoryRequest {
-                start_date: today.clone(),
-                end_date: today,
-                exchange_cd: String::new(),
-            })
-            .await
-        {
+        match us_order_history(self, &today, &today).await {
             Ok(history) => {
                 if let Some(h) = history.iter().find(|h| h.order_no == broker_order_no) {
-                    let filled_qty = h.filled_qty.to_u64().unwrap_or(0);
+                    let filled_qty = h.filled_qty as u64;
                     if filled_qty >= submitted_qty {
                         return PollOutcome::Filled {
                             filled_qty,
@@ -106,15 +90,10 @@ pub struct UsRealAdapter {
 }
 
 impl UsRealAdapter {
-    pub fn new(client: Arc<dyn KisApi>) -> Self {
+    pub fn new(client: KisClient) -> Self {
         Self {
             base: UsMarketBase::new(client),
         }
-    }
-
-    pub fn with_fx_spread(mut self, pct: Decimal) -> Self {
-        self.base.fx_spread_pct = pct;
-        self
     }
 }
 
@@ -129,15 +108,15 @@ impl MarketAdapter for UsRealAdapter {
     }
 
     async fn place_order(&self, req: UnifiedOrderRequest) -> Result<UnifiedOrderResult, BotError> {
-        us_place_order(&self.base.client, req, self).await
+        us_place_order(&self.base, req, self).await
     }
 
     async fn cancel_order(&self, order: &UnifiedUnfilledOrder) -> Result<bool, BotError> {
-        us_cancel_order(&self.base.client, order).await
+        us_cancel_order(&self.base, order).await
     }
 
     async fn unfilled_orders(&self) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-        us_unfilled_orders(&self.base.client).await
+        us_unfilled_orders(&self.base).await
     }
 
     async fn order_history(
@@ -145,7 +124,7 @@ impl MarketAdapter for UsRealAdapter {
         start_date: &str,
         end_date: &str,
     ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
-        us_order_history(&self.base.client, start_date, end_date).await
+        us_order_history(&self.base, start_date, end_date).await
     }
 
     async fn poll_order_status(
@@ -154,7 +133,7 @@ impl MarketAdapter for UsRealAdapter {
         _symbol: &str,
         expected_qty: u64,
     ) -> Result<PollOutcome, BotError> {
-        match self.base.client.unfilled_orders().await {
+        match us_unfilled_orders(&self.base).await {
             Ok(orders) => {
                 let still_open = orders.iter().any(|o| o.order_no == broker_order_no);
                 if still_open {
@@ -173,11 +152,11 @@ impl MarketAdapter for UsRealAdapter {
     }
 
     async fn balance(&self) -> Result<UnifiedBalance, BotError> {
-        us_balance(&self.base.client).await
+        us_balance(&self.base).await
     }
 
     async fn daily_chart(&self, symbol: &str, days: u32) -> Result<Vec<UnifiedDailyBar>, BotError> {
-        us_daily_chart(&self.base.client, symbol, days).await
+        us_daily_chart(&self.base, symbol, days).await
     }
 
     async fn intraday_candles(
@@ -185,15 +164,15 @@ impl MarketAdapter for UsRealAdapter {
         symbol: &str,
         interval_mins: u32,
     ) -> Result<Vec<UnifiedCandleBar>, BotError> {
-        us_intraday_candles(&self.base.client, symbol, interval_mins).await
+        us_intraday_candles(&self.base, symbol, interval_mins).await
     }
 
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError> {
-        us_current_price(&self.base.client, symbol).await
+        us_current_price(&self.base, symbol).await
     }
 
     async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
-        us_volume_ranking(&self.base.client, count).await
+        us_volume_ranking(&self.base, count).await
     }
 
     fn market_timing(&self) -> MarketTiming {
@@ -201,7 +180,7 @@ impl MarketAdapter for UsRealAdapter {
     }
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
-        us_is_holiday(&self.base.client).await
+        us_is_holiday(&self.base).await
     }
 
     fn fx_spread_pct(&self) -> Decimal {
@@ -215,7 +194,7 @@ pub struct UsVtsAdapter {
 }
 
 impl UsVtsAdapter {
-    pub fn new(client: Arc<dyn KisApi>) -> Self {
+    pub fn new(client: KisClient) -> Self {
         Self {
             base: UsMarketBase::new(client),
         }
@@ -233,15 +212,15 @@ impl MarketAdapter for UsVtsAdapter {
     }
 
     async fn place_order(&self, req: UnifiedOrderRequest) -> Result<UnifiedOrderResult, BotError> {
-        us_place_order(&self.base.client, req, self).await
+        us_place_order(&self.base, req, self).await
     }
 
     async fn cancel_order(&self, order: &UnifiedUnfilledOrder) -> Result<bool, BotError> {
-        us_cancel_order(&self.base.client, order).await
+        us_cancel_order(&self.base, order).await
     }
 
     async fn unfilled_orders(&self) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-        us_unfilled_orders(&self.base.client).await
+        us_unfilled_orders(&self.base).await
     }
 
     async fn order_history(
@@ -249,7 +228,7 @@ impl MarketAdapter for UsVtsAdapter {
         start_date: &str,
         end_date: &str,
     ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
-        us_order_history(&self.base.client, start_date, end_date).await
+        us_order_history(&self.base, start_date, end_date).await
     }
 
     async fn poll_order_status(
@@ -258,9 +237,7 @@ impl MarketAdapter for UsVtsAdapter {
         _symbol: &str,
         expected_qty: u64,
     ) -> Result<PollOutcome, BotError> {
-        // TODO: US-VTS may also need a balance fallback if it proves unstable like Domestic VTS.
-        // For now, we rely on standard polling of unfilled orders and history.
-        match self.base.client.unfilled_orders().await {
+        match us_unfilled_orders(&self.base).await {
             Ok(orders) => {
                 let still_open = orders.iter().any(|o| o.order_no == broker_order_no);
                 if still_open {
@@ -272,25 +249,18 @@ impl MarketAdapter for UsVtsAdapter {
                         .await)
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "UsVtsAdapter: polling failed for {}: {} (no fallback implemented)",
-                    broker_order_no,
-                    e
-                );
-                Err(BotError::ApiError {
-                    msg: format!("unfilled_orders failed: {}", e),
-                })
-            }
+            Err(e) => Err(BotError::ApiError {
+                msg: format!("unfilled_orders failed: {}", e),
+            }),
         }
     }
 
     async fn balance(&self) -> Result<UnifiedBalance, BotError> {
-        us_balance(&self.base.client).await
+        us_balance(&self.base).await
     }
 
     async fn daily_chart(&self, symbol: &str, days: u32) -> Result<Vec<UnifiedDailyBar>, BotError> {
-        us_daily_chart(&self.base.client, symbol, days).await
+        us_daily_chart(&self.base, symbol, days).await
     }
 
     async fn intraday_candles(
@@ -298,15 +268,15 @@ impl MarketAdapter for UsVtsAdapter {
         symbol: &str,
         interval_mins: u32,
     ) -> Result<Vec<UnifiedCandleBar>, BotError> {
-        us_intraday_candles(&self.base.client, symbol, interval_mins).await
+        us_intraday_candles(&self.base, symbol, interval_mins).await
     }
 
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError> {
-        us_current_price(&self.base.client, symbol).await
+        us_current_price(&self.base, symbol).await
     }
 
     async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
-        us_volume_ranking(&self.base.client, count).await
+        us_volume_ranking(&self.base, count).await
     }
 
     fn market_timing(&self) -> MarketTiming {
@@ -314,7 +284,7 @@ impl MarketAdapter for UsVtsAdapter {
     }
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
-        us_is_holiday(&self.base.client).await
+        us_is_holiday(&self.base).await
     }
 
     fn fx_spread_pct(&self) -> Decimal {
@@ -327,39 +297,40 @@ impl MarketAdapter for UsVtsAdapter {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn us_place_order(
-    client: &Arc<dyn KisApi>,
+    base: &UsMarketBase,
     req: UnifiedOrderRequest,
     adapter: &impl MarketAdapter,
 ) -> Result<UnifiedOrderResult, BotError> {
     let exchange =
         UsMarketBase::exchange_from_hint(req.metadata.exchange_hint.as_deref(), &req.symbol);
-
     let adjusted_price = req
         .price
         .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
 
-    let place_req = PlaceOrderRequest {
-        symbol: req.symbol.clone(),
-        exchange,
-        side: match req.side {
-            UnifiedSide::Buy => OrderSide::Buy,
-            UnifiedSide::Sell => OrderSide::Sell,
-        },
-        order_type: OrderType::Limit,
-        qty: Decimal::from(req.qty),
-        price: adjusted_price,
-    };
-
-    let response = client
-        .place_order(place_req)
+    let resp = base
+        .client
+        .overseas()
+        .trading()
+        .order_next(OrderNextRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: exchange.to_string(),
+            pdno: req.symbol.clone(),
+            ord_qty: req.qty.to_string(),
+            ovrs_ord_unpr: adjusted_price.map(|p| p.to_string()).unwrap_or_default(),
+            ord_dvsn: "00".to_string(),
+            ..Default::default()
+        })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("place_order failed: {}", e),
+            msg: format!("overseas order: {}", e),
         })?;
+
+    let order_no = resp["output"]["odno"].as_str().unwrap_or("").to_string();
 
     Ok(UnifiedOrderResult {
         internal_id: uuid::Uuid::new_v4().to_string(),
-        broker_id: response.order_org_no,
+        broker_id: order_no,
         symbol: req.symbol,
         side: req.side,
         qty: req.qty,
@@ -368,153 +339,307 @@ async fn us_place_order(
 }
 
 async fn us_cancel_order(
-    client: &Arc<dyn KisApi>,
+    base: &UsMarketBase,
     order: &UnifiedUnfilledOrder,
 ) -> Result<bool, BotError> {
-    let exchange = UsMarketBase::exchange_code_to_exchange(order.exchange_code.as_deref());
-    let cancel_req = CancelOrderRequest {
-        symbol: order.symbol.clone(),
-        exchange,
-        original_order_id: order.order_no.clone(),
-        kind: CancelKind::Cancel,
-        qty: Decimal::from(order.remaining_qty),
-        price: None,
-    };
-
-    client
-        .cancel_order(cancel_req)
+    base.client
+        .overseas()
+        .trading()
+        .order_rvsecncl_next(OrderRvsecnclNextNextRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: order
+                .exchange_code
+                .clone()
+                .unwrap_or_else(|| "NASD".to_string()),
+            pdno: order.symbol.clone(),
+            orgn_odno: order.order_no.clone(),
+            rvse_cncl_dvsn_cd: "02".to_string(),
+            ord_qty: order.remaining_qty.to_string(),
+            ovrs_ord_unpr: "0".to_string(),
+            ..Default::default()
+        })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("cancel_order failed: {}", e),
+            msg: format!("overseas cancel: {}", e),
         })?;
-
     Ok(true)
 }
 
-async fn us_unfilled_orders(
-    client: &Arc<dyn KisApi>,
-) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-    let orders = client
-        .unfilled_orders()
+async fn us_unfilled_orders(base: &UsMarketBase) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
+    let resp = base
+        .client
+        .overseas()
+        .trading()
+        .inquire_nccs(InquireNccsRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: "NASD".to_string(),
+            sort_sqn: "DS".to_string(),
+            ..Default::default()
+        })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("unfilled_orders failed: {}", e),
+            msg: format!("inquire_nccs: {}", e),
         })?;
 
-    Ok(orders
-        .into_iter()
+    Ok(resp["output"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
         .map(|o| UnifiedUnfilledOrder {
-            order_no: o.order_no,
-            symbol: o.symbol,
-            side: match o.side_cd.as_str() {
+            order_no: o["odno"].as_str().unwrap_or("").to_string(),
+            symbol: o["pdno"].as_str().unwrap_or("").to_string(),
+            side: match o["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: o.qty.to_u64().unwrap_or(0),
-            remaining_qty: o.remaining_qty.to_u64().unwrap_or(0),
-            price: o.price,
-            exchange_code: Some(o.exchange.clone()),
+            qty: o["ft_ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            remaining_qty: o["ft_ccld_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0),
+            price: o["ft_ord_unpr3"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            exchange_code: Some(o["ovrs_excg_cd"].as_str().unwrap_or("NASD").to_string()),
         })
         .collect())
 }
 
 async fn us_order_history(
-    client: &Arc<dyn KisApi>,
+    base: &UsMarketBase,
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
-    let history = client
-        .order_history(OrderHistoryRequest {
-            start_date: start_date.to_string(),
-            end_date: end_date.to_string(),
-            exchange_cd: String::new(),
+    let resp = base
+        .client
+        .overseas()
+        .trading()
+        .inquire_ccnl_next(InquireCcnlNextNextRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            pdno: "%".to_string(),
+            ord_strt_dt: start_date.to_string(),
+            ord_end_dt: end_date.to_string(),
+            sll_buy_dvsn: "00".to_string(),
+            ccld_nccs_dvsn: "00".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("order_history failed: {}", e),
+            msg: format!("inquire_ccnl_next: {}", e),
         })?;
 
-    Ok(history
-        .into_iter()
+    Ok(resp["output1"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
         .map(|h| UnifiedOrderHistoryItem {
-            order_no: h.order_no,
-            symbol: h.symbol,
-            side: match h.side_cd.as_str() {
+            order_no: h["odno"].as_str().unwrap_or("").to_string(),
+            symbol: h["pdno"].as_str().unwrap_or("").to_string(),
+            side: match h["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: h.qty.to_u32().unwrap_or(0),
-            filled_qty: h.filled_qty.to_u32().unwrap_or(0),
+            qty: h["ft_ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            filled_qty: h["ft_ccld_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0),
             price: Decimal::ZERO,
-            filled_price: h.filled_price,
+            filled_price: h["ft_ccld_unpr3"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
             status: String::new(),
         })
         .collect())
 }
 
-async fn us_balance(client: &Arc<dyn KisApi>) -> Result<UnifiedBalance, BotError> {
-    let balance = client.balance().await.map_err(|e| BotError::ApiError {
-        msg: format!("balance failed: {}", e),
-    })?;
+async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
+    let resp = base
+        .client
+        .overseas()
+        .trading()
+        .inquire_balance_next(InquireBalanceNextNextNextRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: "NASD".to_string(),
+            tr_crcy_cd: "USD".to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("overseas balance: {}", e),
+        })?;
 
-    let positions = balance
-        .items
-        .into_iter()
+    let positions = resp["output1"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
         .map(|item| UnifiedPosition {
-            symbol: item.symbol,
-            name: Some(item.name),
-            qty: item.qty,
-            avg_price: item.avg_price,
-            current_price: item.eval_amount / item.qty.max(Decimal::ONE),
-            unrealized_pnl: item.unrealized_pnl,
-            pnl_pct: item.pnl_rate.to_f64().unwrap_or(0.0),
+            symbol: item["ovrs_pdno"].as_str().unwrap_or("").to_string(),
+            name: Some(item["ovrs_item_name"].as_str().unwrap_or("").to_string()),
+            qty: item["ovrs_cblc_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            avg_price: item["pchs_avg_pric"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            current_price: item["now_pric2"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            unrealized_pnl: item["frcr_evlu_pfls_amt"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            pnl_pct: item["evlu_pfls_rt"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0.0),
         })
         .collect();
 
+    let cash = resp["output2"][0]["frcr_dncl_amt_2"]
+        .as_str()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(Decimal::ZERO);
+
     Ok(UnifiedBalance {
-        total_equity: balance.summary.available_cash,
-        available_cash: balance.summary.available_cash,
+        total_equity: cash,
+        available_cash: cash,
         positions,
     })
 }
 
 async fn us_daily_chart(
-    client: &Arc<dyn KisApi>,
+    base: &UsMarketBase,
     symbol: &str,
     _days: u32,
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
-    let exchange = UsMarketBase::exchange_from_hint(None, symbol);
-    let bars = client
-        .daily_chart(DailyChartRequest {
-            symbol: symbol.to_string(),
-            period: ChartPeriod::Daily,
-            adj_price: true,
-            exchange,
+    let resp = base
+        .client
+        .overseas()
+        .quotations()
+        .dailyprice(DailypriceRequest {
+            excd: UsMarketBase::exchange_from_hint(None, symbol),
+            symb: symbol.to_string(),
+            gubn: "0".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("daily_chart failed: {}", e),
+            msg: format!("us dailyprice: {}", e),
         })?;
 
-    Ok(bars
-        .into_iter()
+    Ok(resp["output2"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
         .filter_map(|b| {
-            chrono::NaiveDate::parse_from_str(&b.date, "%Y%m%d")
+            chrono::NaiveDate::parse_from_str(b["xymd"].as_str()?, "%Y%m%d")
                 .ok()
                 .map(|date| UnifiedDailyBar {
                     date,
-                    open: b.open,
-                    high: b.high,
-                    low: b.low,
-                    close: b.close,
-                    volume: b.volume.to_u64().unwrap_or(0),
+                    open: b["open"]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap_or(Decimal::ZERO),
+                    high: b["high"]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap_or(Decimal::ZERO),
+                    low: b["low"]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap_or(Decimal::ZERO),
+                    close: b["clos"]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap_or(Decimal::ZERO),
+                    volume: b["tvol"].as_str().unwrap_or("0").parse().unwrap_or(0),
                 })
         })
         .collect())
 }
 
+async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String>, BotError> {
+    let resp = base
+        .client
+        .overseas()
+        .ranking()
+        .trade_vol(TradeVolRequest {
+            excd: "NASD".to_string(),
+            nday: "0".to_string(),
+            vol_rang: "0".to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("us trade_vol: {}", e),
+        })?;
+
+    Ok(resp["output"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .take(count as usize)
+        .filter_map(|i| i["symb"].as_str().map(|s| s.to_string()))
+        .collect())
+}
+
+async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
+    let today = Utc::now()
+        .with_timezone(&New_York)
+        .format("%Y%m%d")
+        .to_string();
+    let resp = base
+        .client
+        .overseas()
+        .quotations()
+        .countries_holiday(CountriesHolidayRequest {
+            trad_dt: today.clone(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("countries_holiday: {}", e),
+        })?;
+
+    Ok(resp["output"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .any(|h| h["bzdy_yn"].as_str().unwrap_or("Y") == "N"))
+}
+
 async fn us_intraday_candles(
-    _client: &Arc<dyn KisApi>,
+    _base: &UsMarketBase,
     symbol: &str,
     _interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
@@ -522,7 +647,7 @@ async fn us_intraday_candles(
     Ok(vec![])
 }
 
-async fn us_current_price(_client: &Arc<dyn KisApi>, _symbol: &str) -> Result<Decimal, BotError> {
+async fn us_current_price(_base: &UsMarketBase, _symbol: &str) -> Result<Decimal, BotError> {
     Err(BotError::ApiError {
         msg: "current_price not implemented for US market".to_string(),
     })
@@ -558,29 +683,4 @@ fn us_market_timing() -> MarketTiming {
         mins_until_close,
         is_holiday: false,
     }
-}
-
-async fn us_is_holiday(client: &Arc<dyn KisApi>) -> Result<bool, BotError> {
-    let holidays = client
-        .holidays("USA")
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("holidays failed: {}", e),
-        })?;
-
-    let today = Utc::now()
-        .with_timezone(&New_York)
-        .format("%Y%m%d")
-        .to_string();
-    Ok(holidays.iter().any(|h| h.date == today))
-}
-
-async fn us_volume_ranking(client: &Arc<dyn KisApi>, count: u32) -> Result<Vec<String>, BotError> {
-    let items = client
-        .volume_ranking(&Exchange::NASD, count)
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("volume_ranking failed: {}", e),
-        })?;
-    Ok(items.into_iter().map(|i| i.symbol).collect())
 }

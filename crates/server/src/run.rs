@@ -7,7 +7,7 @@ use crate::strategy::StrategyBundle;
 use crate::types::BotCommand;
 
 use chrono_tz::{America, Asia};
-use kis_api::{KisApi, KisClient, KisConfig, KisDomesticClient};
+use kis_api::{KisClient, KisEnv};
 use std::sync::{atomic::AtomicU32, Arc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -58,16 +58,18 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         }
     };
 
-    let real_config = KisConfig::from_env()?;
-    let vts_config = KisConfig::from_env_vts().unwrap_or_else(|_| {
-        tracing::warn!("VTS configuration not found in environment, using Real config as fallback for VTS adapters");
-        real_config.clone()
-    });
+    let real_app_key =
+        std::env::var("KIS_APP_KEY").map_err(|_| anyhow::anyhow!("KIS_APP_KEY not set"))?;
+    let real_app_secret =
+        std::env::var("KIS_APP_SECRET").map_err(|_| anyhow::anyhow!("KIS_APP_SECRET not set"))?;
+    let vts_app_key = std::env::var("KIS_VTS_APP_KEY").unwrap_or_else(|_| real_app_key.clone());
+    let vts_app_secret =
+        std::env::var("KIS_VTS_APP_SECRET").unwrap_or_else(|_| real_app_secret.clone());
 
-    let kr_real_client = Arc::new(KisDomesticClient::new(real_config.clone()));
-    let us_real_client = Arc::new(KisClient::new(real_config));
-    let kr_vts_client = Arc::new(KisDomesticClient::new(vts_config.clone()));
-    let us_vts_client = Arc::new(KisClient::new(vts_config));
+    let kr_real_client = KisClient::new(&real_app_key, &real_app_secret, KisEnv::Real).await?;
+    let us_real_client = KisClient::new(&real_app_key, &real_app_secret, KisEnv::Real).await?;
+    let kr_vts_client = KisClient::new(&vts_app_key, &vts_app_secret, KisEnv::Vts).await?;
+    let us_vts_client = KisClient::new(&vts_app_key, &vts_app_secret, KisEnv::Vts).await?;
 
     let adapters = crate::run_generic::MarketAdapters::new(
         kr_real_client,
@@ -88,12 +90,13 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         adapters.us_real.clone()
     };
 
-    tracing::info!("connecting shared WebSocket stream...");
-    let shared_stream = us_real_client
-        .stream()
-        .await
-        .expect("failed to establish shared WebSocket stream");
-    tracing::info!("shared WebSocket stream established for KR+US tick data");
+    // tracing::info!("connecting shared WebSocket stream...");
+    // let shared_stream = us_real_client
+    //     .stream()
+    //     .await
+    //     .expect("failed to establish shared WebSocket stream");
+    // tracing::info!("shared WebSocket stream established for KR+US tick data");
+    // TODO: WebSocket stream not available in zero-boilerplate branch
 
     let mut kr_pipeline = pipeline::MarketPipeline::new(&cfg.kr.db_path);
     let mut us_pipeline = pipeline::MarketPipeline::new(&cfg.us.db_path);
@@ -268,18 +271,18 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         }
     }
 
-    let t = token.clone();
-    let h_kr_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_kr_tick_task(
-        shared_stream.clone(),
-        kr_pipeline.watchlist_rx.clone(),
-        kr_pipeline.tick_tx.clone(),
-        kr_pipeline.tick_pos_tx.clone(),
-        kr_pipeline.quote_tx.clone(),
-        kr_alert.clone(),
-        activity.clone(),
-        kr_db_pool.clone(),
-        t,
-    ));
+    // let t = token.clone();
+    // let h_kr_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_kr_tick_task(
+    //     shared_stream.clone(),
+    //     kr_pipeline.watchlist_rx.clone(),
+    //     kr_pipeline.tick_tx.clone(),
+    //     kr_pipeline.tick_pos_tx.clone(),
+    //     kr_pipeline.quote_tx.clone(),
+    //     kr_alert.clone(),
+    //     activity.clone(),
+    //     kr_db_pool.clone(),
+    //     t,
+    // ));
 
     let kr_pending = Arc::new(AtomicU32::new(0));
     let kr_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
@@ -420,18 +423,18 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         }
     }
 
-    let t = token.clone();
-    let h_us_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_us_tick_task(
-        shared_stream.clone(),
-        us_pipeline.watchlist_rx.clone(),
-        us_pipeline.tick_tx.clone(),
-        us_pipeline.tick_pos_tx.clone(),
-        us_pipeline.quote_tx.clone(),
-        us_alert.clone(),
-        activity.clone(),
-        us_db_pool.clone(),
-        t,
-    ));
+    // let t = token.clone();
+    // let h_us_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_us_tick_task(
+    //     shared_stream.clone(),
+    //     us_pipeline.watchlist_rx.clone(),
+    //     us_pipeline.tick_tx.clone(),
+    //     us_pipeline.tick_pos_tx.clone(),
+    //     us_pipeline.quote_tx.clone(),
+    //     us_alert.clone(),
+    //     activity.clone(),
+    //     us_db_pool.clone(),
+    //     t,
+    // ));
 
     let us_pending = Arc::new(AtomicU32::new(0));
     let us_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
@@ -548,8 +551,8 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let _ = h_us_sched.await;
     let _ = h_kr_regime.await;
     let _ = h_us_regime.await;
-    let _ = h_kr_tick.await;
-    let _ = h_us_tick.await;
+    // let _ = h_kr_tick.await;
+    // let _ = h_us_tick.await;
     let _ = h_kr_signal.await;
     let _ = h_us_signal.await;
     let _ = h_kr_pos.await;

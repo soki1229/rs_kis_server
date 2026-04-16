@@ -1229,7 +1229,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -1462,7 +1462,7 @@ dependencies = [
 [[package]]
 name = "kis_api"
 version = "0.1.0"
-source = "git+https://github.com/soki1229/rs_kis.git?branch=master#0eae7a366575894d400e16d08b1720f9a97ed2ca"
+source = "git+https://github.com/soki1229/rs_kis.git?branch=feat%2Fzero-boilerplate#3b1f066b3e58dff0e2ff4ce1d328c816d58f2404"
 dependencies = [
  "async-trait",
  "chrono",

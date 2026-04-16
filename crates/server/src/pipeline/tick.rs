@@ -1,3 +1,4 @@
+/*
 use crate::monitoring::alert::AlertRouter;
 use crate::pipeline::TickData;
 use crate::types::{Market, QuoteSnapshot, WatchlistSet};
@@ -39,7 +40,7 @@ pub async fn run_tick_task(
     let mut rx = shared_stream.receiver();
     let mut current_syms: HashSet<String> = HashSet::new();
 
-    // 초기 워치리스트 반영
+    //// 초기 워치리스트 반영
     {
         let all_syms = watchlist_rx.borrow().all_unique();
         if !all_syms.is_empty() {
@@ -255,3 +256,4 @@ pub async fn run_kr_tick_task_stub(
     token.cancelled().await;
     tracing::info!("TickTask: shutting down");
 }
+*/

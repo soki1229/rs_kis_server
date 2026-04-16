@@ -10,6 +10,7 @@ pub(crate) enum Market {
 }
 
 impl Market {
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Self::Kr => "KR",
