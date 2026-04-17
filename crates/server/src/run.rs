@@ -72,7 +72,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let us_vts_client = KisClient::new(&vts_app_key, &vts_app_secret, KisEnv::Vts).await?;
 
     let adapters = crate::run_generic::MarketAdapters::new(
-        kr_real_client,
+        kr_real_client.clone(),
         us_real_client.clone(),
         kr_vts_client,
         us_vts_client,
@@ -90,13 +90,20 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         adapters.us_real.clone()
     };
 
-    // tracing::info!("connecting shared WebSocket stream...");
-    // let shared_stream = us_real_client
-    //     .stream()
-    //     .await
-    //     .expect("failed to establish shared WebSocket stream");
-    // tracing::info!("shared WebSocket stream established for KR+US tick data");
-    // TODO: WebSocket stream not available in zero-boilerplate branch
+    tracing::info!("connecting shared WebSocket stream...");
+    let ws_approval_key = kr_real_client
+        .approval_key()
+        .await
+        .expect("WS approval key 발급 실패");
+    let shared_stream = pipeline::stream::StreamManager::connect(
+        kr_real_client.ws_url(),
+        ws_approval_key,
+        kr_real_client.app_key().to_string(),
+        512,
+    )
+    .await
+    .expect("WebSocket stream 연결 실패");
+    tracing::info!("WebSocket stream 연결 완료");
 
     let mut kr_pipeline = pipeline::MarketPipeline::new(&cfg.kr.db_path);
     let mut us_pipeline = pipeline::MarketPipeline::new(&cfg.us.db_path);
@@ -271,18 +278,18 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         }
     }
 
-    // let t = token.clone();
-    // let h_kr_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_kr_tick_task(
-    //     shared_stream.clone(),
-    //     kr_pipeline.watchlist_rx.clone(),
-    //     kr_pipeline.tick_tx.clone(),
-    //     kr_pipeline.tick_pos_tx.clone(),
-    //     kr_pipeline.quote_tx.clone(),
-    //     kr_alert.clone(),
-    //     activity.clone(),
-    //     kr_db_pool.clone(),
-    //     t,
-    // ));
+    let t = token.clone();
+    let h_kr_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_kr_tick_task(
+        shared_stream.clone(),
+        kr_pipeline.watchlist_rx.clone(),
+        kr_pipeline.tick_tx.clone(),
+        kr_pipeline.tick_pos_tx.clone(),
+        kr_pipeline.quote_tx.clone(),
+        kr_alert.clone(),
+        activity.clone(),
+        kr_db_pool.clone(),
+        t,
+    ));
 
     let kr_pending = Arc::new(AtomicU32::new(0));
     let kr_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
@@ -423,18 +430,18 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         }
     }
 
-    // let t = token.clone();
-    // let h_us_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_us_tick_task(
-    //     shared_stream.clone(),
-    //     us_pipeline.watchlist_rx.clone(),
-    //     us_pipeline.tick_tx.clone(),
-    //     us_pipeline.tick_pos_tx.clone(),
-    //     us_pipeline.quote_tx.clone(),
-    //     us_alert.clone(),
-    //     activity.clone(),
-    //     us_db_pool.clone(),
-    //     t,
-    // ));
+    let t = token.clone();
+    let h_us_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_us_tick_task(
+        shared_stream.clone(),
+        us_pipeline.watchlist_rx.clone(),
+        us_pipeline.tick_tx.clone(),
+        us_pipeline.tick_pos_tx.clone(),
+        us_pipeline.quote_tx.clone(),
+        us_alert.clone(),
+        activity.clone(),
+        us_db_pool.clone(),
+        t,
+    ));
 
     let us_pending = Arc::new(AtomicU32::new(0));
     let us_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
@@ -551,8 +558,8 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let _ = h_us_sched.await;
     let _ = h_kr_regime.await;
     let _ = h_us_regime.await;
-    // let _ = h_kr_tick.await;
-    // let _ = h_us_tick.await;
+    let _ = h_kr_tick.await;
+    let _ = h_us_tick.await;
     let _ = h_kr_signal.await;
     let _ = h_us_signal.await;
     let _ = h_kr_pos.await;

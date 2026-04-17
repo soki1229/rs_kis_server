@@ -37,6 +37,8 @@ teloxide = { version = "0.13", features = ["macros"] }
 dotenvy = "0.15"
 uuid = { version = "1", features = ["v4"] }
 socket2 = "0.6"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
 kis_api = { git = "https://github.com/soki1229/rs_kis.git", branch = "feat/zero-boilerplate" }
 
 [dev-dependencies]

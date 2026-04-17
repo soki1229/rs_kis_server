@@ -3,6 +3,7 @@ pub mod generic_position;
 pub mod generic_regime;
 pub mod scheduler;
 pub mod signal;
+pub mod stream;
 pub mod tick;
 
 pub use generic_execution::run_generic_execution_task;

@@ -1462,7 +1462,6 @@ dependencies = [
 [[package]]
 name = "kis_api"
 version = "0.1.0"
-source = "git+https://github.com/soki1229/rs_kis.git?branch=feat%2Fzero-boilerplate#3b1f066b3e58dff0e2ff4ce1d328c816d58f2404"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1494,6 +1493,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dotenvy",
+ "futures-util",
  "kis_api",
  "rand 0.8.5",
  "reqwest 0.12.28",
@@ -1508,6 +1508,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "toml",
  "tower",
@@ -3335,7 +3336,9 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite",
 ]
 
@@ -3551,6 +3554,7 @@ dependencies = [
  "http 1.4.0",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.8.5",
  "sha1",
  "thiserror 1.0.69",

@@ -1,8 +1,8 @@
-/*
 use crate::monitoring::alert::AlertRouter;
+use crate::pipeline::stream::{KisEvent, StreamManager, SubscriptionKind, TransactionData};
 use crate::pipeline::TickData;
 use crate::types::{Market, QuoteSnapshot, WatchlistSet};
-use kis_api::{KisError, KisEvent, KisStream, SubscriptionKind, TransactionData};
+use kis_api::KisError;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashSet;
 use tokio::sync::{broadcast, mpsc};
@@ -24,7 +24,7 @@ const KIS_WS_MAX_SYMBOLS: usize = 20;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tick_task(
     market: Market,
-    shared_stream: KisStream,
+    shared_stream: StreamManager,
     mut watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
     tick_tx: broadcast::Sender<TickData>,
     tick_pos_tx: mpsc::Sender<TickData>,
@@ -107,7 +107,7 @@ pub async fn run_tick_task(
 }
 
 async fn subscribe_symbols(
-    stream: &KisStream,
+    stream: &StreamManager,
     symbols: &HashSet<String>,
     market: Market,
     alert: &AlertRouter,
@@ -158,7 +158,12 @@ async fn subscribe_symbols(
     ok
 }
 
-async fn unsubscribe_symbol(stream: &KisStream, sym: &str, market: Market, db: &sqlx::SqlitePool) {
+async fn unsubscribe_symbol(
+    stream: &StreamManager,
+    sym: &str,
+    market: Market,
+    db: &sqlx::SqlitePool,
+) {
     let label = market.label();
     let (p_kind, ob_kind) = match market {
         Market::Kr => (
@@ -194,7 +199,7 @@ async fn forward_tick(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_us_tick_task(
-    shared_stream: KisStream,
+    shared_stream: StreamManager,
     watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
     tick_tx: broadcast::Sender<TickData>,
     tick_pos_tx: mpsc::Sender<TickData>,
@@ -221,7 +226,7 @@ pub async fn run_us_tick_task(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kr_tick_task(
-    shared_stream: KisStream,
+    shared_stream: StreamManager,
     watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
     tick_tx: broadcast::Sender<TickData>,
     tick_pos_tx: mpsc::Sender<TickData>,
@@ -245,15 +250,3 @@ pub async fn run_kr_tick_task(
     )
     .await
 }
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub async fn run_kr_tick_task_stub(
-    _tick_tx: broadcast::Sender<TickData>,
-    _tick_pos_tx: mpsc::Sender<TickData>,
-    token: CancellationToken,
-) {
-    token.cancelled().await;
-    tracing::info!("TickTask: shutting down");
-}
-*/
