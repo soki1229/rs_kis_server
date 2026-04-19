@@ -74,9 +74,13 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     }
 
     // KisClient는 Arc 기반이므로 clone해도 토큰 공유 — 토큰 발급은 1회만 발생
-    let vts_client =
-        KisClient::with_cache(&vts_app_key, &vts_app_secret, KisEnv::Vts, Some(vts_cache_path))
-            .await?;
+    let vts_client = KisClient::with_cache(
+        &vts_app_key,
+        &vts_app_secret,
+        KisEnv::Vts,
+        Some(vts_cache_path),
+    )
+    .await?;
     let kr_vts_client = vts_client.clone();
     let us_vts_client = vts_client.clone();
 
@@ -92,8 +96,8 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     // Real 클라이언트는 실전 투자 시에만 생성
     let (kr_real_client, us_real_client) = if !fully_dry_run {
-        let real_app_key = std::env::var("KIS_APP_KEY")
-            .map_err(|_| anyhow::anyhow!("KIS_APP_KEY not set"))?;
+        let real_app_key =
+            std::env::var("KIS_APP_KEY").map_err(|_| anyhow::anyhow!("KIS_APP_KEY not set"))?;
         let real_app_secret = std::env::var("KIS_APP_SECRET")
             .map_err(|_| anyhow::anyhow!("KIS_APP_SECRET not set"))?;
 
@@ -146,9 +150,15 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     };
 
     // 완전 모의투자 시 VTS WS 엔드포인트 사용, 실전 혼합 시 Real 엔드포인트 사용
-    let ws_client = if fully_dry_run { &kr_vts_client } else { &kr_real_client };
-    tracing::info!("connecting shared WebSocket stream ({})...",
-        if fully_dry_run { "VTS" } else { "Real" });
+    let ws_client = if fully_dry_run {
+        &kr_vts_client
+    } else {
+        &kr_real_client
+    };
+    tracing::info!(
+        "connecting shared WebSocket stream ({})...",
+        if fully_dry_run { "VTS" } else { "Real" }
+    );
 
     let approval_cache = shared::token::ApprovalKeyCache::new(600); // 10분 전 갱신
     let ws_approval_key = approval_cache

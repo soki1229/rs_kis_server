@@ -19,7 +19,11 @@ struct KrMarketBase {
 
 impl KrMarketBase {
     fn new(client: KisClient, cano: String, acnt_prdt_cd: String) -> Self {
-        Self { client, cano, acnt_prdt_cd }
+        Self {
+            client,
+            cano,
+            acnt_prdt_cd,
+        }
     }
 
     async fn confirm_fill_from_history(

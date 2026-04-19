@@ -20,7 +20,12 @@ struct UsMarketBase {
 
 impl UsMarketBase {
     fn new(client: KisClient, cano: String, acnt_prdt_cd: String) -> Self {
-        Self { client, cano, acnt_prdt_cd, fx_spread_pct: Decimal::new(5, 3) }
+        Self {
+            client,
+            cano,
+            acnt_prdt_cd,
+            fx_spread_pct: Decimal::new(5, 3),
+        }
     }
 
     fn exchange_from_hint(hint: Option<&str>, symbol: &str) -> String {
