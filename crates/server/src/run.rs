@@ -64,11 +64,19 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let vts_app_key = std::env::var("KIS_VTS_APP_KEY")
         .or_else(|_| std::env::var("VTS_APP_KEY"))
         .or_else(|_| std::env::var("KIS_APP_KEY"))
-        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_KEY, VTS_APP_KEY, 또는 KIS_APP_KEY 가 설정되지 않았습니다."))?;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "KIS_VTS_APP_KEY, VTS_APP_KEY, 또는 KIS_APP_KEY 가 설정되지 않았습니다."
+            )
+        })?;
     let vts_app_secret = std::env::var("KIS_VTS_APP_SECRET")
         .or_else(|_| std::env::var("VTS_APP_SECRET"))
         .or_else(|_| std::env::var("KIS_APP_SECRET"))
-        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_SECRET, VTS_APP_SECRET, 또는 KIS_APP_SECRET 가 설정되지 않았습니다."))?;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "KIS_VTS_APP_SECRET, VTS_APP_SECRET, 또는 KIS_APP_SECRET 가 설정되지 않았습니다."
+            )
+        })?;
 
     let vts_cache_path = PathBuf::from(shellexpand::tilde(&cfg.token_cache.vts_path).into_owned());
     if let Some(parent) = vts_cache_path.parent() {
@@ -152,10 +160,17 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     };
 
     // 완전 모의투자 시 VTS WS 엔드포인트 사용, 실전 혼합 시 Real 엔드포인트 사용
-    let ws_client = if fully_dry_run { &kr_vts_client } else { &kr_real_client };
+    let ws_client = if fully_dry_run {
+        &kr_vts_client
+    } else {
+        &kr_real_client
+    };
     let ws_url = ws_client.ws_url();
-    tracing::info!("connecting shared WebSocket stream ({}) to {}...",
-        if fully_dry_run { "VTS" } else { "Real" }, ws_url);
+    tracing::info!(
+        "connecting shared WebSocket stream ({}) to {}...",
+        if fully_dry_run { "VTS" } else { "Real" },
+        ws_url
+    );
 
     let approval_cache = shared::token::ApprovalKeyCache::new(600); // 10분 전 갱신
     let ws_approval_key = approval_cache
@@ -171,7 +186,6 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         ws_client.app_key().to_string(),
         512,
     )
-
     .await
     .expect("WebSocket stream 연결 실패");
     tracing::info!("WebSocket stream 연결 완료");
@@ -270,11 +284,17 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let kr_db_pool = crate::db::connect(&cfg.kr.db_path).await?;
     let kr_timing = kr_adapter.market_timing();
     let kr_active = kr_timing.is_open;
-    tracing::info!("KR market status: is_open={}, mins_since_open={}, mins_until_close={}", 
-        kr_active, kr_timing.mins_since_open, kr_timing.mins_until_close);
+    tracing::info!(
+        "KR market status: is_open={}, mins_since_open={}, mins_until_close={}",
+        kr_active,
+        kr_timing.mins_since_open,
+        kr_timing.mins_until_close
+    );
 
     if !kr_active {
-        tracing::info!("KR market is closed. Pipeline tasks will be started by scheduler when market opens.");
+        tracing::info!(
+            "KR market is closed. Pipeline tasks will be started by scheduler when market opens."
+        );
     }
 
     // Recovery (KR)
@@ -307,7 +327,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     let (kr_regime_tx, kr_regime_rx) =
         crate::regime::regime_channel(crate::types::MarketRegime::Trending);
-    
+
     let mut h_kr_regime = None;
     let mut h_kr_tick = None;
     let mut h_kr_signal = None;
@@ -436,11 +456,17 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let us_db_pool = crate::db::connect(&cfg.us.db_path).await?;
     let us_timing = us_adapter.market_timing();
     let us_active = us_timing.is_open;
-    tracing::info!("US market status: is_open={}, mins_since_open={}, mins_until_close={}", 
-        us_active, us_timing.mins_since_open, us_timing.mins_until_close);
+    tracing::info!(
+        "US market status: is_open={}, mins_since_open={}, mins_until_close={}",
+        us_active,
+        us_timing.mins_since_open,
+        us_timing.mins_until_close
+    );
 
     if !us_active {
-        tracing::info!("US market is closed. Pipeline tasks will be started by scheduler when market opens.");
+        tracing::info!(
+            "US market is closed. Pipeline tasks will be started by scheduler when market opens."
+        );
     }
 
     // Recovery (US)
@@ -653,18 +679,42 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     token.cancel();
 
-    if let Some(h) = h_kr_sched { let _ = h.await; }
-    if let Some(h) = h_us_sched { let _ = h.await; }
-    if let Some(h) = h_kr_regime { let _ = h.await; }
-    if let Some(h) = h_us_regime { let _ = h.await; }
-    if let Some(h) = h_kr_tick { let _ = h.await; }
-    if let Some(h) = h_us_tick { let _ = h.await; }
-    if let Some(h) = h_kr_signal { let _ = h.await; }
-    if let Some(h) = h_us_signal { let _ = h.await; }
-    if let Some(h) = h_kr_pos { let _ = h.await; }
-    if let Some(h) = h_us_pos { let _ = h.await; }
-    if let Some(h) = h_kr_exec { let _ = h.await; }
-    if let Some(h) = h_us_exec { let _ = h.await; }
+    if let Some(h) = h_kr_sched {
+        let _ = h.await;
+    }
+    if let Some(h) = h_us_sched {
+        let _ = h.await;
+    }
+    if let Some(h) = h_kr_regime {
+        let _ = h.await;
+    }
+    if let Some(h) = h_us_regime {
+        let _ = h.await;
+    }
+    if let Some(h) = h_kr_tick {
+        let _ = h.await;
+    }
+    if let Some(h) = h_us_tick {
+        let _ = h.await;
+    }
+    if let Some(h) = h_kr_signal {
+        let _ = h.await;
+    }
+    if let Some(h) = h_us_signal {
+        let _ = h.await;
+    }
+    if let Some(h) = h_kr_pos {
+        let _ = h.await;
+    }
+    if let Some(h) = h_us_pos {
+        let _ = h.await;
+    }
+    if let Some(h) = h_kr_exec {
+        let _ = h.await;
+    }
+    if let Some(h) = h_us_exec {
+        let _ = h.await;
+    }
     let _ = h_kr_ctrl.await;
     let _ = h_us_ctrl.await;
     let _ = h_rest.await;
