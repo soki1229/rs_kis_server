@@ -18,12 +18,8 @@ struct KrMarketBase {
 }
 
 impl KrMarketBase {
-    fn new(client: KisClient) -> Self {
-        Self {
-            cano: std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
-            acnt_prdt_cd: std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
-            client,
-        }
+    fn new(client: KisClient, cano: String, acnt_prdt_cd: String) -> Self {
+        Self { client, cano, acnt_prdt_cd }
     }
 
     async fn confirm_fill_from_history(
@@ -75,7 +71,11 @@ pub struct KrRealAdapter {
 impl KrRealAdapter {
     pub fn new(client: KisClient) -> Self {
         Self {
-            base: KrMarketBase::new(client),
+            base: KrMarketBase::new(
+                client,
+                std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
+                std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
+            ),
         }
     }
 }
@@ -174,8 +174,14 @@ pub struct KrVtsAdapter {
 
 impl KrVtsAdapter {
     pub fn new(client: KisClient) -> Self {
+        let cano = std::env::var("KIS_VTS_ACCOUNT_NO")
+            .or_else(|_| std::env::var("KIS_ACCOUNT_NO"))
+            .unwrap_or_default();
+        let acnt_prdt_cd = std::env::var("KIS_VTS_ACCOUNT_CD")
+            .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
+            .unwrap_or_else(|_| "01".to_string());
         Self {
-            base: KrMarketBase::new(client),
+            base: KrMarketBase::new(client, cano, acnt_prdt_cd),
         }
     }
 }

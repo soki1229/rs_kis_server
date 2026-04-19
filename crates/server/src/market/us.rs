@@ -19,13 +19,8 @@ struct UsMarketBase {
 }
 
 impl UsMarketBase {
-    fn new(client: KisClient) -> Self {
-        Self {
-            cano: std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
-            acnt_prdt_cd: std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
-            fx_spread_pct: Decimal::new(5, 3),
-            client,
-        }
+    fn new(client: KisClient, cano: String, acnt_prdt_cd: String) -> Self {
+        Self { client, cano, acnt_prdt_cd, fx_spread_pct: Decimal::new(5, 3) }
     }
 
     fn exchange_from_hint(hint: Option<&str>, symbol: &str) -> String {
@@ -92,7 +87,11 @@ pub struct UsRealAdapter {
 impl UsRealAdapter {
     pub fn new(client: KisClient) -> Self {
         Self {
-            base: UsMarketBase::new(client),
+            base: UsMarketBase::new(
+                client,
+                std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
+                std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
+            ),
         }
     }
 }
@@ -195,8 +194,14 @@ pub struct UsVtsAdapter {
 
 impl UsVtsAdapter {
     pub fn new(client: KisClient) -> Self {
+        let cano = std::env::var("KIS_VTS_ACCOUNT_NO")
+            .or_else(|_| std::env::var("KIS_ACCOUNT_NO"))
+            .unwrap_or_default();
+        let acnt_prdt_cd = std::env::var("KIS_VTS_ACCOUNT_CD")
+            .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
+            .unwrap_or_else(|_| "01".to_string());
         Self {
-            base: UsMarketBase::new(client),
+            base: UsMarketBase::new(client, cano, acnt_prdt_cd),
         }
     }
 }

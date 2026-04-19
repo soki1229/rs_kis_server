@@ -8,6 +8,7 @@ use crate::types::BotCommand;
 
 use chrono_tz::{America, Asia};
 use kis_api::{KisClient, KisEnv};
+use std::path::PathBuf;
 use std::sync::{atomic::AtomicU32, Arc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -58,23 +59,77 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         }
     };
 
-    let real_app_key =
-        std::env::var("KIS_APP_KEY").map_err(|_| anyhow::anyhow!("KIS_APP_KEY not set"))?;
-    let real_app_secret =
-        std::env::var("KIS_APP_SECRET").map_err(|_| anyhow::anyhow!("KIS_APP_SECRET not set"))?;
-    let vts_app_key = std::env::var("KIS_VTS_APP_KEY").unwrap_or_else(|_| real_app_key.clone());
-    let vts_app_secret =
-        std::env::var("KIS_VTS_APP_SECRET").unwrap_or_else(|_| real_app_secret.clone());
+    let fully_dry_run = kr_effective_dry_run && us_effective_dry_run;
 
-    let kr_real_client = KisClient::new(&real_app_key, &real_app_secret, KisEnv::Real).await?;
-    let us_real_client = KisClient::new(&real_app_key, &real_app_secret, KisEnv::Real).await?;
-    let kr_vts_client = KisClient::new(&vts_app_key, &vts_app_secret, KisEnv::Vts).await?;
-    let us_vts_client = KisClient::new(&vts_app_key, &vts_app_secret, KisEnv::Vts).await?;
+    let vts_app_key = std::env::var("KIS_VTS_APP_KEY")
+        .or_else(|_| std::env::var("KIS_APP_KEY"))
+        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_KEY (또는 KIS_APP_KEY) not set"))?;
+    let vts_app_secret = std::env::var("KIS_VTS_APP_SECRET")
+        .or_else(|_| std::env::var("KIS_APP_SECRET"))
+        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_SECRET (또는 KIS_APP_SECRET) not set"))?;
+
+    let vts_cache_path = PathBuf::from(shellexpand::tilde(&cfg.token_cache.vts_path).into_owned());
+    if let Some(parent) = vts_cache_path.parent() {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
+
+    // KisClient는 Arc 기반이므로 clone해도 토큰 공유 — 토큰 발급은 1회만 발생
+    let vts_client =
+        KisClient::with_cache(&vts_app_key, &vts_app_secret, KisEnv::Vts, Some(vts_cache_path))
+            .await?;
+    let kr_vts_client = vts_client.clone();
+    let us_vts_client = vts_client.clone();
+
+    // VTS 토큰 자동 갱신 태스크 (만료 10분 전 갱신)
+    {
+        let t = token.clone();
+        tokio::spawn(shared::token::run_token_refresh_task(
+            vts_client.clone(),
+            10,
+            t,
+        ));
+    }
+
+    // Real 클라이언트는 실전 투자 시에만 생성
+    let (kr_real_client, us_real_client) = if !fully_dry_run {
+        let real_app_key = std::env::var("KIS_APP_KEY")
+            .map_err(|_| anyhow::anyhow!("KIS_APP_KEY not set"))?;
+        let real_app_secret = std::env::var("KIS_APP_SECRET")
+            .map_err(|_| anyhow::anyhow!("KIS_APP_SECRET not set"))?;
+
+        let real_cache_path =
+            PathBuf::from(shellexpand::tilde(&cfg.token_cache.real_path).into_owned());
+        if let Some(parent) = real_cache_path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+
+        let real_client = KisClient::with_cache(
+            &real_app_key,
+            &real_app_secret,
+            KisEnv::Real,
+            Some(real_cache_path),
+        )
+        .await?;
+
+        // Real 토큰 자동 갱신 태스크
+        {
+            let t = token.clone();
+            tokio::spawn(shared::token::run_token_refresh_task(
+                real_client.clone(),
+                10,
+                t,
+            ));
+        }
+
+        (real_client.clone(), real_client)
+    } else {
+        (kr_vts_client.clone(), us_vts_client.clone())
+    };
 
     let adapters = crate::run_generic::MarketAdapters::new(
         kr_real_client.clone(),
         us_real_client.clone(),
-        kr_vts_client,
+        kr_vts_client.clone(),
         us_vts_client,
     );
 
@@ -90,15 +145,21 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         adapters.us_real.clone()
     };
 
-    tracing::info!("connecting shared WebSocket stream...");
-    let ws_approval_key = kr_real_client
-        .approval_key()
+    // 완전 모의투자 시 VTS WS 엔드포인트 사용, 실전 혼합 시 Real 엔드포인트 사용
+    let ws_client = if fully_dry_run { &kr_vts_client } else { &kr_real_client };
+    tracing::info!("connecting shared WebSocket stream ({})...",
+        if fully_dry_run { "VTS" } else { "Real" });
+
+    let approval_cache = shared::token::ApprovalKeyCache::new(600); // 10분 전 갱신
+    let ws_approval_key = approval_cache
+        .get(ws_client)
         .await
-        .expect("WS approval key 발급 실패");
+        .expect("approval_key 발급 실패");
+
     let shared_stream = pipeline::stream::StreamManager::connect(
-        kr_real_client.ws_url(),
+        ws_client.ws_url(),
         ws_approval_key,
-        kr_real_client.app_key().to_string(),
+        ws_client.app_key().to_string(),
         512,
     )
     .await

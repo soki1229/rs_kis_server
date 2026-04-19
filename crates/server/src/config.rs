@@ -342,6 +342,32 @@ impl TunableConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenCacheConfig {
+    /// 실전 토큰 캐시 파일 경로 (shellexpand 적용)
+    #[serde(default = "default_real_token_cache_path")]
+    pub real_path: String,
+    /// 모의투자 토큰 캐시 파일 경로
+    #[serde(default = "default_vts_token_cache_path")]
+    pub vts_path: String,
+}
+
+fn default_real_token_cache_path() -> String {
+    "~/.config/kis/token_real.json".to_string()
+}
+fn default_vts_token_cache_path() -> String {
+    "~/.config/kis/token_vts.json".to_string()
+}
+
+impl Default for TokenCacheConfig {
+    fn default() -> Self {
+        Self {
+            real_path: default_real_token_cache_path(),
+            vts_path: default_vts_token_cache_path(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub rest_port: u16,
@@ -353,6 +379,8 @@ pub struct ServerConfig {
     pub signal: SignalConfig,
     #[serde(default)]
     pub position: PositionConfig,
+    #[serde(default)]
+    pub token_cache: TokenCacheConfig,
     #[serde(default)]
     pub dry_run: bool,
     #[serde(default = "default_env_file")]
