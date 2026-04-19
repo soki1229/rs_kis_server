@@ -62,11 +62,13 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let fully_dry_run = kr_effective_dry_run && us_effective_dry_run;
 
     let vts_app_key = std::env::var("KIS_VTS_APP_KEY")
+        .or_else(|_| std::env::var("VTS_APP_KEY"))
         .or_else(|_| std::env::var("KIS_APP_KEY"))
-        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_KEY (또는 KIS_APP_KEY) not set"))?;
+        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_KEY, VTS_APP_KEY, 또는 KIS_APP_KEY 가 설정되지 않았습니다."))?;
     let vts_app_secret = std::env::var("KIS_VTS_APP_SECRET")
+        .or_else(|_| std::env::var("VTS_APP_SECRET"))
         .or_else(|_| std::env::var("KIS_APP_SECRET"))
-        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_SECRET (또는 KIS_APP_SECRET) not set"))?;
+        .map_err(|_| anyhow::anyhow!("KIS_VTS_APP_SECRET, VTS_APP_SECRET, 또는 KIS_APP_SECRET 가 설정되지 않았습니다."))?;
 
     let vts_cache_path = PathBuf::from(shellexpand::tilde(&cfg.token_cache.vts_path).into_owned());
     if let Some(parent) = vts_cache_path.parent() {
@@ -150,15 +152,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     };
 
     // 완전 모의투자 시 VTS WS 엔드포인트 사용, 실전 혼합 시 Real 엔드포인트 사용
-    let ws_client = if fully_dry_run {
-        &kr_vts_client
-    } else {
-        &kr_real_client
-    };
-    tracing::info!(
-        "connecting shared WebSocket stream ({})...",
-        if fully_dry_run { "VTS" } else { "Real" }
-    );
+    let ws_client = if fully_dry_run { &kr_vts_client } else { &kr_real_client };
+    let ws_url = ws_client.ws_url();
+    tracing::info!("connecting shared WebSocket stream ({}) to {}...",
+        if fully_dry_run { "VTS" } else { "Real" }, ws_url);
 
     let approval_cache = shared::token::ApprovalKeyCache::new(600); // 10분 전 갱신
     let ws_approval_key = approval_cache
@@ -166,12 +163,15 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         .await
         .expect("approval_key 발급 실패");
 
+    tracing::debug!("WS approval_key: {}", ws_approval_key);
+
     let shared_stream = pipeline::stream::StreamManager::connect(
-        ws_client.ws_url(),
+        ws_url,
         ws_approval_key,
         ws_client.app_key().to_string(),
         512,
     )
+
     .await
     .expect("WebSocket stream 연결 실패");
     tracing::info!("WebSocket stream 연결 완료");
@@ -268,7 +268,14 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     // ── KR pipeline ──────────────────────────────────────────────────────
     let kr_db_pool = crate::db::connect(&cfg.kr.db_path).await?;
-    let kr_active = kr_adapter.market_timing().is_open;
+    let kr_timing = kr_adapter.market_timing();
+    let kr_active = kr_timing.is_open;
+    tracing::info!("KR market status: is_open={}, mins_since_open={}, mins_until_close={}", 
+        kr_active, kr_timing.mins_since_open, kr_timing.mins_until_close);
+
+    if !kr_active {
+        tracing::info!("KR market is closed. Pipeline tasks will be started by scheduler when market opens.");
+    }
 
     // Recovery (KR)
     let kr_recovery_failed = if kr_active {
@@ -300,17 +307,24 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     let (kr_regime_tx, kr_regime_rx) =
         crate::regime::regime_channel(crate::types::MarketRegime::Trending);
-    let t = token.clone();
-    let h_kr_regime: JoinHandle<()> = tokio::spawn(pipeline::run_generic_regime_task(
-        kr_adapter.clone(),
-        regime_strategy.clone(),
-        kr_regime_tx,
-        kr_alert.clone(),
-        t,
-        "069500",
-    ));
+    
+    let mut h_kr_regime = None;
+    let mut h_kr_tick = None;
+    let mut h_kr_signal = None;
+    let mut h_kr_exec = None;
+    let mut h_kr_pos = None;
 
     if kr_active {
+        let t = token.clone();
+        h_kr_regime = Some(tokio::spawn(pipeline::run_generic_regime_task(
+            kr_adapter.clone(),
+            regime_strategy.clone(),
+            kr_regime_tx,
+            kr_alert.clone(),
+            t,
+            "069500",
+        )));
+
         let kr_wl = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             discovery_strategy.build_watchlist(kr_adapter.clone(), cfg.kr.dynamic_watchlist_size),
@@ -347,80 +361,87 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             .await;
             kr_pipeline.watchlist_tx.send(kr_wl).ok();
         }
+
+        let t = token.clone();
+        h_kr_tick = Some(tokio::spawn(pipeline::tick::run_kr_tick_task(
+            shared_stream.clone(),
+            kr_pipeline.watchlist_rx.clone(),
+            kr_pipeline.tick_tx.clone(),
+            kr_pipeline.tick_pos_tx.clone(),
+            kr_pipeline.quote_tx.clone(),
+            kr_alert.clone(),
+            activity.clone(),
+            kr_db_pool.clone(),
+            t,
+        )));
+
+        let kr_pending = Arc::new(AtomicU32::new(0));
+        let kr_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
+
+        let t = token.clone();
+        h_kr_signal = Some(tokio::spawn(pipeline::signal::run_signal_task(
+            kr_pipeline.tick_tx.subscribe(),
+            kr_pipeline.quote_rx,
+            kr_pipeline.order_tx.clone(),
+            kr_regime_rx.clone(),
+            kr_db_pool.clone(),
+            kr_adapter.clone(),
+            kr_pipeline.watchlist_rx.clone(),
+            kr_state.summary.clone(),
+            cfg.signal.clone(),
+            cfg.kr.strategies.clone(),
+            activity.clone(),
+            notion_client.clone(),
+            kr_state.live_state_rx.clone(),
+            signal_strategy.clone(),
+            qual_strategy.clone(),
+            risk_strategy.clone(),
+            t,
+        )));
+
+        let t = token.clone();
+        h_kr_exec = Some(tokio::spawn(pipeline::run_generic_execution_task(
+            kr_adapter.clone(),
+            kr_pipeline.order_rx,
+            kr_pipeline.force_order_rx,
+            kr_pipeline.fill_tx.clone(),
+            kr_db_pool.clone(),
+            kr_state.summary.clone(),
+            kr_alert.clone(),
+            t,
+            kr_pending,
+            kr_poll_sem,
+        )));
+
+        let t = token.clone();
+        h_kr_pos = Some(tokio::spawn(pipeline::run_generic_position_task(
+            kr_adapter.clone(),
+            kr_pipeline.fill_rx,
+            kr_pipeline.tick_pos_rx,
+            kr_pipeline.eod_rx.take().unwrap(),
+            kr_live_tx,
+            kr_pipeline.force_order_tx.clone(),
+            kr_regime_rx,
+            kr_db_pool.clone(),
+            t,
+            pipeline::scheduler::kr_market_close_utc(
+                chrono::Utc::now().with_timezone(&Asia::Seoul).date_naive(),
+            )
+            .unwrap(),
+            cfg.position.clone(),
+        )));
     }
-
-    let t = token.clone();
-    let h_kr_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_kr_tick_task(
-        shared_stream.clone(),
-        kr_pipeline.watchlist_rx.clone(),
-        kr_pipeline.tick_tx.clone(),
-        kr_pipeline.tick_pos_tx.clone(),
-        kr_pipeline.quote_tx.clone(),
-        kr_alert.clone(),
-        activity.clone(),
-        kr_db_pool.clone(),
-        t,
-    ));
-
-    let kr_pending = Arc::new(AtomicU32::new(0));
-    let kr_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
-
-    let t = token.clone();
-    let h_kr_signal: JoinHandle<()> = tokio::spawn(pipeline::signal::run_signal_task(
-        kr_pipeline.tick_tx.subscribe(),
-        kr_pipeline.quote_rx,
-        kr_pipeline.order_tx.clone(),
-        kr_regime_rx.clone(),
-        kr_db_pool.clone(),
-        kr_adapter.clone(),
-        kr_pipeline.watchlist_rx.clone(),
-        kr_state.summary.clone(),
-        cfg.signal.clone(),
-        cfg.kr.strategies.clone(),
-        activity.clone(),
-        notion_client.clone(),
-        kr_state.live_state_rx.clone(),
-        signal_strategy.clone(),
-        qual_strategy.clone(),
-        risk_strategy.clone(),
-        t,
-    ));
-
-    let t = token.clone();
-    let h_kr_exec: JoinHandle<()> = tokio::spawn(pipeline::run_generic_execution_task(
-        kr_adapter.clone(),
-        kr_pipeline.order_rx,
-        kr_pipeline.force_order_rx,
-        kr_pipeline.fill_tx.clone(),
-        kr_db_pool.clone(),
-        kr_state.summary.clone(),
-        kr_alert.clone(),
-        t,
-        kr_pending,
-        kr_poll_sem,
-    ));
-
-    let t = token.clone();
-    let h_kr_pos: JoinHandle<()> = tokio::spawn(pipeline::run_generic_position_task(
-        kr_adapter.clone(),
-        kr_pipeline.fill_rx,
-        kr_pipeline.tick_pos_rx,
-        kr_pipeline.eod_rx.take().unwrap(),
-        kr_live_tx,
-        kr_pipeline.force_order_tx.clone(),
-        kr_regime_rx,
-        kr_db_pool.clone(),
-        t,
-        pipeline::scheduler::kr_market_close_utc(
-            chrono::Utc::now().with_timezone(&Asia::Seoul).date_naive(),
-        )
-        .unwrap(),
-        cfg.position.clone(),
-    ));
 
     // ── US pipeline ──────────────────────────────────────────────────────
     let us_db_pool = crate::db::connect(&cfg.us.db_path).await?;
-    let us_active = us_adapter.market_timing().is_open;
+    let us_timing = us_adapter.market_timing();
+    let us_active = us_timing.is_open;
+    tracing::info!("US market status: is_open={}, mins_since_open={}, mins_until_close={}", 
+        us_active, us_timing.mins_since_open, us_timing.mins_until_close);
+
+    if !us_active {
+        tracing::info!("US market is closed. Pipeline tasks will be started by scheduler when market opens.");
+    }
 
     // Recovery (US)
     let us_recovery_failed = if us_active {
@@ -452,17 +473,24 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     let (us_regime_tx, us_regime_rx) =
         crate::regime::regime_channel(crate::types::MarketRegime::Trending);
-    let t = token.clone();
-    let h_us_regime: JoinHandle<()> = tokio::spawn(pipeline::run_generic_regime_task(
-        us_adapter.clone(),
-        regime_strategy.clone(),
-        us_regime_tx,
-        us_alert.clone(),
-        t,
-        "QQQ",
-    ));
+
+    let mut h_us_regime = None;
+    let mut h_us_tick = None;
+    let mut h_us_signal = None;
+    let mut h_us_exec = None;
+    let mut h_us_pos = None;
 
     if us_active {
+        let t = token.clone();
+        h_us_regime = Some(tokio::spawn(pipeline::run_generic_regime_task(
+            us_adapter.clone(),
+            regime_strategy.clone(),
+            us_regime_tx,
+            us_alert.clone(),
+            t,
+            "QQQ",
+        )));
+
         let us_wl = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             discovery_strategy.build_watchlist(us_adapter.clone(), cfg.us.dynamic_watchlist_size),
@@ -499,81 +527,81 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             .await;
             us_pipeline.watchlist_tx.send(us_wl).ok();
         }
+
+        let t = token.clone();
+        h_us_tick = Some(tokio::spawn(pipeline::tick::run_us_tick_task(
+            shared_stream.clone(),
+            us_pipeline.watchlist_rx.clone(),
+            us_pipeline.tick_tx.clone(),
+            us_pipeline.tick_pos_tx.clone(),
+            us_pipeline.quote_tx.clone(),
+            us_alert.clone(),
+            activity.clone(),
+            us_db_pool.clone(),
+            t,
+        )));
+
+        let us_pending = Arc::new(AtomicU32::new(0));
+        let us_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
+        let t = token.clone();
+        h_us_signal = Some(tokio::spawn(pipeline::signal::run_signal_task(
+            us_pipeline.tick_tx.subscribe(),
+            us_pipeline.quote_rx,
+            us_pipeline.order_tx.clone(),
+            us_regime_rx.clone(),
+            us_db_pool.clone(),
+            us_adapter.clone(),
+            us_pipeline.watchlist_rx.clone(),
+            us_state.summary.clone(),
+            cfg.signal.clone(),
+            cfg.us.strategies.clone(),
+            activity.clone(),
+            notion_client.clone(),
+            us_state.live_state_rx.clone(),
+            signal_strategy.clone(),
+            qual_strategy.clone(),
+            risk_strategy.clone(),
+            t,
+        )));
+
+        let t = token.clone();
+        h_us_exec = Some(tokio::spawn(pipeline::run_generic_execution_task(
+            us_adapter.clone(),
+            us_pipeline.order_rx,
+            us_pipeline.force_order_rx,
+            us_pipeline.fill_tx.clone(),
+            us_db_pool.clone(),
+            us_state.summary.clone(),
+            us_alert.clone(),
+            t,
+            us_pending,
+            us_poll_sem,
+        )));
+
+        let t = token.clone();
+        h_us_pos = Some(tokio::spawn(pipeline::run_generic_position_task(
+            us_adapter.clone(),
+            us_pipeline.fill_rx,
+            us_pipeline.tick_pos_rx,
+            us_pipeline.eod_rx.take().unwrap(),
+            us_live_tx,
+            us_pipeline.force_order_tx.clone(),
+            us_regime_rx,
+            us_db_pool.clone(),
+            t,
+            pipeline::scheduler::us_market_close_utc(
+                chrono::Utc::now()
+                    .with_timezone(&America::New_York)
+                    .date_naive(),
+            )
+            .unwrap(),
+            cfg.position.clone(),
+        )));
     }
-
-    let t = token.clone();
-    let h_us_tick: JoinHandle<()> = tokio::spawn(pipeline::tick::run_us_tick_task(
-        shared_stream.clone(),
-        us_pipeline.watchlist_rx.clone(),
-        us_pipeline.tick_tx.clone(),
-        us_pipeline.tick_pos_tx.clone(),
-        us_pipeline.quote_tx.clone(),
-        us_alert.clone(),
-        activity.clone(),
-        us_db_pool.clone(),
-        t,
-    ));
-
-    let us_pending = Arc::new(AtomicU32::new(0));
-    let us_poll_sem = Arc::new(tokio::sync::Semaphore::new(3));
-    let t = token.clone();
-    let h_us_signal: JoinHandle<()> = tokio::spawn(pipeline::signal::run_signal_task(
-        us_pipeline.tick_tx.subscribe(),
-        us_pipeline.quote_rx,
-        us_pipeline.order_tx.clone(),
-        us_regime_rx.clone(),
-        us_db_pool.clone(),
-        us_adapter.clone(),
-        us_pipeline.watchlist_rx.clone(),
-        us_state.summary.clone(),
-        cfg.signal.clone(),
-        cfg.us.strategies.clone(),
-        activity.clone(),
-        notion_client.clone(),
-        us_state.live_state_rx.clone(),
-        signal_strategy.clone(),
-        qual_strategy.clone(),
-        risk_strategy.clone(),
-        t,
-    ));
-
-    let t = token.clone();
-    let h_us_exec: JoinHandle<()> = tokio::spawn(pipeline::run_generic_execution_task(
-        us_adapter.clone(),
-        us_pipeline.order_rx,
-        us_pipeline.force_order_rx,
-        us_pipeline.fill_tx.clone(),
-        us_db_pool.clone(),
-        us_state.summary.clone(),
-        us_alert.clone(),
-        t,
-        us_pending,
-        us_poll_sem,
-    ));
-
-    let t = token.clone();
-    let h_us_pos: JoinHandle<()> = tokio::spawn(pipeline::run_generic_position_task(
-        us_adapter.clone(),
-        us_pipeline.fill_rx,
-        us_pipeline.tick_pos_rx,
-        us_pipeline.eod_rx.take().unwrap(),
-        us_live_tx,
-        us_pipeline.force_order_tx.clone(),
-        us_regime_rx,
-        us_db_pool.clone(),
-        t,
-        pipeline::scheduler::us_market_close_utc(
-            chrono::Utc::now()
-                .with_timezone(&America::New_York)
-                .date_naive(),
-        )
-        .unwrap(),
-        cfg.position.clone(),
-    ));
 
     // Scheduler (KR)
     let t = token.clone();
-    let h_kr_sched: JoinHandle<()> = tokio::spawn(pipeline::scheduler::run_kr_scheduler_task(
+    let h_kr_sched = Some(tokio::spawn(pipeline::scheduler::run_kr_scheduler_task(
         kr_adapter,
         discovery_strategy.clone(),
         kr_pipeline.watchlist_tx,
@@ -584,11 +612,11 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         activity.clone(),
         kr_db_pool,
         t,
-    ));
+    )));
 
     // Scheduler (US)
     let t = token.clone();
-    let h_us_sched: JoinHandle<()> = tokio::spawn(pipeline::scheduler::run_scheduler_task(
+    let h_us_sched = Some(tokio::spawn(pipeline::scheduler::run_scheduler_task(
         us_adapter,
         discovery_strategy,
         us_pipeline.watchlist_tx,
@@ -599,7 +627,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         activity,
         us_db_pool,
         t,
-    ));
+    )));
 
     kr_summary_alert.info(format!(
         "✅ 모든 태스크 준비 완료 [{}] — 장 시작 대기 중",
@@ -625,18 +653,18 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     token.cancel();
 
-    let _ = h_kr_sched.await;
-    let _ = h_us_sched.await;
-    let _ = h_kr_regime.await;
-    let _ = h_us_regime.await;
-    let _ = h_kr_tick.await;
-    let _ = h_us_tick.await;
-    let _ = h_kr_signal.await;
-    let _ = h_us_signal.await;
-    let _ = h_kr_pos.await;
-    let _ = h_us_pos.await;
-    let _ = h_kr_exec.await;
-    let _ = h_us_exec.await;
+    if let Some(h) = h_kr_sched { let _ = h.await; }
+    if let Some(h) = h_us_sched { let _ = h.await; }
+    if let Some(h) = h_kr_regime { let _ = h.await; }
+    if let Some(h) = h_us_regime { let _ = h.await; }
+    if let Some(h) = h_kr_tick { let _ = h.await; }
+    if let Some(h) = h_us_tick { let _ = h.await; }
+    if let Some(h) = h_kr_signal { let _ = h.await; }
+    if let Some(h) = h_us_signal { let _ = h.await; }
+    if let Some(h) = h_kr_pos { let _ = h.await; }
+    if let Some(h) = h_us_pos { let _ = h.await; }
+    if let Some(h) = h_kr_exec { let _ = h.await; }
+    if let Some(h) = h_us_exec { let _ = h.await; }
     let _ = h_kr_ctrl.await;
     let _ = h_us_ctrl.await;
     let _ = h_rest.await;

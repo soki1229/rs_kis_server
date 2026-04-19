@@ -326,8 +326,8 @@ async fn us_place_order(
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             ovrs_excg_cd: exchange.to_string(),
             pdno: req.symbol.clone(),
-            ord_qty: req.qty.to_string(),
-            ovrs_ord_unpr: adjusted_price.map(|p| p.to_string()).unwrap_or_default(),
+            ord_qty: Decimal::from(req.qty),
+            ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
             ord_dvsn: "00".to_string(),
             ..Default::default()
         })
@@ -365,8 +365,8 @@ async fn us_cancel_order(
             pdno: order.symbol.clone(),
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(),
-            ord_qty: order.remaining_qty.to_string(),
-            ovrs_ord_unpr: "0".to_string(),
+            ord_qty: Decimal::from(order.remaining_qty),
+            ovrs_ord_unpr: Decimal::ZERO,
             ..Default::default()
         })
         .await

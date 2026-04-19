@@ -4,7 +4,7 @@ use super::adapter::MarketAdapter;
 use super::types::*;
 use crate::error::BotError;
 use async_trait::async_trait;
-use chrono::{Timelike, Utc};
+use chrono::{Datelike, Timelike, Utc};
 use chrono_tz::Asia::Seoul;
 use kis_api::models::*;
 use kis_api::KisClient;
@@ -299,8 +299,8 @@ async fn kr_place_order(
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             pdno: req.symbol.clone(),
             ord_dvsn: "00".to_string(), // 지정가
-            ord_qty: req.qty.to_string(),
-            ord_unpr: adjusted_price.map(|p| p.to_string()).unwrap_or_default(),
+            ord_qty: Decimal::from(req.qty),
+            ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
             ..Default::default()
         })
         .await
@@ -335,7 +335,7 @@ async fn kr_cancel_order(
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(), // 취소
-            ord_qty: order.remaining_qty.to_string(),
+            ord_qty: Decimal::from(order.remaining_qty),
             ..Default::default()
         })
         .await
@@ -572,7 +572,7 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
             fid_blng_cls_code: "0".to_string(),
             fid_trgt_cls_code: "111111111".to_string(),
             fid_trgt_exls_cls_code: "0000000000".to_string(),
-            fid_vol_cnt: count.to_string(),
+            fid_vol_cnt: count as i64,
             fid_input_price_1: "".to_string(),
             fid_input_price_2: "".to_string(),
             ..Default::default()
@@ -620,7 +620,10 @@ fn kr_market_timing() -> MarketTiming {
     let open_mins = 9 * 60;
     let close_mins = 15 * 60 + 30;
 
-    let is_open = total_mins >= open_mins && total_mins < close_mins;
+    let weekday = now.weekday();
+    let is_weekend = matches!(weekday, chrono::Weekday::Sat | chrono::Weekday::Sun);
+
+    let is_open = !is_weekend && total_mins >= open_mins && total_mins < close_mins;
     let mins_since_open = if total_mins >= open_mins {
         total_mins - open_mins
     } else {
