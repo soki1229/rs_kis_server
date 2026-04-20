@@ -212,7 +212,7 @@ impl MarketAdapter for UsRealAdapter {
     }
 
     fn suggested_throttle_ms(&self) -> u64 {
-        100
+        self.base.throttle_ms
     }
 }
 
@@ -326,7 +326,7 @@ impl MarketAdapter for UsVtsAdapter {
     }
 
     fn suggested_throttle_ms(&self) -> u64 {
-        1000
+        self.base.throttle_ms
     }
 }
 
@@ -437,11 +437,7 @@ async fn us_unfilled_orders(base: &UsMarketBase) -> Result<Vec<UnifiedUnfilledOr
                 _ => UnifiedSide::Sell,
             },
             qty: o["ft_ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            remaining_qty: o["ft_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
+            remaining_qty: o["nccs_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
             price: o["ft_ord_unpr3"]
                 .as_str()
                 .unwrap_or("0")
@@ -507,6 +503,7 @@ async fn us_order_history(
 }
 
 async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .overseas()
@@ -685,10 +682,9 @@ async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
 async fn us_intraday_candles(
     base: &UsMarketBase,
     symbol: &str,
-    interval_mins: u32,
+    _interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
     base.throttle().await;
-    let resp = base
 
     tracing::warn!("intraday_candles not implemented for US: {}", symbol);
     Ok(vec![])
@@ -701,7 +697,6 @@ async fn us_current_price(base: &UsMarketBase, symbol: &str) -> Result<Decimal, 
         msg: "current_price not implemented for US".to_string(),
     })
 }
-
 
 fn us_market_timing() -> MarketTiming {
     let now = Utc::now().with_timezone(&New_York);
