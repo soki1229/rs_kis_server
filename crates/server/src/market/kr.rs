@@ -302,12 +302,13 @@ async fn kr_daily_chart(
         .client
         .stock()
         .quotations()
-        .inquire_time_itemchartprice(InquireTimeItemchartpriceRequest {
+        .inquire_daily_itemchartprice(InquireDailyItemchartpriceRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
             fid_input_iscd: symbol.to_string(),
-            fid_input_hour_1: "".to_string(),
-            fid_pw_data_incu_yn: "Y".to_string(),
-            fid_etc_cls_code: "".to_string(),
+            fid_input_date_1: "".to_string(),
+            fid_input_date_2: "".to_string(),
+            fid_period_div_code: "D".to_string(),
+            fid_org_adj_prc: "0".to_string(),
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -406,7 +407,12 @@ async fn kr_cancel_order(
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(), // 취소
             ord_qty: Decimal::from(order.remaining_qty),
-            ..Default::default()
+            krx_fwdg_ord_orgno: "".to_string(),
+            ord_dvsn: "00".to_string(),
+            ord_unpr: Decimal::ZERO,
+            qty_all_ord_yn: "Y".to_string(),
+            cndt_pric: Decimal::ZERO,
+            excg_id_dvsn_cd: "00".to_string(),
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -426,7 +432,8 @@ async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOr
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             ctx_area_fk100: "".to_string(),
             ctx_area_nk100: "".to_string(),
-            ..Default::default()
+            inqr_dvsn_1: "0".to_string(),
+            inqr_dvsn_2: "0".to_string(),
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -476,7 +483,13 @@ async fn kr_order_history(
             pdno: "%".to_string(),
             ctx_area_fk100: "".to_string(),
             ctx_area_nk100: "".to_string(),
-            ..Default::default()
+            ord_gno_brno: "".to_string(),
+            odno: "".to_string(),
+            inqr_dvsn_1: "0".to_string(),
+            ccld_dvsn: "00".to_string(),
+            excg_id_dvsn_cd: "00".to_string(),
+            inqr_dvsn_3: "00".to_string(),
+            inqr_dvsn: "0".to_string(),
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -496,11 +509,7 @@ async fn kr_order_history(
                 _ => UnifiedSide::Sell,
             },
             qty: h["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            filled_qty: h["tot_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
+            filled_qty: h["tot_ccld_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
             filled_price: h["avg_prvs"]
                 .as_str()
                 .unwrap_or("0")
