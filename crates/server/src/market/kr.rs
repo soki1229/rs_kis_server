@@ -191,7 +191,7 @@ impl MarketAdapter for KrRealAdapter {
     }
 
     fn suggested_throttle_ms(&self) -> u64 {
-        100 // 10 TPS safety margin
+        self.base.throttle_ms
     }
 }
 
@@ -301,7 +301,7 @@ impl MarketAdapter for KrVtsAdapter {
     }
 
     fn suggested_throttle_ms(&self) -> u64 {
-        1000 // 1 TPS safety margin for VTS
+        self.base.throttle_ms
     }
 }
 
@@ -471,6 +471,7 @@ async fn kr_order_history(
 }
 
 async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .stock()
@@ -625,8 +626,7 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .collect())
 }
 
-async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
-    base.throttle().await;
+async fn kr_is_holiday(_base: &KrMarketBase) -> Result<bool, BotError> {
     // TODO: KIS 국내 휴일조회 API 연동 필요
 
     Ok(false)
@@ -635,9 +635,16 @@ async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
 async fn kr_intraday_candles(
     base: &KrMarketBase,
     symbol: &str,
-    _interval_mins: u32,
+    interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
     base.throttle().await;
+    if interval_mins != 1 {
+        tracing::warn!(
+            "kr_intraday_candles: interval_mins={} ignored, only 1-min bars supported",
+            interval_mins
+        );
+    }
+
     let resp = base
         .client
         .stock()
@@ -648,7 +655,6 @@ async fn kr_intraday_candles(
             fid_input_hour_1: "".to_string(),
             fid_pw_data_incu_yn: "Y".to_string(),
             fid_etc_cls_code: "".to_string(),
-            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -662,13 +668,16 @@ async fn kr_intraday_candles(
         .iter()
         .filter_map(|b| {
             let time_str = b["stck_cntg_hour"].as_str()?;
-            let date_str = b["stck_bsop_date"].as_str().or(Some("20240101"))?; // Fallback date if not present
+            let date_str = b["stck_bsop_date"].as_str()?;
             let dt_str = format!("{} {}", date_str, time_str);
 
             chrono::NaiveDateTime::parse_from_str(&dt_str, "%Y%m%d %H%M%S")
                 .ok()
                 .map(|naive| {
-                    let dt = Seoul.from_local_datetime(&naive).unwrap().with_timezone(&Utc);
+                    let dt = Seoul
+                        .from_local_datetime(&naive)
+                        .unwrap()
+                        .with_timezone(&Utc);
                     UnifiedCandleBar {
                         timestamp: dt,
                         open: b["stck_oprc"]
@@ -691,11 +700,7 @@ async fn kr_intraday_candles(
                             .unwrap_or("0")
                             .parse()
                             .unwrap_or(Decimal::ZERO),
-                        volume: b["cntg_vol"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(0),
+                        volume: b["cntg_vol"].as_str().unwrap_or("0").parse().unwrap_or(0),
                     }
                 })
         })
@@ -711,7 +716,6 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
         .inquire_price(InquirePriceRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
             fid_input_iscd: symbol.to_string(),
-            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
