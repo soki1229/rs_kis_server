@@ -10,20 +10,39 @@ use kis_api::models::*;
 use kis_api::KisClient;
 use rust_decimal::Decimal;
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
 /// Base logic for Korean market shared by Real and VTS adapters.
 struct KrMarketBase {
     client: KisClient,
     cano: String,
     acnt_prdt_cd: String,
+    last_call: Arc<Mutex<Instant>>,
+    throttle_ms: u64,
 }
 
 impl KrMarketBase {
-    fn new(client: KisClient, cano: String, acnt_prdt_cd: String) -> Self {
+    fn new(client: KisClient, cano: String, acnt_prdt_cd: String, throttle_ms: u64) -> Self {
         Self {
             client,
             cano,
             acnt_prdt_cd,
+            last_call: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10))),
+            throttle_ms,
         }
+    }
+
+    /// API 호출 전 강제 대기 (TPS 준수)
+    async fn throttle(&self) {
+        let mut last = self.last_call.lock().await;
+        let elapsed = last.elapsed();
+        let wait_dur = Duration::from_millis(self.throttle_ms);
+        if elapsed < wait_dur {
+            tokio::time::sleep(wait_dur - elapsed).await;
+        }
+        *last = Instant::now();
     }
 
     async fn confirm_fill_from_history(
@@ -79,6 +98,7 @@ impl KrRealAdapter {
                 client,
                 std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
                 std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
+                100, // Real 10 TPS safety margin
             ),
         }
     }
@@ -189,7 +209,7 @@ impl KrVtsAdapter {
             .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
             .unwrap_or_else(|_| "01".to_string());
         Self {
-            base: KrMarketBase::new(client, cano, acnt_prdt_cd),
+            base: KrMarketBase::new(client, cano, acnt_prdt_cd, 1000),
         }
     }
 }
@@ -294,6 +314,7 @@ async fn kr_place_order(
     req: UnifiedOrderRequest,
     adapter: &impl MarketAdapter,
 ) -> Result<UnifiedOrderResult, BotError> {
+    base.throttle().await;
     let adjusted_price = req
         .price
         .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
@@ -335,6 +356,7 @@ async fn kr_cancel_order(
     base: &KrMarketBase,
     order: &UnifiedUnfilledOrder,
 ) -> Result<bool, BotError> {
+    base.throttle().await;
     base.client
         .stock()
         .trading()
@@ -354,6 +376,7 @@ async fn kr_cancel_order(
 }
 
 async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .stock()
@@ -400,6 +423,7 @@ async fn kr_order_history(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .stock()
@@ -515,6 +539,7 @@ async fn kr_daily_chart(
     symbol: &str,
     _days: u32,
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .stock()
@@ -568,6 +593,7 @@ async fn kr_daily_chart(
 }
 
 async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String>, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .stock()
@@ -599,8 +625,10 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .collect())
 }
 
-async fn kr_is_holiday(_base: &KrMarketBase) -> Result<bool, BotError> {
+async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
+    base.throttle().await;
     // TODO: KIS 국내 휴일조회 API 연동 필요
+
     Ok(false)
 }
 
@@ -609,6 +637,7 @@ async fn kr_intraday_candles(
     symbol: &str,
     _interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .stock()
@@ -674,6 +703,7 @@ async fn kr_intraday_candles(
 }
 
 async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, BotError> {
+    base.throttle().await;
     let resp = base
         .client
         .stock()
