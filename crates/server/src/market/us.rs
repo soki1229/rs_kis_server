@@ -190,6 +190,10 @@ impl MarketAdapter for UsRealAdapter {
     fn fx_spread_pct(&self) -> Decimal {
         self.base.fx_spread_pct
     }
+
+    fn suggested_throttle_ms(&self) -> u64 {
+        100
+    }
 }
 
 /// US VTS Market Adapter.
@@ -299,6 +303,10 @@ impl MarketAdapter for UsVtsAdapter {
 
     fn fx_spread_pct(&self) -> Decimal {
         self.base.fx_spread_pct
+    }
+
+    fn suggested_throttle_ms(&self) -> u64 {
+        1000
     }
 }
 

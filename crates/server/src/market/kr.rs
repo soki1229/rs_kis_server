@@ -4,7 +4,7 @@ use super::adapter::MarketAdapter;
 use super::types::*;
 use crate::error::BotError;
 use async_trait::async_trait;
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::Asia::Seoul;
 use kis_api::models::*;
 use kis_api::KisClient;
@@ -169,6 +169,10 @@ impl MarketAdapter for KrRealAdapter {
     async fn is_holiday(&self) -> Result<bool, BotError> {
         kr_is_holiday(&self.base).await
     }
+
+    fn suggested_throttle_ms(&self) -> u64 {
+        100 // 10 TPS safety margin
+    }
 }
 
 /// Korean VTS Market Adapter.
@@ -274,6 +278,10 @@ impl MarketAdapter for KrVtsAdapter {
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
         kr_is_holiday(&self.base).await
+    }
+
+    fn suggested_throttle_ms(&self) -> u64 {
+        1000 // 1 TPS safety margin for VTS
     }
 }
 
@@ -658,7 +666,7 @@ async fn kr_intraday_candles(
                             .as_str()
                             .unwrap_or("0")
                             .parse()
-                            .unwrap_or(Decimal::ZERO),
+                            .unwrap_or(0),
                     }
                 })
         })

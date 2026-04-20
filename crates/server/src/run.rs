@@ -335,7 +335,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let mut h_kr_pos = None;
 
     if kr_active {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            kr_adapter.suggested_throttle_ms() * 2,
+        ))
+        .await;
         let t = token.clone();
         h_kr_regime = Some(tokio::spawn(pipeline::run_generic_regime_task(
             kr_adapter.clone(),
@@ -346,7 +349,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             "069500",
         )));
 
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            kr_adapter.suggested_throttle_ms() * 2,
+        ))
+        .await;
         let kr_wl = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             discovery_strategy.build_watchlist(kr_adapter.clone(), cfg.kr.dynamic_watchlist_size),
@@ -509,7 +515,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let mut h_us_pos = None;
 
     if us_active {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            us_adapter.suggested_throttle_ms() * 2,
+        ))
+        .await;
         let t = token.clone();
         h_us_regime = Some(tokio::spawn(pipeline::run_generic_regime_task(
             us_adapter.clone(),
@@ -520,7 +529,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             "QQQ",
         )));
 
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            us_adapter.suggested_throttle_ms() * 2,
+        ))
+        .await;
         let us_wl = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             discovery_strategy.build_watchlist(us_adapter.clone(), cfg.us.dynamic_watchlist_size),

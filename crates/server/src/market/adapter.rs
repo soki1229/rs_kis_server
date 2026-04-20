@@ -90,6 +90,10 @@ pub trait MarketAdapter: Send + Sync + 'static {
     /// Check if today is a trading holiday.
     async fn is_holiday(&self) -> Result<bool, BotError>;
 
+    /// Get recommended sleep duration between HTTP API calls (ms).
+    /// Used to respect per-environment TPS limits.
+    fn suggested_throttle_ms(&self) -> u64;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Cost Adjustments
     // ─────────────────────────────────────────────────────────────────────────
@@ -190,6 +194,10 @@ impl MarketAdapter for Arc<dyn MarketAdapter> {
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
         (**self).is_holiday().await
+    }
+
+    fn suggested_throttle_ms(&self) -> u64 {
+        (**self).suggested_throttle_ms()
     }
 
     fn fx_spread_pct(&self) -> Decimal {
