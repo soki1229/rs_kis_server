@@ -311,7 +311,7 @@ async fn read_loop(
                 Some(Ok(Message::Text(text))) => {
                     match classify_text_message(&text) {
                         TextMessage::PingPong => {
-                            tracing::info!("WS: PINGPONG received, echoing back for session maintenance");
+                            tracing::debug!("WS: PINGPONG received, echoing back for session maintenance");
                             let mut g = inner.ws_tx.lock().await;
                             if let Some(ref mut w) = *g {
                                 if let Err(e) = w.send(Message::Text(text)).await {
