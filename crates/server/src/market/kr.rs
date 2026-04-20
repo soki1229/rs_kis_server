@@ -10,39 +10,30 @@ use kis_api::models::*;
 use kis_api::KisClient;
 use rust_decimal::Decimal;
 
+use crate::shared::throttler::KisThrottler;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 /// Base logic for Korean market shared by Real and VTS adapters.
 struct KrMarketBase {
     client: KisClient,
     cano: String,
     acnt_prdt_cd: String,
-    last_call: Arc<Mutex<Instant>>,
-    throttle_ms: u64,
+    throttler: Arc<KisThrottler>,
 }
 
 impl KrMarketBase {
-    fn new(client: KisClient, cano: String, acnt_prdt_cd: String, throttle_ms: u64) -> Self {
+    fn new(
+        client: KisClient,
+        cano: String,
+        acnt_prdt_cd: String,
+        throttler: Arc<KisThrottler>,
+    ) -> Self {
         Self {
             client,
             cano,
             acnt_prdt_cd,
-            last_call: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10))),
-            throttle_ms,
+            throttler,
         }
-    }
-
-    /// API 호출 전 강제 대기 (TPS 준수)
-    async fn throttle(&self) {
-        let mut last = self.last_call.lock().await;
-        let elapsed = last.elapsed();
-        let wait_dur = Duration::from_millis(self.throttle_ms);
-        if elapsed < wait_dur {
-            tokio::time::sleep(wait_dur - elapsed).await;
-        }
-        *last = Instant::now();
     }
 
     async fn confirm_fill_from_history(
@@ -92,13 +83,13 @@ pub struct KrRealAdapter {
 }
 
 impl KrRealAdapter {
-    pub fn new(client: KisClient) -> Self {
+    pub fn new(client: KisClient, throttler: Arc<KisThrottler>) -> Self {
         Self {
             base: KrMarketBase::new(
                 client,
                 std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
                 std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
-                100, // Real 10 TPS safety margin
+                throttler,
             ),
         }
     }
@@ -189,10 +180,6 @@ impl MarketAdapter for KrRealAdapter {
     async fn is_holiday(&self) -> Result<bool, BotError> {
         kr_is_holiday(&self.base).await
     }
-
-    fn suggested_throttle_ms(&self) -> u64 {
-        self.base.throttle_ms
-    }
 }
 
 /// Korean VTS Market Adapter.
@@ -201,7 +188,7 @@ pub struct KrVtsAdapter {
 }
 
 impl KrVtsAdapter {
-    pub fn new(client: KisClient) -> Self {
+    pub fn new(client: KisClient, throttler: Arc<KisThrottler>) -> Self {
         let cano = std::env::var("KIS_VTS_ACCOUNT_NO")
             .or_else(|_| std::env::var("KIS_ACCOUNT_NO"))
             .unwrap_or_default();
@@ -209,7 +196,7 @@ impl KrVtsAdapter {
             .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
             .unwrap_or_else(|_| "01".to_string());
         Self {
-            base: KrMarketBase::new(client, cano, acnt_prdt_cd, 1000),
+            base: KrMarketBase::new(client, cano, acnt_prdt_cd, throttler),
         }
     }
 }
@@ -299,258 +286,28 @@ impl MarketAdapter for KrVtsAdapter {
     async fn is_holiday(&self) -> Result<bool, BotError> {
         kr_is_holiday(&self.base).await
     }
-
-    fn suggested_throttle_ms(&self) -> u64 {
-        self.base.throttle_ms
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared Internal Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn kr_place_order(
-    base: &KrMarketBase,
-    req: UnifiedOrderRequest,
-    adapter: &impl MarketAdapter,
-) -> Result<UnifiedOrderResult, BotError> {
-    base.throttle().await;
-    let adjusted_price = req
-        .price
-        .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
-
-    let resp = base
-        .client
-        .stock()
-        .trading()
-        .order_cash(OrderCashRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            pdno: req.symbol.clone(),
-            ord_dvsn: "00".to_string(), // 지정가
-            ord_qty: Decimal::from(req.qty),
-            ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("order_cash: {}", e),
-        })?;
-
-    let order_no = resp["output"]["KRX_FWDG_ORD_ORGNO"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-
-    Ok(UnifiedOrderResult {
-        internal_id: uuid::Uuid::new_v4().to_string(),
-        broker_id: order_no,
-        symbol: req.symbol,
-        side: req.side,
-        qty: req.qty,
-        price: adjusted_price,
-    })
-}
-
-async fn kr_cancel_order(
-    base: &KrMarketBase,
-    order: &UnifiedUnfilledOrder,
-) -> Result<bool, BotError> {
-    base.throttle().await;
-    base.client
-        .stock()
-        .trading()
-        .order_rvsecncl(OrderRvsecnclRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            orgn_odno: order.order_no.clone(),
-            rvse_cncl_dvsn_cd: "02".to_string(), // 취소
-            ord_qty: Decimal::from(order.remaining_qty),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("order_rvsecncl: {}", e),
-        })?;
-    Ok(true)
-}
-
-async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-    base.throttle().await;
-    let resp = base
-        .client
-        .stock()
-        .trading()
-        .inquire_psbl_rvsecncl(InquirePsblRvsecnclRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("inquire_psbl_rvsecncl: {}", e),
-        })?;
-
-    Ok(resp["output"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|o| UnifiedUnfilledOrder {
-            order_no: o["odno"].as_str().unwrap_or("").to_string(),
-            symbol: o["pdno"].as_str().unwrap_or("").to_string(),
-            side: match o["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
-                "02" => UnifiedSide::Buy,
-                _ => UnifiedSide::Sell,
-            },
-            qty: o["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            remaining_qty: o["psbl_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            price: o["ord_unpr"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            exchange_code: match o["mksc_shrn_iscd"].as_str().unwrap_or("") {
-                s if s.starts_with("KSQ") => Some("Q".to_string()),
-                _ => Some("J".to_string()),
-            },
-        })
-        .collect())
-}
-
-async fn kr_order_history(
-    base: &KrMarketBase,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
-    base.throttle().await;
-    let resp = base
-        .client
-        .stock()
-        .trading()
-        .inquire_daily_ccld(InquireDailyCcldRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            inqr_strt_dt: start_date.to_string(),
-            inqr_end_dt: end_date.to_string(),
-            sll_buy_dvsn_cd: "00".to_string(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("inquire_daily_ccld: {}", e),
-        })?;
-
-    Ok(resp["output1"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|h| UnifiedOrderHistoryItem {
-            order_no: h["odno"].as_str().unwrap_or("").to_string(),
-            symbol: h["pdno"].as_str().unwrap_or("").to_string(),
-            side: match h["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
-                "02" => UnifiedSide::Buy,
-                _ => UnifiedSide::Sell,
-            },
-            qty: h["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            filled_qty: h["tot_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
-            price: Decimal::ZERO,
-            filled_price: h["avg_prvs"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            status: String::new(),
-        })
-        .collect())
-}
-
-async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
-    base.throttle().await;
-    let resp = base
-        .client
-        .stock()
-        .trading()
-        .inquire_balance(InquireBalanceRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("inquire_balance: {}", e),
-        })?;
-
-    let positions = resp["output1"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|item| UnifiedPosition {
-            symbol: item["pdno"].as_str().unwrap_or("").to_string(),
-            name: Some(item["prdt_name"].as_str().unwrap_or("").to_string()),
-            qty: item["hldg_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            avg_price: item["pchs_avg_pric"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            current_price: item["prpr"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            unrealized_pnl: item["evlu_pfls_amt"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            pnl_pct: item["evlu_pfls_rt"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0.0),
-        })
-        .collect();
-
-    let cash = resp["output2"][0]["dnca_tot_amt"]
-        .as_str()
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(Decimal::ZERO);
-
-    Ok(UnifiedBalance {
-        total_equity: cash,
-        available_cash: cash,
-        positions,
-    })
-}
-
 async fn kr_daily_chart(
     base: &KrMarketBase,
     symbol: &str,
     _days: u32,
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let resp = base
         .client
         .stock()
         .quotations()
-        .inquire_daily_itemchartprice(InquireDailyItemchartpriceRequest {
+        .inquire_time_itemchartprice(InquireTimeItemchartpriceRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
             fid_input_iscd: symbol.to_string(),
-            fid_period_div_code: "D".to_string(),
-            fid_org_adj_prc: "1".to_string(),
-            ..Default::default()
+            fid_input_hour_1: "".to_string(),
+            fid_pw_data_incu_yn: "Y".to_string(),
+            fid_etc_cls_code: "".to_string(),
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -593,28 +350,87 @@ async fn kr_daily_chart(
         .collect())
 }
 
-async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String>, BotError> {
-    base.throttle().await;
+async fn kr_place_order(
+    base: &KrMarketBase,
+    req: UnifiedOrderRequest,
+    adapter: &impl MarketAdapter,
+) -> Result<UnifiedOrderResult, BotError> {
+    base.throttler.wait().await;
+    let adjusted_price = req
+        .price
+        .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
+
     let resp = base
         .client
         .stock()
-        .quotations()
-        .volume_rank(VolumeRankNextRequest {
-            fid_cond_mrkt_div_code: "J".to_string(),
-            fid_cond_scr_div_code: "20171".to_string(),
-            fid_input_iscd: "0000".to_string(),
-            fid_div_cls_code: "0".to_string(),
-            fid_blng_cls_code: "0".to_string(),
-            fid_trgt_cls_code: "111111111".to_string(),
-            fid_trgt_exls_cls_code: "0000000000".to_string(),
-            fid_vol_cnt: count as i64,
-            fid_input_price_1: "".to_string(),
-            fid_input_price_2: "".to_string(),
+        .trading()
+        .order_cash(OrderCashRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            pdno: req.symbol.clone(),
+            ord_dvsn: "00".to_string(), // 지정가
+            ord_qty: Decimal::from(req.qty),
+            ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
+            cndt_pric: Decimal::ZERO,
+            excg_id_dvsn_cd: "00".to_string(),
+            sll_type: "01".to_string(),
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("order_cash: {}", e),
+        })?;
+
+    let order_no = resp["output"]["ODNO"].as_str().unwrap_or("").to_string();
+
+    Ok(UnifiedOrderResult {
+        internal_id: uuid::Uuid::new_v4().to_string(),
+        broker_id: order_no,
+        symbol: req.symbol,
+        side: req.side,
+        qty: req.qty,
+        price: adjusted_price,
+    })
+}
+
+async fn kr_cancel_order(
+    base: &KrMarketBase,
+    order: &UnifiedUnfilledOrder,
+) -> Result<bool, BotError> {
+    base.throttler.wait().await;
+    base.client
+        .stock()
+        .trading()
+        .order_rvsecncl(OrderRvsecnclRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            orgn_odno: order.order_no.clone(),
+            rvse_cncl_dvsn_cd: "02".to_string(), // 취소
+            ord_qty: Decimal::from(order.remaining_qty),
             ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("kr volume_rank: {}", e),
+            msg: format!("order_rvsecncl: {}", e),
+        })?;
+    Ok(true)
+}
+
+async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
+    base.throttler.wait().await;
+    let resp = base
+        .client
+        .stock()
+        .trading()
+        .inquire_psbl_rvsecncl(InquirePsblRvsecnclRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ctx_area_fk100: "".to_string(),
+            ctx_area_nk100: "".to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("inquire_psbl_rvsecncl: {}", e),
         })?;
 
     Ok(resp["output"]
@@ -622,14 +438,155 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .cloned()
         .unwrap_or_default()
         .iter()
-        .filter_map(|i| i["mksc_shrn_iscd"].as_str().map(|s| s.to_string()))
+        .map(|o| UnifiedUnfilledOrder {
+            order_no: o["odno"].as_str().unwrap_or("").to_string(),
+            symbol: o["pdno"].as_str().unwrap_or("").to_string(),
+            side: match o["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
+                "02" => UnifiedSide::Buy,
+                _ => UnifiedSide::Sell,
+            },
+            qty: o["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            remaining_qty: o["psbl_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            price: o["ord_unpr"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            exchange_code: None,
+        })
         .collect())
 }
 
-async fn kr_is_holiday(_base: &KrMarketBase) -> Result<bool, BotError> {
-    // TODO: KIS 국내 휴일조회 API 연동 필요
+async fn kr_order_history(
+    base: &KrMarketBase,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
+    base.throttler.wait().await;
+    let resp = base
+        .client
+        .stock()
+        .trading()
+        .inquire_daily_ccld(InquireDailyCcldRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            inqr_strt_dt: start_date.to_string(),
+            inqr_end_dt: end_date.to_string(),
+            sll_buy_dvsn_cd: "00".to_string(),
+            pdno: "%".to_string(),
+            ctx_area_fk100: "".to_string(),
+            ctx_area_nk100: "".to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("inquire_daily_ccld: {}", e),
+        })?;
 
-    Ok(false)
+    Ok(resp["output1"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|h| UnifiedOrderHistoryItem {
+            order_no: h["odno"].as_str().unwrap_or("").to_string(),
+            symbol: h["pdno"].as_str().unwrap_or("").to_string(),
+            side: match h["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
+                "02" => UnifiedSide::Buy,
+                _ => UnifiedSide::Sell,
+            },
+            qty: h["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            filled_qty: h["tot_ccld_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0),
+            filled_price: h["avg_prvs"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            price: h["ord_unpr"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            status: h["cncl_yn"].as_str().unwrap_or("").to_string(),
+        })
+        .collect())
+}
+
+async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
+    base.throttler.wait().await;
+    let resp = base
+        .client
+        .stock()
+        .trading()
+        .inquire_balance(InquireBalanceRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            afhr_flpr_yn: "N".to_string(),
+            ofl_yn: "".to_string(),
+            inqr_dvsn: "01".to_string(),
+            unpr_dvsn: "01".to_string(),
+            fund_sttl_icld_yn: "N".to_string(),
+            fncg_amt_auto_rdpt_yn: "N".to_string(),
+            prcs_dvsn: "01".to_string(),
+            ctx_area_fk100: "".to_string(),
+            ctx_area_nk100: "".to_string(),
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("kr balance: {}", e),
+        })?;
+
+    let positions = resp["output1"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|item| UnifiedPosition {
+            symbol: item["pdno"].as_str().unwrap_or("").to_string(),
+            name: Some(item["prdt_name"].as_str().unwrap_or("").to_string()),
+            qty: item["hldg_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            avg_price: item["pchs_avg_pric"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            current_price: item["prpr"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            unrealized_pnl: item["evlu_pfls_amt"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            pnl_pct: item["evlu_pfls_rt"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0.0),
+        })
+        .collect();
+
+    let cash = resp["output2"][0]["dncl_amt"]
+        .as_str()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(Decimal::ZERO);
+
+    Ok(UnifiedBalance {
+        total_equity: cash,
+        available_cash: cash,
+        positions,
+    })
 }
 
 async fn kr_intraday_candles(
@@ -637,7 +594,7 @@ async fn kr_intraday_candles(
     symbol: &str,
     interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     if interval_mins != 1 {
         tracing::warn!(
             "kr_intraday_candles: interval_mins={} ignored, only 1-min bars supported",
@@ -661,6 +618,11 @@ async fn kr_intraday_candles(
             msg: format!("kr intraday_candles: {}", e),
         })?;
 
+    let today = Utc::now()
+        .with_timezone(&Seoul)
+        .format("%Y%m%d")
+        .to_string();
+
     Ok(resp["output2"]
         .as_array()
         .cloned()
@@ -668,7 +630,7 @@ async fn kr_intraday_candles(
         .iter()
         .filter_map(|b| {
             let time_str = b["stck_cntg_hour"].as_str()?;
-            let date_str = b["stck_bsop_date"].as_str()?;
+            let date_str = b["stck_bsop_date"].as_str().unwrap_or(&today);
             let dt_str = format!("{} {}", date_str, time_str);
 
             chrono::NaiveDateTime::parse_from_str(&dt_str, "%Y%m%d %H%M%S")
@@ -708,7 +670,7 @@ async fn kr_intraday_candles(
 }
 
 async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let resp = base
         .client
         .stock()
@@ -729,6 +691,44 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
         .map_err(|e| BotError::ApiError {
             msg: format!("parse stck_prpr: {}", e),
         })
+}
+
+async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String>, BotError> {
+    base.throttler.wait().await;
+    let resp = base
+        .client
+        .stock()
+        .quotations()
+        .volume_rank(VolumeRankNextRequest {
+            fid_cond_mrkt_div_code: "J".to_string(),
+            fid_cond_scr_div_code: "20171".to_string(),
+            fid_input_iscd: "0000".to_string(),
+            fid_div_cls_code: "0".to_string(),
+            fid_blng_cls_code: "0".to_string(),
+            fid_trgt_cls_code: "111111111".to_string(),
+            fid_trgt_exls_cls_code: "0000000000".to_string(),
+            fid_input_date_1: "".to_string(),
+            fid_vol_cnt: count as i64,
+            fid_input_price_1: "".to_string(),
+            fid_input_price_2: "".to_string(),
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("kr volume_rank: {}", e),
+        })?;
+
+    Ok(resp["output"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i["mksc_shrn_iscd"].as_str().map(|s| s.to_string()))
+        .collect())
+}
+
+async fn kr_is_holiday(_base: &KrMarketBase) -> Result<bool, BotError> {
+    // TODO: KIS 국내 휴일조회 API 연동 필요
+    Ok(false)
 }
 
 fn kr_market_timing() -> MarketTiming {
