@@ -411,7 +411,7 @@ pub async fn seed_symbols(
             exch_map.insert(sym.clone(), exch);
             continue;
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
         match adapter.daily_chart(sym, 150).await {
             Ok(bars) => {
                 let bar_count = bars.len();

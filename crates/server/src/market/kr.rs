@@ -597,18 +597,96 @@ async fn kr_is_holiday(_base: &KrMarketBase) -> Result<bool, BotError> {
 }
 
 async fn kr_intraday_candles(
-    _base: &KrMarketBase,
+    base: &KrMarketBase,
     symbol: &str,
     _interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
-    tracing::warn!("intraday_candles not implemented for KR: {}", symbol);
-    Ok(vec![])
+    let resp = base
+        .client
+        .stock()
+        .quotations()
+        .inquire_time_itemchartprice(InquireTimeItemchartpriceRequest {
+            fid_cond_mrkt_div_code: "J".to_string(),
+            fid_input_iscd: symbol.to_string(),
+            fid_input_hour_1: "".to_string(),
+            fid_pw_data_incu_yn: "Y".to_string(),
+            fid_etc_cls_code: "".to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("kr intraday_candles: {}", e),
+        })?;
+
+    Ok(resp["output2"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|b| {
+            let time_str = b["stck_cntg_hour"].as_str()?;
+            let date_str = b["stck_bsop_date"].as_str().or(Some("20240101"))?; // Fallback date if not present
+            let dt_str = format!("{} {}", date_str, time_str);
+
+            chrono::NaiveDateTime::parse_from_str(&dt_str, "%Y%m%d %H%M%S")
+                .ok()
+                .map(|naive| {
+                    let dt = Seoul.from_local_datetime(&naive).unwrap().with_timezone(&Utc);
+                    UnifiedCandleBar {
+                        timestamp: dt,
+                        open: b["stck_oprc"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        high: b["stck_hgpr"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        low: b["stck_lwpr"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        close: b["stck_prpr"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        volume: b["cntg_vol"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                    }
+                })
+        })
+        .collect())
 }
 
-async fn kr_current_price(_base: &KrMarketBase, _symbol: &str) -> Result<Decimal, BotError> {
-    Err(BotError::ApiError {
-        msg: "current_price not implemented for KR".to_string(),
-    })
+async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, BotError> {
+    let resp = base
+        .client
+        .stock()
+        .quotations()
+        .inquire_price(InquirePriceRequest {
+            fid_cond_mrkt_div_code: "J".to_string(),
+            fid_input_iscd: symbol.to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("kr current_price: {}", e),
+        })?;
+
+    resp["output"]["stck_prpr"]
+        .as_str()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|e| BotError::ApiError {
+            msg: format!("parse stck_prpr: {}", e),
+        })
 }
 
 fn kr_market_timing() -> MarketTiming {
