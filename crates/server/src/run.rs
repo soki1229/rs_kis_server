@@ -140,11 +140,16 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         (kr_vts_client.clone(), us_vts_client.clone())
     };
 
+    let real_throttler = Arc::new(shared::throttler::KisThrottler::new(100)); // 10 TPS
+    let vts_throttler = Arc::new(shared::throttler::KisThrottler::new(1000)); // 1 TPS
+
     let adapters = crate::run_generic::MarketAdapters::new(
         kr_real_client.clone(),
         us_real_client.clone(),
         kr_vts_client.clone(),
         us_vts_client,
+        real_throttler,
+        vts_throttler,
     );
 
     let kr_adapter: Arc<dyn MarketAdapter> = if kr_effective_dry_run {

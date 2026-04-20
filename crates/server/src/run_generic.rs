@@ -4,6 +4,7 @@
 //! with any implementation of the MarketAdapter trait.
 
 use crate::market::{KrRealAdapter, KrVtsAdapter, UsRealAdapter, UsVtsAdapter};
+use crate::shared::throttler::KisThrottler;
 use kis_api::KisClient;
 use std::sync::Arc;
 
@@ -29,12 +30,14 @@ impl MarketAdapters {
         us_real: KisClient,
         kr_vts: KisClient,
         us_vts: KisClient,
+        real_throttler: Arc<KisThrottler>,
+        vts_throttler: Arc<KisThrottler>,
     ) -> Self {
         Self {
-            kr_real: Arc::new(KrRealAdapter::new(kr_real)),
-            kr_vts: Arc::new(KrVtsAdapter::new(kr_vts)),
-            us_real: Arc::new(UsRealAdapter::new(us_real)),
-            us_vts: Arc::new(UsVtsAdapter::new(us_vts)),
+            kr_real: Arc::new(KrRealAdapter::new(kr_real, real_throttler.clone())),
+            kr_vts: Arc::new(KrVtsAdapter::new(kr_vts, vts_throttler.clone())),
+            us_real: Arc::new(UsRealAdapter::new(us_real, real_throttler)),
+            us_vts: Arc::new(UsVtsAdapter::new(us_vts, vts_throttler)),
         }
     }
 }
