@@ -10,9 +10,8 @@ use kis_api::models::*;
 use kis_api::KisClient;
 use rust_decimal::Decimal;
 
+use crate::shared::throttler::KisThrottler;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 /// Base logic for US market shared by Real and VTS adapters.
 struct UsMarketBase {
@@ -20,31 +19,23 @@ struct UsMarketBase {
     cano: String,
     acnt_prdt_cd: String,
     fx_spread_pct: Decimal,
-    last_call: Arc<Mutex<Instant>>,
-    throttle_ms: u64,
+    throttler: Arc<KisThrottler>,
 }
 
 impl UsMarketBase {
-    fn new(client: KisClient, cano: String, acnt_prdt_cd: String, throttle_ms: u64) -> Self {
+    fn new(
+        client: KisClient,
+        cano: String,
+        acnt_prdt_cd: String,
+        throttler: Arc<KisThrottler>,
+    ) -> Self {
         Self {
             client,
             cano,
             acnt_prdt_cd,
             fx_spread_pct: Decimal::new(5, 3),
-            last_call: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10))),
-            throttle_ms,
+            throttler,
         }
-    }
-
-    /// API 호출 전 강제 대기 (TPS 준수)
-    async fn throttle(&self) {
-        let mut last = self.last_call.lock().await;
-        let elapsed = last.elapsed();
-        let wait_dur = Duration::from_millis(self.throttle_ms);
-        if elapsed < wait_dur {
-            tokio::time::sleep(wait_dur - elapsed).await;
-        }
-        *last = Instant::now();
     }
 
     fn exchange_from_hint(hint: Option<&str>, symbol: &str) -> String {
@@ -109,13 +100,13 @@ pub struct UsRealAdapter {
 }
 
 impl UsRealAdapter {
-    pub fn new(client: KisClient) -> Self {
+    pub fn new(client: KisClient, throttler: Arc<KisThrottler>) -> Self {
         Self {
             base: UsMarketBase::new(
                 client,
                 std::env::var("KIS_ACCOUNT_NO").unwrap_or_default(),
                 std::env::var("KIS_ACCOUNT_CD").unwrap_or_else(|_| "01".to_string()),
-                100, // Real 10 TPS
+                throttler,
             ),
         }
     }
@@ -210,10 +201,6 @@ impl MarketAdapter for UsRealAdapter {
     fn fx_spread_pct(&self) -> Decimal {
         self.base.fx_spread_pct
     }
-
-    fn suggested_throttle_ms(&self) -> u64 {
-        self.base.throttle_ms
-    }
 }
 
 /// US VTS Market Adapter.
@@ -222,7 +209,7 @@ pub struct UsVtsAdapter {
 }
 
 impl UsVtsAdapter {
-    pub fn new(client: KisClient) -> Self {
+    pub fn new(client: KisClient, throttler: Arc<KisThrottler>) -> Self {
         let cano = std::env::var("KIS_VTS_ACCOUNT_NO")
             .or_else(|_| std::env::var("KIS_ACCOUNT_NO"))
             .unwrap_or_default();
@@ -230,7 +217,7 @@ impl UsVtsAdapter {
             .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
             .unwrap_or_else(|_| "01".to_string());
         Self {
-            base: UsMarketBase::new(client, cano, acnt_prdt_cd, 1000),
+            base: UsMarketBase::new(client, cano, acnt_prdt_cd, throttler),
         }
     }
 }
@@ -324,10 +311,6 @@ impl MarketAdapter for UsVtsAdapter {
     fn fx_spread_pct(&self) -> Decimal {
         self.base.fx_spread_pct
     }
-
-    fn suggested_throttle_ms(&self) -> u64 {
-        self.base.throttle_ms
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -339,7 +322,7 @@ async fn us_place_order(
     req: UnifiedOrderRequest,
     adapter: &impl MarketAdapter,
 ) -> Result<UnifiedOrderResult, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let exchange =
         UsMarketBase::exchange_from_hint(req.metadata.exchange_hint.as_deref(), &req.symbol);
     let adjusted_price = req
@@ -381,7 +364,7 @@ async fn us_cancel_order(
     base: &UsMarketBase,
     order: &UnifiedUnfilledOrder,
 ) -> Result<bool, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     base.client
         .overseas()
         .trading()
@@ -407,7 +390,7 @@ async fn us_cancel_order(
 }
 
 async fn us_unfilled_orders(base: &UsMarketBase) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let resp = base
         .client
         .overseas()
@@ -453,7 +436,7 @@ async fn us_order_history(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let resp = base
         .client
         .overseas()
@@ -485,25 +468,33 @@ async fn us_order_history(
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: h["ft_ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            qty: h["ft_ccld_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0),
             filled_qty: h["ft_ccld_qty"]
                 .as_str()
                 .unwrap_or("0")
                 .parse()
                 .unwrap_or(0),
-            price: Decimal::ZERO,
             filled_price: h["ft_ccld_unpr3"]
                 .as_str()
                 .unwrap_or("0")
                 .parse()
                 .unwrap_or(Decimal::ZERO),
-            status: String::new(),
+            price: h["ft_ord_unpr3"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(Decimal::ZERO),
+            status: h["cncl_yn"].as_str().unwrap_or("").to_string(),
         })
         .collect())
 }
 
 async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let resp = base
         .client
         .overseas()
@@ -574,7 +565,7 @@ async fn us_daily_chart(
     symbol: &str,
     _days: u32,
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let resp = base
         .client
         .overseas()
@@ -627,7 +618,7 @@ async fn us_daily_chart(
 }
 
 async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String>, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let resp = base
         .client
         .overseas()
@@ -654,7 +645,7 @@ async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String
 }
 
 async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     let today = Utc::now()
         .with_timezone(&New_York)
         .format("%Y%m%d")
@@ -679,19 +670,19 @@ async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
         .iter()
         .any(|h| h["bzdy_yn"].as_str().unwrap_or("Y") == "N"))
 }
+
 async fn us_intraday_candles(
     base: &UsMarketBase,
     symbol: &str,
     _interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
-    base.throttle().await;
-
+    base.throttler.wait().await;
     tracing::warn!("intraday_candles not implemented for US: {}", symbol);
     Ok(vec![])
 }
 
 async fn us_current_price(base: &UsMarketBase, symbol: &str) -> Result<Decimal, BotError> {
-    base.throttle().await;
+    base.throttler.wait().await;
     tracing::warn!("current_price not implemented for US: {}", symbol);
     Err(BotError::ApiError {
         msg: "current_price not implemented for US".to_string(),
