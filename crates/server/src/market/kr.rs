@@ -509,7 +509,11 @@ async fn kr_order_history(
                 _ => UnifiedSide::Sell,
             },
             qty: h["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            filled_qty: h["tot_ccld_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            filled_qty: h["tot_ccld_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0),
             filled_price: h["avg_prvs"]
                 .as_str()
                 .unwrap_or("0")
