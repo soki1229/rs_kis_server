@@ -334,7 +334,11 @@ mod tests {
             }
         }
         async fn is_holiday(&self) -> Result<bool, BotError> {
-            Ok(self.holiday)
+            Ok(false)
+        }
+
+        fn suggested_throttle_ms(&self) -> u64 {
+            0
         }
     }
 
