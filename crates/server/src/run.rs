@@ -177,7 +177,13 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         ws_url
     );
 
-    let approval_cache = shared::token::ApprovalKeyCache::new(600); // 10분 전 갱신
+    let approval_cache_path = if fully_dry_run {
+        PathBuf::from(shellexpand::tilde(&cfg.token_cache.vts_approval_path).into_owned())
+    } else {
+        PathBuf::from(shellexpand::tilde(&cfg.token_cache.real_approval_path).into_owned())
+    };
+
+    let approval_cache = shared::token::ApprovalKeyCache::new(600, Some(approval_cache_path)); // 10분 전 갱신
     let ws_approval_key = approval_cache
         .get(ws_client)
         .await
