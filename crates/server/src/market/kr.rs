@@ -302,13 +302,14 @@ async fn kr_daily_chart(
         .client
         .stock()
         .quotations()
-        .inquire_daily_itemchartprice(InquireDailyItemchartpriceRequest {
+        .domestic_stock_v1_quotations_inquire_daily_itemchartprice(DomesticStockV1QuotationsInquireDailyItemchartpriceRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
             fid_input_iscd: symbol.to_string(),
             fid_input_date_1: "".to_string(),
             fid_input_date_2: "".to_string(),
             fid_period_div_code: "D".to_string(),
             fid_org_adj_prc: "0".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -365,16 +366,14 @@ async fn kr_place_order(
         .client
         .stock()
         .trading()
-        .order_cash(OrderCashRequest {
+        .domestic_stock_v1_trading_order_cash(DomesticStockV1TradingOrderCashRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             pdno: req.symbol.clone(),
             ord_dvsn: "00".to_string(), // 지정가
-            ord_qty: Decimal::from(req.qty),
+            ord_qty: req.qty.into(),
             ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
-            cndt_pric: Decimal::ZERO,
-            excg_id_dvsn_cd: "00".to_string(),
-            sll_type: "01".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -401,18 +400,14 @@ async fn kr_cancel_order(
     base.client
         .stock()
         .trading()
-        .order_rvsecncl(OrderRvsecnclRequest {
+        .domestic_stock_v1_trading_order_rvsecncl(DomesticStockV1TradingOrderRvsecnclRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(), // 취소
-            ord_qty: Decimal::from(order.remaining_qty),
-            krx_fwdg_ord_orgno: "".to_string(),
-            ord_dvsn: "00".to_string(),
+            ord_qty: order.remaining_qty.into(),
             ord_unpr: Decimal::ZERO,
-            qty_all_ord_yn: "Y".to_string(),
-            cndt_pric: Decimal::ZERO,
-            excg_id_dvsn_cd: "00".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -427,13 +422,10 @@ async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOr
         .client
         .stock()
         .trading()
-        .inquire_psbl_rvsecncl(InquirePsblRvsecnclRequest {
+        .domestic_stock_v1_trading_inquire_psbl_rvsecncl(DomesticStockV1TradingInquirePsblRvsecnclRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ctx_area_fk100: "".to_string(),
-            ctx_area_nk100: "".to_string(),
-            inqr_dvsn_1: "0".to_string(),
-            inqr_dvsn_2: "0".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -474,22 +466,12 @@ async fn kr_order_history(
         .client
         .stock()
         .trading()
-        .inquire_daily_ccld(InquireDailyCcldRequest {
+        .domestic_stock_v1_trading_inquire_daily_ccld(DomesticStockV1TradingInquireDailyCcldRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             inqr_strt_dt: start_date.to_string(),
             inqr_end_dt: end_date.to_string(),
-            sll_buy_dvsn_cd: "00".to_string(),
-            pdno: "%".to_string(),
-            ctx_area_fk100: "".to_string(),
-            ctx_area_nk100: "".to_string(),
-            ord_gno_brno: "".to_string(),
-            odno: "".to_string(),
-            inqr_dvsn_1: "0".to_string(),
-            ccld_dvsn: "00".to_string(),
-            excg_id_dvsn_cd: "00".to_string(),
-            inqr_dvsn_3: "00".to_string(),
-            inqr_dvsn: "0".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -535,18 +517,10 @@ async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
         .client
         .stock()
         .trading()
-        .inquire_balance(InquireBalanceRequest {
+        .domestic_stock_v1_trading_inquire_balance(DomesticStockV1TradingInquireBalanceRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            afhr_flpr_yn: "N".to_string(),
-            ofl_yn: "".to_string(),
-            inqr_dvsn: "01".to_string(),
-            unpr_dvsn: "01".to_string(),
-            fund_sttl_icld_yn: "N".to_string(),
-            fncg_amt_auto_rdpt_yn: "N".to_string(),
-            prcs_dvsn: "01".to_string(),
-            ctx_area_fk100: "".to_string(),
-            ctx_area_nk100: "".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -619,12 +593,10 @@ async fn kr_intraday_candles(
         .client
         .stock()
         .quotations()
-        .inquire_time_itemchartprice(InquireTimeItemchartpriceRequest {
+        .domestic_stock_v1_quotations_inquire_time_itemchartprice(DomesticStockV1QuotationsInquireTimeItemchartpriceRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
             fid_input_iscd: symbol.to_string(),
-            fid_input_hour_1: "".to_string(),
-            fid_pw_data_incu_yn: "Y".to_string(),
-            fid_etc_cls_code: "".to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -688,9 +660,10 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
         .client
         .stock()
         .quotations()
-        .inquire_price(InquirePriceRequest {
+        .domestic_stock_v1_quotations_inquire_price(DomesticStockV1QuotationsInquirePriceRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
             fid_input_iscd: symbol.to_string(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -712,18 +685,10 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .client
         .stock()
         .quotations()
-        .volume_rank(VolumeRankNextRequest {
+        .domestic_stock_v1_quotations_volume_rank(DomesticStockV1QuotationsVolumeRankRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
-            fid_cond_scr_div_code: "20171".to_string(),
-            fid_input_iscd: "0000".to_string(),
-            fid_div_cls_code: "0".to_string(),
-            fid_blng_cls_code: "0".to_string(),
-            fid_trgt_cls_code: "111111111".to_string(),
-            fid_trgt_exls_cls_code: "0000000000".to_string(),
-            fid_input_date_1: "".to_string(),
-            fid_vol_cnt: count as i64,
-            fid_input_price_1: "".to_string(),
-            fid_input_price_2: "".to_string(),
+            fid_vol_cnt: count.into(),
+            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {

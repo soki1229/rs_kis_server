@@ -4,7 +4,7 @@ use super::adapter::MarketAdapter;
 use super::types::*;
 use crate::error::BotError;
 use async_trait::async_trait;
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::America::New_York;
 use kis_api::models::*;
 use kis_api::KisClient;
@@ -48,6 +48,22 @@ impl UsMarketBase {
                     "NYSE".to_string()
                 } else {
                     "NASD".to_string()
+                }
+            }
+        }
+    }
+
+    /// 시세 조회용 거래소 코드 매핑 (3글자)
+    fn quotation_exchange_from_hint(hint: Option<&str>, symbol: &str) -> String {
+        match hint {
+            Some("NYSE") => "NYS".to_string(),
+            Some("AMEX") => "AMS".to_string(),
+            Some("NASD") | Some("NASDAQ") => "NAS".to_string(),
+            _ => {
+                if symbol.len() <= 3 {
+                    "NYS".to_string()
+                } else {
+                    "NAS".to_string()
                 }
             }
         }
@@ -333,14 +349,13 @@ async fn us_place_order(
         .client
         .overseas()
         .trading()
-        .order_next(OrderNextRequest {
+        .overseas_stock_v1_trading_order(OverseasStockV1TradingOrderRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ovrs_excg_cd: exchange.to_string(),
+            ovrs_excg_cd: exchange,
             pdno: req.symbol.clone(),
-            ord_qty: Decimal::from(req.qty),
+            ord_qty: req.qty.into(),
             ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
-            ord_dvsn: "00".to_string(),
             ..Default::default()
         })
         .await
@@ -368,7 +383,7 @@ async fn us_cancel_order(
     base.client
         .overseas()
         .trading()
-        .order_rvsecncl_next(OrderRvsecnclNextNextRequest {
+        .overseas_stock_v1_trading_order_rvsecncl(OverseasStockV1TradingOrderRvsecnclRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             ovrs_excg_cd: order
@@ -378,8 +393,7 @@ async fn us_cancel_order(
             pdno: order.symbol.clone(),
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(),
-            ord_qty: Decimal::from(order.remaining_qty),
-            ovrs_ord_unpr: Decimal::ZERO,
+            ord_qty: order.remaining_qty.into(),
             ..Default::default()
         })
         .await
@@ -395,11 +409,10 @@ async fn us_unfilled_orders(base: &UsMarketBase) -> Result<Vec<UnifiedUnfilledOr
         .client
         .overseas()
         .trading()
-        .inquire_nccs(InquireNccsRequest {
+        .overseas_stock_v1_trading_inquire_nccs(OverseasStockV1TradingInquireNccsRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             ovrs_excg_cd: "NASD".to_string(),
-            sort_sqn: "DS".to_string(),
             ..Default::default()
         })
         .await
@@ -433,27 +446,22 @@ async fn us_unfilled_orders(base: &UsMarketBase) -> Result<Vec<UnifiedUnfilledOr
 
 async fn us_order_history(
     base: &UsMarketBase,
-    start_date: &str,
-    end_date: &str,
+    _start_date: &str,
+    _end_date: &str,
 ) -> Result<Vec<UnifiedOrderHistoryItem>, BotError> {
     base.throttler.wait().await;
     let resp = base
         .client
         .overseas()
         .trading()
-        .inquire_ccnl_next(InquireCcnlNextNextRequest {
+        .overseas_stock_v1_trading_inquire_ccnl(OverseasStockV1TradingInquireCcnlRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            pdno: "%".to_string(),
-            ord_strt_dt: start_date.to_string(),
-            ord_end_dt: end_date.to_string(),
-            sll_buy_dvsn: "00".to_string(),
-            ccld_nccs_dvsn: "00".to_string(),
             ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("inquire_ccnl_next: {}", e),
+            msg: format!("inquire_ccnl: {}", e),
         })?;
 
     Ok(resp["output1"]
@@ -468,16 +476,8 @@ async fn us_order_history(
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: h["ft_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
-            filled_qty: h["ft_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
+            qty: h["ft_ccld_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            filled_qty: h["ft_ccld_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
             filled_price: h["ft_ccld_unpr3"]
                 .as_str()
                 .unwrap_or("0")
@@ -499,11 +499,10 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         .client
         .overseas()
         .trading()
-        .inquire_balance_next(InquireBalanceNextNextNextRequest {
+        .overseas_stock_v1_trading_inquire_balance(OverseasStockV1TradingInquireBalanceRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             ovrs_excg_cd: "NASD".to_string(),
-            tr_crcy_cd: "USD".to_string(),
             ..Default::default()
         })
         .await
@@ -570,10 +569,9 @@ async fn us_daily_chart(
         .client
         .overseas()
         .quotations()
-        .dailyprice(DailypriceRequest {
-            excd: UsMarketBase::exchange_from_hint(None, symbol),
+        .overseas_price_v1_quotations_dailyprice(OverseasPriceV1QuotationsDailypriceRequest {
+            excd: UsMarketBase::quotation_exchange_from_hint(None, symbol),
             symb: symbol.to_string(),
-            gubn: "0".to_string(),
             ..Default::default()
         })
         .await
@@ -623,10 +621,8 @@ async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String
         .client
         .overseas()
         .ranking()
-        .trade_vol(TradeVolRequest {
+        .overseas_stock_v1_ranking_trade_vol(OverseasStockV1RankingTradeVolRequest {
             excd: "NASD".to_string(),
-            nday: "0".to_string(),
-            vol_rang: "0".to_string(),
             ..Default::default()
         })
         .await
@@ -654,7 +650,7 @@ async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
         .client
         .overseas()
         .quotations()
-        .countries_holiday(CountriesHolidayRequest {
+        .overseas_stock_v1_quotations_countries_holiday(OverseasStockV1QuotationsCountriesHolidayRequest {
             trad_dt: today.clone(),
             ..Default::default()
         })
@@ -677,16 +673,89 @@ async fn us_intraday_candles(
     _interval_mins: u32,
 ) -> Result<Vec<UnifiedCandleBar>, BotError> {
     base.throttler.wait().await;
-    tracing::warn!("intraday_candles not implemented for US: {}", symbol);
-    Ok(vec![])
+    let resp = base
+        .client
+        .overseas()
+        .quotations()
+        .overseas_price_v1_quotations_inquire_time_itemchartprice(OverseasPriceV1QuotationsInquireTimeItemchartpriceRequest {
+            excd: UsMarketBase::quotation_exchange_from_hint(None, symbol),
+            symb: symbol.to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("us intraday_candles: {}", e),
+        })?;
+
+    Ok(resp["output2"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|b| {
+            let time_str = b["khms"].as_str()?; // HHMMSS
+            let date_str = b["xymd"].as_str()?; // YYYYMMDD
+            let dt_str = format!("{} {}", date_str, time_str);
+
+            chrono::NaiveDateTime::parse_from_str(&dt_str, "%Y%m%d %H%M%S")
+                .ok()
+                .map(|naive| {
+                    let dt = New_York
+                        .from_local_datetime(&naive)
+                        .unwrap()
+                        .with_timezone(&Utc);
+                    UnifiedCandleBar {
+                        timestamp: dt,
+                        open: b["open"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        high: b["high"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        low: b["low"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        close: b["clos"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(Decimal::ZERO),
+                        volume: b["tvol"].as_str().unwrap_or("0").parse().unwrap_or(0),
+                    }
+                })
+        })
+        .collect())
 }
 
 async fn us_current_price(base: &UsMarketBase, symbol: &str) -> Result<Decimal, BotError> {
     base.throttler.wait().await;
-    tracing::warn!("current_price not implemented for US: {}", symbol);
-    Err(BotError::ApiError {
-        msg: "current_price not implemented for US".to_string(),
-    })
+    let resp = base
+        .client
+        .overseas()
+        .quotations()
+        .overseas_price_v1_quotations_price(OverseasPriceV1QuotationsPriceRequest {
+            excd: UsMarketBase::quotation_exchange_from_hint(None, symbol),
+            symb: symbol.to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("us current_price: {}", e),
+        })?;
+
+    resp["output"]["last"]
+        .as_str()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|e| BotError::ApiError {
+            msg: format!("parse last price: {}", e),
+        })
 }
 
 fn us_market_timing() -> MarketTiming {
