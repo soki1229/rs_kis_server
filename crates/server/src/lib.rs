@@ -10,7 +10,7 @@ pub(crate) mod pipeline;
 pub mod regime;
 pub mod run;
 pub(crate) mod run_generic;
-pub(crate) mod shared;
+pub mod shared;
 pub(crate) mod state;
 pub mod strategy;
 pub mod types;

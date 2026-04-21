@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 // ── Market ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum Market {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Market {
     Kr,
     Us,
 }

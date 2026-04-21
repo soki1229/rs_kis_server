@@ -296,10 +296,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let kr_timing = kr_adapter.market_timing();
     let kr_active = kr_timing.is_open;
     tracing::info!(
-        "KR market status: is_open={}, mins_since_open={}, mins_until_close={}",
+        "KR market status: is_open={}, since_open={}, until_close={}",
         kr_active,
-        kr_timing.mins_since_open,
-        kr_timing.mins_until_close
+        crate::market::MarketTiming::format_mins(kr_timing.mins_since_open),
+        crate::market::MarketTiming::format_mins(kr_timing.mins_until_close)
     );
 
     if !kr_active {
@@ -468,10 +468,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let us_timing = us_adapter.market_timing();
     let us_active = us_timing.is_open;
     tracing::info!(
-        "US market status: is_open={}, mins_since_open={}, mins_until_close={}",
+        "US market status: is_open={}, since_open={}, until_close={}",
         us_active,
-        us_timing.mins_since_open,
-        us_timing.mins_until_close
+        crate::market::MarketTiming::format_mins(us_timing.mins_since_open),
+        crate::market::MarketTiming::format_mins(us_timing.mins_until_close)
     );
 
     if !us_active {

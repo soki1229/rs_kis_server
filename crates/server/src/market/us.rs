@@ -634,9 +634,8 @@ async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String
             ..Default::default()
         })
         .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("us trade_vol: {}", e),
-        })?;
+        .map_err(BotError::from)
+        .or_else(|e| e.handle_vts_error("us_volume_ranking"))?;
 
     Ok(resp["output"]
         .as_array()

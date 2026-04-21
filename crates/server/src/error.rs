@@ -35,4 +35,30 @@ pub enum BotError {
 
     #[error("API error: {msg}")]
     ApiError { msg: String },
+
+    #[error("이 API는 모의투자(VTS) 환경에서 지원되지 않습니다.")]
+    UnsupportedInVts,
+}
+
+impl BotError {
+    pub fn handle_vts_error<T: Default>(self, label: &str) -> Result<T, Self> {
+        if matches!(self, BotError::UnsupportedInVts) {
+            tracing::warn!(
+                "{} is not supported in VTS, skipping with default value",
+                label
+            );
+            Ok(T::default())
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl From<kis_api::error::KisError> for BotError {
+    fn from(e: kis_api::error::KisError) -> Self {
+        match e {
+            kis_api::error::KisError::NotSupportedInVts => BotError::UnsupportedInVts,
+            _ => BotError::ApiError { msg: e.to_string() },
+        }
+    }
 }

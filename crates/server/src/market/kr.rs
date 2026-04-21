@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::Asia::Seoul;
 use kis_api::models::*;
-use kis_api::{KisClient, KisEnv};
+use kis_api::KisClient;
 use rust_decimal::Decimal;
 
 use crate::shared::throttler::KisThrottler;
@@ -688,11 +688,6 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
 }
 
 async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String>, BotError> {
-    // VTS 환경에서는 거래량 순위 조회를 지원하지 않으므로 바로 빈 결과 반환
-    if matches!(base.client.env(), KisEnv::Vts) {
-        return Ok(vec![]);
-    }
-
     base.throttler.wait().await;
     let resp = base
         .client
@@ -704,9 +699,8 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
             ..Default::default()
         })
         .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("kr volume_rank: {}", e),
-        })?;
+        .map_err(BotError::from)
+        .or_else(|e| e.handle_vts_error("kr_volume_ranking"))?;
 
     Ok(resp["output"]
         .as_array()

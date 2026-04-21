@@ -187,6 +187,26 @@ pub struct MarketTiming {
     pub is_holiday: bool,
 }
 
+impl MarketTiming {
+    /// Formats minutes into human readable duration (e.g., "1d 2h 3m" or "2h 3m" or "3m")
+    pub fn format_mins(mins: i64) -> String {
+        if !(0..1_000_000).contains(&mins) {
+            return "n/a".to_string();
+        }
+        let d = mins / 1440;
+        let h = (mins % 1440) / 60;
+        let m = mins % 60;
+
+        if d > 0 {
+            format!("{}d {}h {}m", d, h, m)
+        } else if h > 0 {
+            format!("{}h {}m", h, m)
+        } else {
+            format!("{}m", m)
+        }
+    }
+}
+
 // Conversion helpers from legacy types
 impl From<crate::types::Side> for UnifiedSide {
     fn from(side: crate::types::Side) -> Self {
