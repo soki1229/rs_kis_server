@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::Asia::Seoul;
 use kis_api::models::*;
-use kis_api::KisClient;
+use kis_api::{KisClient, KisEnv};
 use rust_decimal::Decimal;
 
 use crate::shared::throttler::KisThrottler;
@@ -302,15 +302,17 @@ async fn kr_daily_chart(
         .client
         .stock()
         .quotations()
-        .domestic_stock_v1_quotations_inquire_daily_itemchartprice(DomesticStockV1QuotationsInquireDailyItemchartpriceRequest {
-            fid_cond_mrkt_div_code: "J".to_string(),
-            fid_input_iscd: symbol.to_string(),
-            fid_input_date_1: "".to_string(),
-            fid_input_date_2: "".to_string(),
-            fid_period_div_code: "D".to_string(),
-            fid_org_adj_prc: "0".to_string(),
-            ..Default::default()
-        })
+        .domestic_stock_v1_quotations_inquire_daily_itemchartprice(
+            DomesticStockV1QuotationsInquireDailyItemchartpriceRequest {
+                fid_cond_mrkt_div_code: "J".to_string(),
+                fid_input_iscd: symbol.to_string(),
+                fid_input_date_1: "".to_string(),
+                fid_input_date_2: "".to_string(),
+                fid_period_div_code: "D".to_string(),
+                fid_org_adj_prc: "0".to_string(),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|e| BotError::ApiError {
             msg: format!("kr daily_chart: {}", e),
@@ -422,11 +424,13 @@ async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOr
         .client
         .stock()
         .trading()
-        .domestic_stock_v1_trading_inquire_psbl_rvsecncl(DomesticStockV1TradingInquirePsblRvsecnclRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ..Default::default()
-        })
+        .domestic_stock_v1_trading_inquire_psbl_rvsecncl(
+            DomesticStockV1TradingInquirePsblRvsecnclRequest {
+                cano: base.cano.clone(),
+                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|e| BotError::ApiError {
             msg: format!("inquire_psbl_rvsecncl: {}", e),
@@ -466,13 +470,15 @@ async fn kr_order_history(
         .client
         .stock()
         .trading()
-        .domestic_stock_v1_trading_inquire_daily_ccld(DomesticStockV1TradingInquireDailyCcldRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            inqr_strt_dt: start_date.to_string(),
-            inqr_end_dt: end_date.to_string(),
-            ..Default::default()
-        })
+        .domestic_stock_v1_trading_inquire_daily_ccld(
+            DomesticStockV1TradingInquireDailyCcldRequest {
+                cano: base.cano.clone(),
+                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+                inqr_strt_dt: start_date.to_string(),
+                inqr_end_dt: end_date.to_string(),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|e| BotError::ApiError {
             msg: format!("inquire_daily_ccld: {}", e),
@@ -593,11 +599,13 @@ async fn kr_intraday_candles(
         .client
         .stock()
         .quotations()
-        .domestic_stock_v1_quotations_inquire_time_itemchartprice(DomesticStockV1QuotationsInquireTimeItemchartpriceRequest {
-            fid_cond_mrkt_div_code: "J".to_string(),
-            fid_input_iscd: symbol.to_string(),
-            ..Default::default()
-        })
+        .domestic_stock_v1_quotations_inquire_time_itemchartprice(
+            DomesticStockV1QuotationsInquireTimeItemchartpriceRequest {
+                fid_cond_mrkt_div_code: "J".to_string(),
+                fid_input_iscd: symbol.to_string(),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|e| BotError::ApiError {
             msg: format!("kr intraday_candles: {}", e),
@@ -680,6 +688,11 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
 }
 
 async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String>, BotError> {
+    // VTS 환경에서는 거래량 순위 조회를 지원하지 않으므로 바로 빈 결과 반환
+    if matches!(base.client.env(), KisEnv::Vts) {
+        return Ok(vec![]);
+    }
+
     base.throttler.wait().await;
     let resp = base
         .client

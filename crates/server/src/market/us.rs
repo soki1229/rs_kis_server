@@ -476,8 +476,16 @@ async fn us_order_history(
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: h["ft_ccld_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            filled_qty: h["ft_ccld_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
+            qty: h["ft_ccld_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0),
+            filled_qty: h["ft_ccld_qty"]
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0),
             filled_price: h["ft_ccld_unpr3"]
                 .as_str()
                 .unwrap_or("0")
@@ -650,10 +658,12 @@ async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
         .client
         .overseas()
         .quotations()
-        .overseas_stock_v1_quotations_countries_holiday(OverseasStockV1QuotationsCountriesHolidayRequest {
-            trad_dt: today.clone(),
-            ..Default::default()
-        })
+        .overseas_stock_v1_quotations_countries_holiday(
+            OverseasStockV1QuotationsCountriesHolidayRequest {
+                trad_dt: today.clone(),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|e| BotError::ApiError {
             msg: format!("countries_holiday: {}", e),
@@ -677,11 +687,13 @@ async fn us_intraday_candles(
         .client
         .overseas()
         .quotations()
-        .overseas_price_v1_quotations_inquire_time_itemchartprice(OverseasPriceV1QuotationsInquireTimeItemchartpriceRequest {
-            excd: UsMarketBase::quotation_exchange_from_hint(None, symbol),
-            symb: symbol.to_string(),
-            ..Default::default()
-        })
+        .overseas_price_v1_quotations_inquire_time_itemchartprice(
+            OverseasPriceV1QuotationsInquireTimeItemchartpriceRequest {
+                excd: UsMarketBase::quotation_exchange_from_hint(None, symbol),
+                symb: symbol.to_string(),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|e| BotError::ApiError {
             msg: format!("us intraday_candles: {}", e),
