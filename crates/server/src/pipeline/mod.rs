@@ -24,6 +24,18 @@ pub struct TickData {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+impl From<crate::pipeline::stream::TransactionData> for TickData {
+    fn from(tx: crate::pipeline::stream::TransactionData) -> Self {
+        use rust_decimal::prelude::ToPrimitive;
+        Self {
+            symbol: tx.symbol,
+            price: tx.price,
+            volume: tx.qty.to_u64().unwrap_or(0),
+            timestamp: tx.time.with_timezone(&chrono::Utc),
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub struct MarketPipeline {
     pub db_path: String,

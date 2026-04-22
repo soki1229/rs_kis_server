@@ -1,29 +1,19 @@
+use crate::market::MarketAdapter;
 use crate::monitoring::alert::AlertRouter;
-use crate::pipeline::stream::{KisEvent, StreamManager, SubscriptionKind, TransactionData};
+use crate::pipeline::stream::{KisEvent, StreamManager, SubscriptionKind};
 use crate::pipeline::TickData;
 use crate::types::{Market, QuoteSnapshot, WatchlistSet};
 use kis_api::KisError;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-
-impl From<TransactionData> for TickData {
-    fn from(tx: TransactionData) -> Self {
-        Self {
-            symbol: tx.symbol,
-            price: tx.price,
-            volume: tx.qty.to_u64().unwrap_or(0),
-            timestamp: tx.time.into(),
-        }
-    }
-}
-
-const KIS_WS_MAX_SYMBOLS: usize = 20;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tick_task(
     market: Market,
+    adapter: Arc<dyn MarketAdapter>,
     shared_stream: StreamManager,
     mut watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
     tick_tx: broadcast::Sender<TickData>,
@@ -40,13 +30,20 @@ pub async fn run_tick_task(
     let mut rx = shared_stream.receiver();
     let mut current_syms: HashSet<String> = HashSet::new();
 
-    //// 초기 워치리스트 반영
+    // Initial subscription
     {
-        let all_syms = watchlist_rx.borrow().all_unique();
-        if !all_syms.is_empty() {
-            let syms_to_sub: HashSet<String> =
-                all_syms.into_iter().take(KIS_WS_MAX_SYMBOLS).collect();
-            let sub_ok = subscribe_symbols(&shared_stream, &syms_to_sub, market, &alert, &db).await;
+        let syms_to_sub_vec = watchlist_rx.borrow().all_unique();
+        if !syms_to_sub_vec.is_empty() {
+            let syms_to_sub: HashSet<String> = syms_to_sub_vec.iter().cloned().collect();
+            let sub_ok = subscribe_symbols(
+                adapter.as_ref(),
+                &shared_stream,
+                &syms_to_sub,
+                market,
+                &alert,
+                &db,
+            )
+            .await;
             tracing::info!(
                 "{label} TickTask: initial subscription of {} symbols",
                 sub_ok
@@ -70,17 +67,30 @@ pub async fn run_tick_task(
                         forward_tick(tx.into(), &tick_tx, &tick_pos_tx).await;
                     }
                     Ok(KisEvent::Quote(q)) if current_syms.contains(&q.symbol) => {
-                        let snapshot = QuoteSnapshot { symbol: q.symbol.clone(), bid_qty: q.bid_qty.to_u64().unwrap_or(0), ask_qty: q.ask_qty.to_u64().unwrap_or(0) };
+                        let snapshot = QuoteSnapshot {
+                            symbol: q.symbol.clone(),
+                            bid_qty: q.bid_qty.to_u64().unwrap_or(0),
+                            ask_qty: q.ask_qty.to_u64().unwrap_or(0)
+                        };
                         quote_tx.send(snapshot).await.ok();
                     }
                     Ok(_) => {}
-                    Err(KisError::Lagged(n)) => { tracing::warn!("{label} TickTask: lagged {n} events"); alert.warn(format!("{label} TickTask: lagged {n} events")); }
-                    Err(e) => { tracing::error!("{label} TickTask: stream error: {e}"); break; }
+                    Err(KisError::Lagged(n)) => {
+                        tracing::warn!("{label} TickTask: lagged {n} events");
+                        alert.warn(format!("{label} TickTask: lagged {n} events"));
+                    }
+                    Err(e) => {
+                        tracing::error!("{label} TickTask: stream error: {e}");
+                        break;
+                    }
                 }
             }
             _ = log_interval.tick() => {
-                if tick_count > 0 { tracing::info!("{label} TickTask: {tick_count} ticks received so far"); }
-                else if !current_syms.is_empty() { tracing::warn!("{label} TickTask: no ticks received yet (subscribed to {} symbols)", current_syms.len()); }
+                if tick_count > 0 {
+                    tracing::info!("{label} TickTask: {tick_count} ticks received so far");
+                } else if !current_syms.is_empty() {
+                    tracing::warn!("{label} TickTask: no ticks received yet (subscribed to {} symbols)", current_syms.len());
+                }
             }
             _ = watchlist_rx.changed() => {
                 let wl_set = watchlist_rx.borrow().clone();
@@ -91,15 +101,22 @@ pub async fn run_tick_task(
 
                 activity.set_watchlist(label, &new_syms_vec);
                 if !to_sub.is_empty() || !to_unsub.is_empty() {
-                    tracing::info!("🔄 {label} 감시 종목 갱신 시작 (안정: {}건, 공격: {}건, 합계: {}건)", wl_set.stable.len(), wl_set.aggressive.len(), new_syms.len());
+                    tracing::info!("🔄 {label} 감시 종목 갱신 시작 (안정: {}건, 공격: {}건, 합계: {}건)",
+                        wl_set.stable.len(), wl_set.aggressive.len(), new_syms.len());
                 }
 
-                if !to_sub.is_empty() { subscribe_symbols(&shared_stream, &to_sub, market, &alert, &db).await; }
-                for sym in to_unsub { unsubscribe_symbol(&shared_stream, &sym, market, &db).await; }
+                if !to_sub.is_empty() {
+                    subscribe_symbols(adapter.as_ref(), &shared_stream, &to_sub, market, &alert, &db).await;
+                }
+                for sym in to_unsub {
+                    unsubscribe_symbol(adapter.as_ref(), &shared_stream, &sym, market).await;
+                }
                 current_syms = new_syms;
-
-                if !current_syms.is_empty() { tracing::info!("✅ {label} 감시 종목 갱신 완료 ({}건 운용 중)", current_syms.len()); }
-                else { tracing::info!("😴 {label} 감시 종목 없음 (모두 해제됨)"); }
+                if !current_syms.is_empty() {
+                    tracing::info!("✅ {label} 감시 종목 갱신 완료 ({}건 운용 중)", current_syms.len());
+                } else {
+                    tracing::info!("😴 {label} 감시 종목 없음 (모두 해제됨)");
+                }
             }
             _ = token.cancelled() => return,
         }
@@ -107,6 +124,7 @@ pub async fn run_tick_task(
 }
 
 async fn subscribe_symbols(
+    adapter: &dyn MarketAdapter,
     stream: &StreamManager,
     symbols: &HashSet<String>,
     market: Market,
@@ -123,7 +141,8 @@ async fn subscribe_symbols(
     };
     let mut ok = 0usize;
     for sym in symbols {
-        // Try to get name from DB first
+        let ws_key = adapter.get_ws_key(sym);
+
         let name: Option<String> = sqlx::query_scalar(
             "SELECT name FROM daily_ohlc WHERE symbol = ? AND name IS NOT NULL LIMIT 1",
         )
@@ -137,13 +156,13 @@ async fn subscribe_symbols(
             _ => sym.clone(),
         };
 
-        let price_ok = stream.subscribe(sym, p_kind).await;
-        let ob_ok = stream.subscribe(sym, ob_kind).await;
+        let price_ok = stream.subscribe(&ws_key, p_kind).await;
+        let ob_ok = stream.subscribe(&ws_key, ob_kind).await;
 
         match (price_ok, ob_ok) {
             (Ok(()), Ok(())) => {
                 ok += 1;
-                tracing::info!("{label} WS: SUBSCRIBE SUCCESS [{display_name}]");
+                tracing::info!("{label} WS: SUBSCRIBE SUCCESS [{display_name}] (key: {ws_key})");
             }
             (Err(e), _) => {
                 let msg =
@@ -163,12 +182,13 @@ async fn subscribe_symbols(
 }
 
 async fn unsubscribe_symbol(
+    adapter: &dyn MarketAdapter,
     stream: &StreamManager,
-    sym: &str,
+    symbol: &str,
     market: Market,
-    db: &sqlx::SqlitePool,
 ) {
     let label = market.label();
+    let ws_key = adapter.get_ws_key(symbol);
     let (p_kind, ob_kind) = match market {
         Market::Kr => (
             SubscriptionKind::DomesticPrice,
@@ -176,20 +196,11 @@ async fn unsubscribe_symbol(
         ),
         Market::Us => (SubscriptionKind::Price, SubscriptionKind::Orderbook),
     };
-    let _ = stream.unsubscribe(sym, p_kind).await;
-    let _ = stream.unsubscribe(sym, ob_kind).await;
-    let name: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM daily_ohlc WHERE symbol = ? AND name IS NOT NULL LIMIT 1",
-    )
-    .bind(sym)
-    .fetch_optional(db)
-    .await
-    .unwrap_or(None);
-    let display_name = match name {
-        Some(n) if !n.is_empty() => format!("{}({})", n, sym),
-        _ => sym.to_string(),
-    };
-    tracing::info!("{label} WS: UNSUBSCRIBE SUCCESS [{display_name}]");
+    if stream.unsubscribe(&ws_key, p_kind).await.is_ok()
+        && stream.unsubscribe(&ws_key, ob_kind).await.is_ok()
+    {
+        tracing::info!("{label} WS: UNSUBSCRIBE SUCCESS [{symbol}] (key: {ws_key})");
+    }
 }
 
 async fn forward_tick(

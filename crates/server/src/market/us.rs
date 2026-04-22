@@ -217,6 +217,17 @@ impl MarketAdapter for UsRealAdapter {
     fn fx_spread_pct(&self) -> Decimal {
         self.base.fx_spread_pct
     }
+
+    fn get_ws_key(&self, symbol: &str) -> String {
+        let exchange = if symbol.len() == 3 || symbol == "QQQ" || symbol == "SPY" {
+            "NAS"
+        } else if symbol.len() == 1 || symbol.len() == 2 {
+            "NYS"
+        } else {
+            "NAS"
+        };
+        format!("D{}{}", exchange, symbol)
+    }
 }
 
 /// US VTS Market Adapter.
@@ -339,6 +350,17 @@ impl MarketAdapter for UsVtsAdapter {
 
     fn fx_spread_pct(&self) -> Decimal {
         self.base.fx_spread_pct
+    }
+
+    fn get_ws_key(&self, symbol: &str) -> String {
+        let exchange = if symbol.len() == 3 || symbol == "QQQ" || symbol == "SPY" {
+            "NAS"
+        } else if symbol.len() == 1 || symbol.len() == 2 {
+            "NYS"
+        } else {
+            "NAS"
+        };
+        format!("D{}{}", exchange, symbol)
     }
 }
 
@@ -617,10 +639,17 @@ async fn us_daily_chart(
             msg: format!("us daily_chart: {}", e),
         })?;
 
-    let symbol_name = resp["output1"]["hts_kor_isnm"]
+    let symbol_name = match resp["output1"]["ovrs_entp_kor_nm"]
         .as_str()
+        .or_else(|| resp["output1"]["hts_kor_isnm"].as_str())
         .or_else(|| resp["output1"]["name"].as_str())
-        .map(|s| s.to_string());
+    {
+        Some(name) => Some(name.to_string()),
+        None => {
+            // Last-ditch effort: check first item in output2 if it has a name (rare but happens)
+            resp["output2"][0]["name"].as_str().map(|s| s.to_string())
+        }
+    };
 
     Ok(resp["output2"]
         .as_array()

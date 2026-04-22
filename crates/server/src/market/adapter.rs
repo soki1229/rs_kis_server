@@ -100,6 +100,11 @@ pub trait MarketAdapter: Send + Sync + 'static {
         Decimal::ZERO
     }
 
+    /// Get market-specific WebSocket subscription key (e.g., "DNASNVDA" for US Real, "005930" for KR).
+    fn get_ws_key(&self, symbol: &str) -> String {
+        symbol.to_string()
+    }
+
     /// Apply aggressive limit pricing adjustment to a base price.
     /// Default: +0.2% for strength >= 0.85 on buy orders.
     fn adjust_aggressive_price(
@@ -194,6 +199,10 @@ impl MarketAdapter for Arc<dyn MarketAdapter> {
 
     fn fx_spread_pct(&self) -> Decimal {
         (**self).fx_spread_pct()
+    }
+
+    fn get_ws_key(&self, symbol: &str) -> String {
+        (**self).get_ws_key(symbol)
     }
 
     fn adjust_aggressive_price(
@@ -298,5 +307,9 @@ impl MarketAdapter for ReadOnlyAdapter {
 
     fn fx_spread_pct(&self) -> Decimal {
         self.inner.fx_spread_pct()
+    }
+
+    fn get_ws_key(&self, symbol: &str) -> String {
+        self.inner.get_ws_key(symbol)
     }
 }

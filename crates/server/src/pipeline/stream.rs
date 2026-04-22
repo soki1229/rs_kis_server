@@ -294,18 +294,22 @@ async fn run_connection_loop(inner: Arc<StreamInner>, initial_ws_read: WsReadHal
         match reason {
             DisconnectReason::Cancelled => break,
             DisconnectReason::Error(e) => {
-                // If it's after market hours (KST 15:40 ~ 08:50), log as INFO
+                // Determine if any market is currently open
                 let now = chrono::Utc::now()
                     .with_timezone(&FixedOffset::east_opt(9 * 3600).unwrap())
                     .time();
-                if now > NaiveTime::from_hms_opt(15, 40, 0).unwrap()
-                    || now < NaiveTime::from_hms_opt(8, 50, 0).unwrap()
-                {
-                    tracing::info!("WS disconnected (off-market): {e}");
-                } else {
+                let kr_open = now >= NaiveTime::from_hms_opt(8, 50, 0).unwrap()
+                    && now <= NaiveTime::from_hms_opt(15, 40, 0).unwrap();
+                let us_open = now >= NaiveTime::from_hms_opt(22, 20, 0).unwrap()
+                    || now <= NaiveTime::from_hms_opt(5, 10, 0).unwrap();
+
+                if kr_open || us_open {
                     tracing::warn!("WS disconnected: {e}");
+                } else {
+                    tracing::info!("WS disconnected (off-market): {e}");
                 }
             }
+
             DisconnectReason::Eof => tracing::info!("WS closed by server"),
         }
 

@@ -127,8 +127,8 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let kr_real_client = real_client.clone();
     let us_real_client = real_client.clone();
 
-    let real_throttler = Arc::new(shared::throttler::KisThrottler::new(100)); // 10 TPS
-    let vts_throttler = Arc::new(shared::throttler::KisThrottler::new(1000)); // 1 TPS
+    let real_throttler = Arc::new(shared::throttler::KisThrottler::new(500)); // 2 TPS for Real
+    let vts_throttler = Arc::new(shared::throttler::KisThrottler::new(1000)); // 1 TPS for VTS
 
     let adapters_factory = crate::run_generic::MarketAdapters::new(
         kr_real_client.clone(),
@@ -319,6 +319,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         let t = token.clone();
         h_kr_tick = Some(tokio::spawn(pipeline::tick::run_tick_task(
             Market::Kr,
+            kr_adapter.clone(),
             shared_stream.clone(),
             kr_pipeline.watchlist_rx.clone(),
             kr_pipeline.tick_tx.clone(),
@@ -439,6 +440,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         let t = token.clone();
         h_us_tick = Some(tokio::spawn(pipeline::tick::run_tick_task(
             Market::Us,
+            us_adapter.clone(),
             shared_stream.clone(),
             us_pipeline.watchlist_rx.clone(),
             us_pipeline.tick_tx.clone(),
