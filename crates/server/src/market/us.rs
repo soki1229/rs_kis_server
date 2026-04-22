@@ -587,15 +587,18 @@ async fn us_daily_chart(
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
     base.throttler.wait().await;
     let now = Utc::now().with_timezone(&New_York);
-    let today = now.format("%Y%m%d").to_string();
 
     let exchange = if symbol.len() == 3 || symbol == "QQQ" || symbol == "SPY" {
-        "NASD".to_string()
+        "NAS".to_string()
     } else if symbol.len() == 1 || symbol.len() == 2 {
-        "NYSE".to_string()
+        "NYS".to_string()
     } else {
-        "NASD".to_string() // Fallback
+        "NAS".to_string() // Fallback
     };
+
+    let yesterday = (now - chrono::Duration::days(1))
+        .format("%Y%m%d")
+        .to_string();
 
     let resp = base
         .client
@@ -604,8 +607,9 @@ async fn us_daily_chart(
         .overseas_price_v1_quotations_dailyprice(OverseasPriceV1QuotationsDailypriceRequest {
             excd: exchange,
             symb: symbol.to_string(),
-            bymd: today,
-            modp: "0".to_string(),
+            bymd: yesterday,
+            gubn: "0".to_string(),
+            modp: "1".to_string(),
             ..Default::default()
         })
         .await
@@ -613,7 +617,10 @@ async fn us_daily_chart(
             msg: format!("us daily_chart: {}", e),
         })?;
 
-    let symbol_name = resp["output1"]["name"].as_str().map(|s| s.to_string());
+    let symbol_name = resp["output1"]["hts_kor_isnm"]
+        .as_str()
+        .or_else(|| resp["output1"]["name"].as_str())
+        .map(|s| s.to_string());
 
     Ok(resp["output2"]
         .as_array()
@@ -659,14 +666,14 @@ async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String
         .overseas()
         .ranking()
         .overseas_stock_v1_ranking_trade_vol(OverseasStockV1RankingTradeVolRequest {
-            excd: "NASD".to_string(),
+            excd: "NAS".to_string(),
             ..Default::default()
         })
         .await
         .map_err(BotError::from)
         .or_else(|e| e.handle_vts_error("us_volume_ranking"))?;
 
-    Ok(resp["output"]
+    Ok(resp["output2"]
         .as_array()
         .cloned()
         .unwrap_or_default()

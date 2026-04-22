@@ -308,12 +308,13 @@ impl MarketAdapter for KrVtsAdapter {
 async fn kr_daily_chart(
     base: &KrMarketBase,
     symbol: &str,
-    days: u32,
+    _days: u32,
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
     base.throttler.wait().await;
     let now = Utc::now().with_timezone(&Seoul);
     let today = now.format("%Y%m%d").to_string();
-    let start_date = (now - chrono::Duration::days(days as i64 * 2))
+    // 150일치 데이터를 얻기 위해 주말 포함 200일 전부터 조회
+    let start_date = (now - chrono::Duration::days(200))
         .format("%Y%m%d")
         .to_string();
 
@@ -347,7 +348,8 @@ async fn kr_daily_chart(
         .unwrap_or_default()
         .iter()
         .filter_map(|b| {
-            chrono::NaiveDate::parse_from_str(b["stck_bsop_date"].as_str()?, "%Y%m%d")
+            let date_str = b["stck_bsop_date"].as_str()?;
+            chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d")
                 .ok()
                 .map(|date| UnifiedDailyBar {
                     symbol_name: symbol_name.clone(),

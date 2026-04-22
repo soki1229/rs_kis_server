@@ -266,7 +266,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let kr_alert_router = kr_pipeline.alert.clone();
     let us_alert_router = us_pipeline.alert.clone();
 
-    // ── KR pipeline ──────────────────────────────────────────────────────
+    // ── KR initialization ──────────────────────────────────────────────────
     let kr_db_pool = crate::db::connect(&cfg.kr.db_path).await?;
     let kr_timing = kr_adapter.market_timing();
     let kr_active = kr_timing.is_open;
@@ -276,16 +276,29 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             crate::market::MarketTiming::format_mins(kr_timing.mins_since_open),
             crate::market::MarketTiming::format_mins(kr_timing.mins_until_close)
         );
+        // CRITICAL: Run recovery and seeding BEFORE starting ticker
+        run_market_recovery("KR", &kr_db_pool, kr_adapter.clone()).await;
+        let initial_watchlist = pipeline::scheduler::build_watchlist(
+            kr_adapter.clone(),
+            &discovery_strategy,
+            &cfg.kr,
+            &kr_alert_router,
+            &kr_db_pool,
+        )
+        .await;
+        pipeline::signal::seed_symbols(
+            &initial_watchlist.all_unique(),
+            kr_adapter.as_ref(),
+            &kr_db_pool,
+            true,
+        )
+        .await;
+        let _ = kr_pipeline.watchlist_tx.send(initial_watchlist);
     } else {
         tracing::info!(
             "KR market status: is_open=false, until_open={}",
             crate::market::MarketTiming::format_mins(kr_timing.mins_until_open)
         );
-    }
-
-    if kr_active {
-        run_market_recovery("KR", &kr_db_pool, kr_adapter.clone()).await;
-    } else {
         tracing::info!(
             "KR market is closed. Pipeline tasks will be started by scheduler when market opens."
         );
@@ -374,6 +387,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         )));
     }
 
+    // ── US initialization ──────────────────────────────────────────────────
     let us_db_pool = crate::db::connect(&cfg.us.db_path).await?;
     let us_timing = us_adapter.market_timing();
     let us_active = us_timing.is_open;
@@ -383,16 +397,28 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             crate::market::MarketTiming::format_mins(us_timing.mins_since_open),
             crate::market::MarketTiming::format_mins(us_timing.mins_until_close)
         );
+        run_market_recovery("US", &us_db_pool, us_adapter.clone()).await;
+        let initial_watchlist = pipeline::scheduler::build_watchlist(
+            us_adapter.clone(),
+            &discovery_strategy,
+            &cfg.us,
+            &us_alert_router,
+            &us_db_pool,
+        )
+        .await;
+        pipeline::signal::seed_symbols(
+            &initial_watchlist.all_unique(),
+            us_adapter.as_ref(),
+            &us_db_pool,
+            true,
+        )
+        .await;
+        let _ = us_pipeline.watchlist_tx.send(initial_watchlist);
     } else {
         tracing::info!(
             "US market status: is_open=false, until_open={}",
             crate::market::MarketTiming::format_mins(us_timing.mins_until_open)
         );
-    }
-
-    if us_active {
-        run_market_recovery("US", &us_db_pool, us_adapter.clone()).await;
-    } else {
         tracing::info!(
             "US market is closed. Pipeline tasks will be started by scheduler when market opens."
         );

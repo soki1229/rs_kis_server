@@ -358,6 +358,7 @@ async fn read_loop(
                         }
                         TextMessage::OtherJson => {}
                         TextMessage::Data => {
+                            tracing::debug!(target: "kis_server::ws", "WS Raw Data: {}", text);
                             if let Some(event) = parse_ws_message(&text) {
                                 had_data = true;
                                 let _ = inner.tx.send(event);
@@ -416,7 +417,7 @@ fn parse_ws_message(text: &str) -> Option<KisEvent> {
 
 fn parse_transaction(tr_id: &str, fields: &[&str]) -> Option<KisEvent> {
     let (symbol, time_str, price_idx, qty_idx, side_idx) = match tr_id {
-        "HDFSCNT0" => (fields.get(1)?, fields.get(2)?, 11, 19, 21),
+        "HDFSCNT0" => (fields.get(1)?, fields.get(2)?, 11, 19, 21), // Index 1 is symbol, 2 is time
         "H0STCNT0" => (fields.first()?, fields.get(1)?, 2, 9, 20),
         _ => return None,
     };

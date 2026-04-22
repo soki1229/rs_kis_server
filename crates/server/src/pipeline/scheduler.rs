@@ -1,13 +1,13 @@
 use crate::config::MarketConfig;
 use crate::market::MarketAdapter;
 use crate::monitoring::alert::AlertRouter;
+use crate::strategy::DiscoveryStrategy;
 use crate::types::WatchlistSet;
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::America::New_York;
 use chrono_tz::Asia::Seoul;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
 pub fn us_market_open_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
@@ -40,6 +40,22 @@ pub fn kr_market_close_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
         .from_local_datetime(&date.and_time(close_time))
         .earliest()
         .map(|dt| dt.with_timezone(&Utc))
+}
+pub async fn build_watchlist(
+    adapter: Arc<dyn MarketAdapter>,
+    strategy: &Arc<dyn DiscoveryStrategy>,
+    cfg: &MarketConfig,
+    _alert: &AlertRouter,
+    db: &SqlitePool,
+) -> WatchlistSet {
+    let stable = strategy
+        .build_watchlist(adapter.clone(), cfg.dynamic_watchlist_size)
+        .await;
+    let fresh = WatchlistSet {
+        stable,
+        aggressive: vec![],
+    };
+    merge_with_protected_symbols(fresh, db, cfg).await
 }
 
 async fn merge_with_protected_symbols(
@@ -84,7 +100,7 @@ pub async fn run_kr_scheduler_task(
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
-    _alert: AlertRouter,
+    alert: AlertRouter,
     summary_alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: SqlitePool,
@@ -111,47 +127,22 @@ pub async fn run_kr_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= post_close {
             if !watchlist_tx.borrow().all_unique().is_empty() {
+                activity.set_phase("KR", "장 마감");
                 watchlist_tx.send(WatchlistSet::default()).ok();
-                let _ = eod_tx.send(()).await;
+                eod_tx.send(()).await.ok();
             }
-            activity.set_phase("KR", "장 마감 (EOD)");
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
-            activity.set_phase("KR", if now >= open { "Trading" } else { "Pre-market" });
-
-            let dynamic = match timeout(
-                Duration::from_secs(30),
-                discovery_strategy.build_watchlist(adapter.clone(), config.dynamic_watchlist_size),
-            )
-            .await
-            {
-                Ok(symbols) => symbols,
-                Err(_) => {
-                    tracing::warn!(
-                        "KR build_watchlist timed out — falling back to static watchlist"
-                    );
-                    vec![]
-                }
-            };
-
-            let stable = if dynamic.is_empty() {
-                config.watchlist.clone()
-            } else {
-                dynamic
-            };
-            let fresh = WatchlistSet {
-                stable,
-                aggressive: vec![],
-            };
-            let merged: WatchlistSet =
-                merge_with_protected_symbols(fresh.clone(), &db, &config).await;
+            activity.set_phase("KR", "장 중");
+            let merged =
+                build_watchlist(adapter.clone(), &discovery_strategy, &config, &alert, &db).await;
             if merged != *watchlist_tx.borrow() {
                 activity.set_watchlist("KR", &merged.all_unique());
-                watchlist_tx.send(merged).ok();
+                watchlist_tx.send(merged.clone()).ok();
                 summary_alert.info(format!(
-                    "✅ [국내] 관심종목 동기화 완료 (보수적: {} / 적극적: {})",
-                    fresh.stable.len(),
-                    fresh.aggressive.len()
+                    "✅ [국내] 관심종목 동기화 완료 (안정: {}, 적극: {})",
+                    merged.stable.len(),
+                    merged.aggressive.len()
                 ));
             }
             tokio::select! { _ = token.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {} }
@@ -173,7 +164,7 @@ pub async fn run_scheduler_task(
     watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
     eod_tx: tokio::sync::mpsc::Sender<()>,
     config: MarketConfig,
-    _alert: AlertRouter,
+    alert: AlertRouter,
     summary_alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: SqlitePool,
@@ -200,47 +191,22 @@ pub async fn run_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= post_close {
             if !watchlist_tx.borrow().all_unique().is_empty() {
+                activity.set_phase("US", "장 마감");
                 watchlist_tx.send(WatchlistSet::default()).ok();
-                let _ = eod_tx.send(()).await;
+                eod_tx.send(()).await.ok();
             }
-            activity.set_phase("US", "장 마감 (EOD)");
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
-            activity.set_phase("US", if now >= open { "Trading" } else { "Pre-market" });
-
-            let dynamic = match timeout(
-                Duration::from_secs(30),
-                discovery_strategy.build_watchlist(adapter.clone(), config.dynamic_watchlist_size),
-            )
-            .await
-            {
-                Ok(symbols) => symbols,
-                Err(_) => {
-                    tracing::warn!(
-                        "US build_watchlist timed out — falling back to static watchlist"
-                    );
-                    vec![]
-                }
-            };
-
-            let stable = if dynamic.is_empty() {
-                config.watchlist.clone()
-            } else {
-                dynamic
-            };
-            let fresh = WatchlistSet {
-                stable,
-                aggressive: vec![],
-            };
-            let merged: WatchlistSet =
-                merge_with_protected_symbols(fresh.clone(), &db, &config).await;
+            activity.set_phase("US", "장 중");
+            let merged =
+                build_watchlist(adapter.clone(), &discovery_strategy, &config, &alert, &db).await;
             if merged != *watchlist_tx.borrow() {
                 activity.set_watchlist("US", &merged.all_unique());
-                watchlist_tx.send(merged).ok();
+                watchlist_tx.send(merged.clone()).ok();
                 summary_alert.info(format!(
-                    "✅ [미국] 관심종목 동기화 완료 (보수적: {} / 적극적: {})",
-                    fresh.stable.len(),
-                    fresh.aggressive.len()
+                    "✅ [미국] 관심종목 동기화 완료 (안정: {}, 적극: {})",
+                    merged.stable.len(),
+                    merged.aggressive.len()
                 ));
             }
             tokio::select! { _ = token.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {} }
@@ -255,7 +221,6 @@ pub async fn run_scheduler_task(
     }
 }
 
-use sqlx::Row;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,20 +229,27 @@ mod tests {
         MarketId, MarketTiming, PollOutcome, UnifiedBalance, UnifiedCandleBar, UnifiedDailyBar,
         UnifiedOrderHistoryItem, UnifiedOrderRequest, UnifiedOrderResult, UnifiedUnfilledOrder,
     };
-    use async_trait::async_trait;
     use rust_decimal::Decimal;
+    use sqlx::SqlitePool;
 
-    #[allow(dead_code)]
+    struct MockDiscovery;
+    #[async_trait::async_trait]
+    impl crate::strategy::DiscoveryStrategy for MockDiscovery {
+        async fn build_watchlist(&self, _: Arc<dyn MarketAdapter>, _: usize) -> Vec<String> {
+            vec!["AAPL".into()]
+        }
+    }
+
     struct MockAdapter {
         holiday: bool,
     }
-    #[async_trait]
+    #[async_trait::async_trait]
     impl MarketAdapter for MockAdapter {
         fn market_id(&self) -> MarketId {
-            MarketId::Kr
+            MarketId::Us
         }
         fn name(&self) -> &'static str {
-            "Mock"
+            "MOCK"
         }
         async fn place_order(
             &self,
@@ -338,6 +310,9 @@ mod tests {
         async fn is_holiday(&self) -> Result<bool, BotError> {
             Ok(false)
         }
+        fn fx_spread_pct(&self) -> Decimal {
+            Decimal::ZERO
+        }
     }
 
     async fn test_db() -> SqlitePool {
@@ -350,9 +325,19 @@ mod tests {
         pool
     }
 
-    fn test_config(watchlist: Vec<&str>) -> MarketConfig {
-        MarketConfig {
-            watchlist: watchlist.iter().map(|s| s.to_string()).collect(),
+    #[tokio::test]
+    async fn build_kr_watchlist_merges_and_dedups() {
+        let db = test_db().await;
+        sqlx::query("INSERT INTO positions (symbol) VALUES ('POS1')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let adapter = Arc::new(MockAdapter { holiday: false });
+        let discovery: Arc<dyn crate::strategy::DiscoveryStrategy> = Arc::new(MockDiscovery);
+        let alert = AlertRouter::new(10);
+        let config = MarketConfig {
+            watchlist: vec!["STATIC1".into()],
             dynamic_watchlist_size: 5,
             db_path: ":memory:".into(),
             kill_switch_path: "/tmp/ks.json".into(),
@@ -361,24 +346,10 @@ mod tests {
             watchlist_refresh_interval_secs: 600,
             strategies: vec![],
             use_generic_pipeline: false,
-        }
-    }
-
-    #[tokio::test]
-    async fn build_kr_watchlist_merges_and_dedups() {
-        let config = test_config(vec!["000660"]);
-        let db = test_db().await;
-        sqlx::query("INSERT INTO positions (symbol) VALUES ('005930')")
-            .execute(&db)
-            .await
-            .unwrap();
-
-        let fresh = WatchlistSet {
-            stable: config.watchlist.clone(),
-            aggressive: vec![],
         };
-        let res = merge_with_protected_symbols(fresh, &db, &config).await;
-        assert!(res.stable.contains(&"000660".to_string()));
-        assert!(res.stable.contains(&"005930".to_string()));
+
+        let wl = build_watchlist(adapter, &discovery, &config, &alert, &db).await;
+        assert!(wl.stable.contains(&"AAPL".to_string()));
+        assert!(wl.stable.contains(&"POS1".to_string()));
     }
 }
