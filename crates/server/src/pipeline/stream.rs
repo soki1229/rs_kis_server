@@ -118,6 +118,31 @@ impl StreamManager {
             run_connection_loop(inner_clone, ws_read).await;
         });
 
+        // Start Heartbeat task (every 30 seconds)
+        let inner_heartbeat = inner.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = inner_heartbeat.cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let mut guard = inner_heartbeat.ws_tx.lock().await;
+                        if let Some(ref mut writer) = *guard {
+                            let ping = serde_json::json!({
+                                "header": {
+                                    "tr_id": "PINGPONG",
+                                    "datetime": chrono::Utc::now().with_timezone(&FixedOffset::east_opt(9 * 3600).unwrap()).format("%Y%m%d%H%M%S").to_string()
+                                }
+                            });
+                            if let Ok(text) = serde_json::to_string(&ping) {
+                                let _ = writer.send(Message::Text(text)).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(Self { inner })
     }
 
@@ -268,8 +293,20 @@ async fn run_connection_loop(inner: Arc<StreamInner>, initial_ws_read: WsReadHal
 
         match reason {
             DisconnectReason::Cancelled => break,
-            DisconnectReason::Error(e) => tracing::warn!("WS disconnected: {e}"),
-            DisconnectReason::Eof => tracing::warn!("WS closed by server"),
+            DisconnectReason::Error(e) => {
+                // If it's after market hours (KST 15:40 ~ 08:50), log as INFO
+                let now = chrono::Utc::now()
+                    .with_timezone(&FixedOffset::east_opt(9 * 3600).unwrap())
+                    .time();
+                if now > NaiveTime::from_hms_opt(15, 40, 0).unwrap()
+                    || now < NaiveTime::from_hms_opt(8, 50, 0).unwrap()
+                {
+                    tracing::info!("WS disconnected (off-market): {e}");
+                } else {
+                    tracing::warn!("WS disconnected: {e}");
+                }
+            }
+            DisconnectReason::Eof => tracing::info!("WS closed by server"),
         }
 
         if had_data {

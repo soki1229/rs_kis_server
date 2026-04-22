@@ -146,6 +146,7 @@ pub struct UnifiedBalance {
 /// Unified daily OHLCV bar
 #[derive(Debug, Clone)]
 pub struct UnifiedDailyBar {
+    pub symbol_name: Option<String>,
     pub date: chrono::NaiveDate,
     pub open: Decimal,
     pub high: Decimal,
@@ -184,13 +185,14 @@ pub struct MarketTiming {
     pub is_open: bool,
     pub mins_since_open: i64,
     pub mins_until_close: i64,
+    pub mins_until_open: i64, // 추가: 다음 개장까지 남은 시간
     pub is_holiday: bool,
 }
 
 impl MarketTiming {
     /// Formats minutes into human readable duration (e.g., "1d 2h 3m" or "2h 3m" or "3m")
     pub fn format_mins(mins: i64) -> String {
-        if !(0..1_000_000).contains(&mins) {
+        if !(0..2000000).contains(&mins) {
             return "n/a".to_string();
         }
         let d = mins / 1440;

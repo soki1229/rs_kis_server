@@ -9,7 +9,7 @@ mod kr;
 mod types;
 mod us;
 
-pub use adapter::MarketAdapter;
+pub use adapter::{MarketAdapter, ReadOnlyAdapter};
 pub use kr::{KrRealAdapter, KrVtsAdapter};
 pub use types::*;
 pub use us::{UsRealAdapter, UsVtsAdapter};

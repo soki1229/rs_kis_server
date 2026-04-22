@@ -131,6 +131,7 @@ mod tests {
                 let day = ((10 + 28 - (i % 28)) % 28) as u32;
                 let day = if day == 0 { 28 } else { day };
                 crate::market::UnifiedDailyBar {
+                    symbol_name: None,
                     date: NaiveDate::from_ymd_opt(2026, 4, day).unwrap(),
                     open: dec!(100),
                     high: dec!(105),

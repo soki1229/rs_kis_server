@@ -123,8 +123,7 @@ async fn subscribe_symbols(
     };
     let mut ok = 0usize;
     for sym in symbols {
-        let price_ok = stream.subscribe(sym, p_kind).await;
-        let ob_ok = stream.subscribe(sym, ob_kind).await;
+        // Try to get name from DB first
         let name: Option<String> = sqlx::query_scalar(
             "SELECT name FROM daily_ohlc WHERE symbol = ? AND name IS NOT NULL LIMIT 1",
         )
@@ -132,10 +131,15 @@ async fn subscribe_symbols(
         .fetch_optional(db)
         .await
         .unwrap_or(None);
+
         let display_name = match name {
             Some(n) if !n.is_empty() => format!("{}({})", n, sym),
             _ => sym.clone(),
         };
+
+        let price_ok = stream.subscribe(sym, p_kind).await;
+        let ob_ok = stream.subscribe(sym, ob_kind).await;
+
         match (price_ok, ob_ok) {
             (Ok(()), Ok(())) => {
                 ok += 1;
@@ -195,58 +199,4 @@ async fn forward_tick(
 ) {
     let _ = tick_tx.send(tick.clone());
     let _ = tick_pos_tx.send(tick).await;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_us_tick_task(
-    shared_stream: StreamManager,
-    watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
-    tick_tx: broadcast::Sender<TickData>,
-    tick_pos_tx: mpsc::Sender<TickData>,
-    quote_tx: mpsc::Sender<QuoteSnapshot>,
-    alert: AlertRouter,
-    activity: crate::shared::activity::ActivityLog,
-    db: sqlx::SqlitePool,
-    token: CancellationToken,
-) {
-    run_tick_task(
-        Market::Us,
-        shared_stream,
-        watchlist_rx,
-        tick_tx,
-        tick_pos_tx,
-        quote_tx,
-        alert,
-        activity,
-        db,
-        token,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_kr_tick_task(
-    shared_stream: StreamManager,
-    watchlist_rx: tokio::sync::watch::Receiver<WatchlistSet>,
-    tick_tx: broadcast::Sender<TickData>,
-    tick_pos_tx: mpsc::Sender<TickData>,
-    quote_tx: mpsc::Sender<QuoteSnapshot>,
-    alert: AlertRouter,
-    activity: crate::shared::activity::ActivityLog,
-    db: sqlx::SqlitePool,
-    token: CancellationToken,
-) {
-    run_tick_task(
-        Market::Kr,
-        shared_stream,
-        watchlist_rx,
-        tick_tx,
-        tick_pos_tx,
-        quote_tx,
-        alert,
-        activity,
-        db,
-        token,
-    )
-    .await
 }

@@ -414,12 +414,19 @@ pub async fn seed_symbols(
         match adapter.daily_chart(sym, 150).await {
             Ok(bars) => {
                 let bar_count = bars.len();
+                let symbol_name = bars.first().and_then(|b| b.symbol_name.clone());
                 for b in bars {
                     let date_str = b.date.format("%Y%m%d").to_string();
-                    let _ = sqlx::query("INSERT OR REPLACE INTO daily_ohlc (symbol, date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)")
-                        .bind(sym).bind(date_str).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
+                    let _ = sqlx::query("INSERT OR REPLACE INTO daily_ohlc (symbol, name, date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                        .bind(sym).bind(symbol_name.clone()).bind(date_str).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
                 }
-                tracing::info!(symbol = %sym, bars = bar_count, "History seeded successfully");
+
+                // If bars were found, we are good. If not, try to fetch name via current_price to update DB
+                if bar_count == 0 {
+                    let _ = adapter.current_price(sym).await;
+                }
+
+                tracing::info!(symbol = %sym, name = ?symbol_name, bars = bar_count, "History seeded successfully");
                 exch_map.insert(sym.clone(), exch);
             }
             Err(_) => {
@@ -513,11 +520,13 @@ mod tests {
         fn market_timing(&self) -> MarketTiming {
             MarketTiming {
                 is_open: true,
-                mins_since_open: 100,
-                mins_until_close: 100,
+                mins_since_open: 10,
+                mins_until_close: 10,
+                mins_until_open: 0,
                 is_holiday: false,
             }
         }
+
         async fn is_holiday(&self) -> Result<bool, BotError> {
             Ok(false)
         }
@@ -556,7 +565,7 @@ mod tests {
 
     async fn setup_test_db() -> sqlx::SqlitePool {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        sqlx::query("CREATE TABLE daily_ohlc (symbol TEXT, date TEXT, open TEXT, high TEXT, low TEXT, close TEXT, volume TEXT, PRIMARY KEY(symbol, date))")
+        sqlx::query("CREATE TABLE daily_ohlc (symbol TEXT, name TEXT, date TEXT, open TEXT, high TEXT, low TEXT, close TEXT, volume TEXT, PRIMARY KEY(symbol, date))")
             .execute(&pool).await.unwrap();
         pool
     }
@@ -567,7 +576,9 @@ mod tests {
         let adapter = MockAdapter {
             market_id: MarketId::Us,
             daily_bars: vec![UnifiedDailyBar {
-                date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).unwrap(),
+                symbol_name: None,
+                date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+
                 open: dec!(100),
                 high: dec!(110),
                 low: dec!(90),
@@ -605,7 +616,9 @@ mod tests {
         let adapter = MockAdapter {
             market_id: MarketId::Kr,
             daily_bars: vec![UnifiedDailyBar {
-                date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).unwrap(),
+                symbol_name: None,
+                date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+
                 open: dec!(50000),
                 high: dec!(51000),
                 low: dec!(49000),

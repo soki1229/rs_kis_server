@@ -34,10 +34,10 @@ impl MarketAdapters {
         vts_throttler: Arc<KisThrottler>,
     ) -> Self {
         Self {
-            kr_real: Arc::new(KrRealAdapter::new(kr_real, real_throttler.clone())),
-            kr_vts: Arc::new(KrVtsAdapter::new(kr_vts, vts_throttler.clone())),
-            us_real: Arc::new(UsRealAdapter::new(us_real, real_throttler)),
-            us_vts: Arc::new(UsVtsAdapter::new(us_vts, vts_throttler)),
+            kr_real: Arc::new(KrRealAdapter::new(kr_real.clone(), real_throttler.clone())),
+            kr_vts: Arc::new(KrVtsAdapter::new(kr_vts, kr_real, vts_throttler.clone())),
+            us_real: Arc::new(UsRealAdapter::new(us_real.clone(), real_throttler)),
+            us_vts: Arc::new(UsVtsAdapter::new(us_vts, us_real, vts_throttler)),
         }
     }
 }

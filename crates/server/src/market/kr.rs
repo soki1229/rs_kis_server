@@ -184,11 +184,18 @@ impl MarketAdapter for KrRealAdapter {
 
 /// Korean VTS Market Adapter.
 pub struct KrVtsAdapter {
+    /// Base for trading (orders, balance) - uses VTS client
     base: KrMarketBase,
+    /// Base for data (price, ranking) - uses Real client
+    data_base: KrMarketBase,
 }
 
 impl KrVtsAdapter {
-    pub fn new(client: KisClient, throttler: Arc<KisThrottler>) -> Self {
+    pub fn new(
+        vts_client: KisClient,
+        real_client: KisClient,
+        throttler: Arc<KisThrottler>,
+    ) -> Self {
         let cano = std::env::var("KIS_VTS_ACCOUNT_NO")
             .or_else(|_| std::env::var("KIS_ACCOUNT_NO"))
             .unwrap_or_default();
@@ -196,7 +203,13 @@ impl KrVtsAdapter {
             .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
             .unwrap_or_else(|_| "01".to_string());
         Self {
-            base: KrMarketBase::new(client, cano, acnt_prdt_cd, throttler),
+            base: KrMarketBase::new(
+                vts_client,
+                cano.clone(),
+                acnt_prdt_cd.clone(),
+                throttler.clone(),
+            ),
+            data_base: KrMarketBase::new(real_client, cano, acnt_prdt_cd, throttler),
         }
     }
 }
@@ -260,7 +273,7 @@ impl MarketAdapter for KrVtsAdapter {
     }
 
     async fn daily_chart(&self, symbol: &str, days: u32) -> Result<Vec<UnifiedDailyBar>, BotError> {
-        kr_daily_chart(&self.base, symbol, days).await
+        kr_daily_chart(&self.data_base, symbol, days).await
     }
 
     async fn intraday_candles(
@@ -268,15 +281,15 @@ impl MarketAdapter for KrVtsAdapter {
         symbol: &str,
         interval_mins: u32,
     ) -> Result<Vec<UnifiedCandleBar>, BotError> {
-        kr_intraday_candles(&self.base, symbol, interval_mins).await
+        kr_intraday_candles(&self.data_base, symbol, interval_mins).await
     }
 
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError> {
-        kr_current_price(&self.base, symbol).await
+        kr_current_price(&self.data_base, symbol).await
     }
 
     async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
-        kr_volume_ranking(&self.base, count).await
+        kr_volume_ranking(&self.data_base, count).await
     }
 
     fn market_timing(&self) -> MarketTiming {
@@ -284,7 +297,7 @@ impl MarketAdapter for KrVtsAdapter {
     }
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
-        kr_is_holiday(&self.base).await
+        kr_is_holiday(&self.data_base).await
     }
 }
 
@@ -295,9 +308,15 @@ impl MarketAdapter for KrVtsAdapter {
 async fn kr_daily_chart(
     base: &KrMarketBase,
     symbol: &str,
-    _days: u32,
+    days: u32,
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
     base.throttler.wait().await;
+    let now = Utc::now().with_timezone(&Seoul);
+    let today = now.format("%Y%m%d").to_string();
+    let start_date = (now - chrono::Duration::days(days as i64 * 2))
+        .format("%Y%m%d")
+        .to_string();
+
     let resp = base
         .client
         .stock()
@@ -306,8 +325,8 @@ async fn kr_daily_chart(
             DomesticStockV1QuotationsInquireDailyItemchartpriceRequest {
                 fid_cond_mrkt_div_code: "J".to_string(),
                 fid_input_iscd: symbol.to_string(),
-                fid_input_date_1: "".to_string(),
-                fid_input_date_2: "".to_string(),
+                fid_input_date_1: start_date,
+                fid_input_date_2: today,
                 fid_period_div_code: "D".to_string(),
                 fid_org_adj_prc: "0".to_string(),
                 ..Default::default()
@@ -318,6 +337,10 @@ async fn kr_daily_chart(
             msg: format!("kr daily_chart: {}", e),
         })?;
 
+    let symbol_name = resp["output1"]["hts_kor_isnm"]
+        .as_str()
+        .map(|s| s.to_string());
+
     Ok(resp["output2"]
         .as_array()
         .cloned()
@@ -327,6 +350,7 @@ async fn kr_daily_chart(
             chrono::NaiveDate::parse_from_str(b["stck_bsop_date"].as_str()?, "%Y%m%d")
                 .ok()
                 .map(|date| UnifiedDailyBar {
+                    symbol_name: symbol_name.clone(),
                     date,
                     open: b["stck_oprc"]
                         .as_str()
@@ -373,8 +397,8 @@ async fn kr_place_order(
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             pdno: req.symbol.clone(),
             ord_dvsn: "00".to_string(), // 지정가
-            ord_qty: req.qty.into(),
-            ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
+            ord_qty: req.qty.to_string(),
+            ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
             ..Default::default()
         })
         .await
@@ -407,8 +431,8 @@ async fn kr_cancel_order(
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(), // 취소
-            ord_qty: order.remaining_qty.into(),
-            ord_unpr: Decimal::ZERO,
+            ord_qty: order.remaining_qty.to_string(),
+            ord_unpr: Decimal::ZERO.to_string(),
             ..Default::default()
         })
         .await
@@ -695,7 +719,7 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .quotations()
         .domestic_stock_v1_quotations_volume_rank(DomesticStockV1QuotationsVolumeRankRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
-            fid_vol_cnt: count.into(),
+            fid_vol_cnt: count.to_string(),
             ..Default::default()
         })
         .await
@@ -711,9 +735,31 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .collect())
 }
 
-async fn kr_is_holiday(_base: &KrMarketBase) -> Result<bool, BotError> {
-    // TODO: KIS 국내 휴일조회 API 연동 필요
-    Ok(false)
+async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
+    base.throttler.wait().await;
+    let today = Utc::now()
+        .with_timezone(&Seoul)
+        .format("%Y%m%d")
+        .to_string();
+    let resp = base
+        .client
+        .stock()
+        .quotations()
+        .domestic_stock_v1_quotations_chk_holiday(DomesticStockV1QuotationsChkHolidayRequest {
+            bass_dt: today,
+            ctx_area_fk: "".to_string(),
+            ctx_area_nk: "".to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(BotError::from)?;
+
+    Ok(resp["output"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .any(|h| h["hldy_yn"].as_str().unwrap_or("N") == "Y"))
 }
 
 fn kr_market_timing() -> MarketTiming {
@@ -729,21 +775,29 @@ fn kr_market_timing() -> MarketTiming {
     let is_weekend = matches!(weekday, chrono::Weekday::Sat | chrono::Weekday::Sun);
 
     let is_open = !is_weekend && total_mins >= open_mins && total_mins < close_mins;
-    let mins_since_open = if total_mins >= open_mins {
-        total_mins - open_mins
+
+    let mins_since_open = if is_open { total_mins - open_mins } else { -1 };
+    let mins_until_close = if is_open { close_mins - total_mins } else { -1 };
+    let mins_until_open = if is_weekend {
+        // 주말일 경우 월요일 09:00까지 (단순화: 실제로는 요일 계산 필요하나 로그용으로 적절히 처리)
+        let days_to_mon = match weekday {
+            chrono::Weekday::Sat => 2,
+            chrono::Weekday::Sun => 1,
+            _ => 0,
+        };
+        (days_to_mon * 1440) + (open_mins - total_mins)
+    } else if total_mins < open_mins {
+        open_mins - total_mins
     } else {
-        i64::MAX
-    };
-    let mins_until_close = if total_mins < close_mins {
-        close_mins - total_mins
-    } else {
-        i64::MAX
+        // 오늘 장 종료 후 내일 아침까지
+        (1440 - total_mins) + open_mins
     };
 
     MarketTiming {
         is_open,
         mins_since_open,
         mins_until_close,
+        mins_until_open,
         is_holiday: false,
     }
 }

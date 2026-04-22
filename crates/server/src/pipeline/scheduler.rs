@@ -327,12 +327,14 @@ mod tests {
         }
         fn market_timing(&self) -> MarketTiming {
             MarketTiming {
-                is_open: true,
-                mins_since_open: 0,
-                mins_until_close: 0,
-                is_holiday: false,
+                is_open: !self.holiday,
+                mins_since_open: 10,
+                mins_until_close: 10,
+                mins_until_open: 0,
+                is_holiday: self.holiday,
             }
         }
+
         async fn is_holiday(&self) -> Result<bool, BotError> {
             Ok(false)
         }
@@ -354,7 +356,8 @@ mod tests {
             dynamic_watchlist_size: 5,
             db_path: ":memory:".into(),
             kill_switch_path: "/tmp/ks.json".into(),
-            dry_run: None,
+            trading_account: crate::config::AccountKind::Vts,
+            data_provider: crate::config::AccountKind::Real,
             watchlist_refresh_interval_secs: 600,
             strategies: vec![],
             use_generic_pipeline: false,

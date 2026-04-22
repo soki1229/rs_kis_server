@@ -45,6 +45,10 @@ pub struct MarketPipeline {
     pub fill_tx: mpsc::Sender<FillInfo>,
     pub fill_rx: mpsc::Receiver<FillInfo>,
 
+    // 제어 채널 (REST/Telegram → ControlTask)
+    pub control_tx: mpsc::Sender<crate::types::BotCommand>,
+    pub control_rx: mpsc::Receiver<crate::types::BotCommand>,
+
     // EOD 트리거 (mpsc for multi-day support — scheduler can send EOD each day)
     pub eod_tx: Option<tokio::sync::mpsc::Sender<()>>,
     pub eod_rx: Option<tokio::sync::mpsc::Receiver<()>>,
@@ -69,6 +73,7 @@ impl MarketPipeline {
         let (force_order_tx, force_order_rx) = mpsc::channel(16);
         let (fill_tx, fill_rx) = mpsc::channel(64);
         let (quote_tx, quote_rx) = mpsc::channel(256);
+        let (control_tx, control_rx) = mpsc::channel(32);
         let (eod_s, eod_r) = tokio::sync::mpsc::channel(4);
         Self {
             db_path: db_path.into(),
@@ -85,6 +90,8 @@ impl MarketPipeline {
             fill_rx,
             quote_tx,
             quote_rx,
+            control_tx,
+            control_rx,
             eod_tx: Some(eod_s),
             eod_rx: Some(eod_r),
             alert: AlertRouter::new(256),

@@ -20,14 +20,36 @@ pub struct StrategyProfile {
     pub aggressive_mode: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountKind {
+    Real,
+    Vts,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BotConfig {
+    /// 0: Evaluation mode (no orders), 1: Execution mode
+    #[serde(default = "default_zero")]
+    pub execution_enabled: u32,
+}
+
+fn default_zero() -> u32 {
+    0
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketConfig {
     pub watchlist: Vec<String>,
     pub dynamic_watchlist_size: usize,
     pub db_path: String,
     pub kill_switch_path: String,
-    #[serde(default)]
-    pub dry_run: Option<bool>,
+    /// Which account to use for trading
+    #[serde(default = "default_vts_account")]
+    pub trading_account: AccountKind,
+    /// Which provider to use for market data
+    #[serde(default = "default_real_account")]
+    pub data_provider: AccountKind,
     #[serde(default = "default_watchlist_refresh_interval")]
     pub watchlist_refresh_interval_secs: u64,
     #[serde(default = "default_strategies")]
@@ -36,6 +58,14 @@ pub struct MarketConfig {
     /// When true, uses MarketAdapter-based generic tasks instead of legacy market-specific tasks.
     #[serde(default)]
     pub use_generic_pipeline: bool,
+}
+
+fn default_vts_account() -> AccountKind {
+    AccountKind::Vts
+}
+
+fn default_real_account() -> AccountKind {
+    AccountKind::Real
 }
 
 fn default_strategies() -> Vec<StrategyProfile> {
@@ -385,6 +415,8 @@ impl Default for TokenCacheConfig {
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub rest_port: u16,
+    #[serde(default)]
+    pub bot: BotConfig,
     pub kr: MarketConfig,
     pub us: MarketConfig,
     #[serde(default)]
@@ -395,8 +427,6 @@ pub struct ServerConfig {
     pub position: PositionConfig,
     #[serde(default)]
     pub token_cache: TokenCacheConfig,
-    #[serde(default)]
-    pub dry_run: bool,
     #[serde(default = "default_env_file")]
     pub env_file: String,
     #[serde(default)]
@@ -456,6 +486,11 @@ pub struct Secrets {
     pub rest_admin_token: String,
     pub notion_token: String,
     pub notion_page_id: String,
+    // KIS API Keys
+    pub vts_app_key: String,
+    pub vts_app_secret: String,
+    pub real_app_key: String,
+    pub real_app_secret: String,
 }
 
 impl Secrets {
@@ -473,6 +508,23 @@ impl Secrets {
             None => std::env::var("NOTION_PAGE_ID")?,
         };
 
+        // KIS Keys logic:
+        // 1. VTS Key: KIS_VTS_APP_KEY > VTS_APP_KEY > KIS_APP_KEY (Existing legacy rule)
+        let vts_app_key = std::env::var("KIS_VTS_APP_KEY")
+            .or_else(|_| std::env::var("VTS_APP_KEY"))
+            .or_else(|_| std::env::var("KIS_APP_KEY"))?;
+        let vts_app_secret = std::env::var("KIS_VTS_APP_SECRET")
+            .or_else(|_| std::env::var("VTS_APP_SECRET"))
+            .or_else(|_| std::env::var("KIS_APP_SECRET"))?;
+
+        // 2. Real Key: KIS_REAL_APP_KEY > KIS_APP_KEY (Default to KIS_APP_KEY)
+        let real_app_key = std::env::var("KIS_REAL_APP_KEY")
+            .or_else(|_| std::env::var("KIS_APP_KEY"))
+            .unwrap_or_else(|_| vts_app_key.clone());
+        let real_app_secret = std::env::var("KIS_REAL_APP_SECRET")
+            .or_else(|_| std::env::var("KIS_APP_SECRET"))
+            .unwrap_or_else(|_| vts_app_secret.clone());
+
         Ok(Self {
             alert_bot_token: std::env::var("TELEGRAM_ALERT_BOT_TOKEN")?,
             alert_chat_id,
@@ -481,6 +533,10 @@ impl Secrets {
             rest_admin_token: std::env::var("REST_ADMIN_TOKEN")?,
             notion_token: std::env::var("NOTION_TOKEN")?,
             notion_page_id,
+            vts_app_key,
+            vts_app_secret,
+            real_app_key,
+            real_app_secret,
         })
     }
 }
@@ -529,7 +585,8 @@ mod tests {
             dynamic_watchlist_size: 10,
             db_path: "/tmp/test.db".into(),
             kill_switch_path: "/tmp/ks.json".into(),
-            dry_run: None,
+            trading_account: AccountKind::Vts,
+            data_provider: AccountKind::Real,
             watchlist_refresh_interval_secs: default_watchlist_refresh_interval(),
             strategies: default_strategies(),
             use_generic_pipeline: false,
@@ -537,6 +594,8 @@ mod tests {
         assert_eq!(mc.watchlist.len(), 1);
         assert_eq!(mc.dynamic_watchlist_size, 10);
         assert_eq!(mc.watchlist_refresh_interval_secs, 600);
+        assert_eq!(mc.trading_account, AccountKind::Vts);
+        assert_eq!(mc.data_provider, AccountKind::Real);
         assert!(!mc.use_generic_pipeline);
     }
 

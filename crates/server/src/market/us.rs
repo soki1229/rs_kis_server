@@ -221,11 +221,18 @@ impl MarketAdapter for UsRealAdapter {
 
 /// US VTS Market Adapter.
 pub struct UsVtsAdapter {
+    /// Base for trading (orders, balance) - uses VTS client
     base: UsMarketBase,
+    /// Base for data (price, ranking) - uses Real client
+    data_base: UsMarketBase,
 }
 
 impl UsVtsAdapter {
-    pub fn new(client: KisClient, throttler: Arc<KisThrottler>) -> Self {
+    pub fn new(
+        vts_client: KisClient,
+        real_client: KisClient,
+        throttler: Arc<KisThrottler>,
+    ) -> Self {
         let cano = std::env::var("KIS_VTS_ACCOUNT_NO")
             .or_else(|_| std::env::var("KIS_ACCOUNT_NO"))
             .unwrap_or_default();
@@ -233,7 +240,13 @@ impl UsVtsAdapter {
             .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
             .unwrap_or_else(|_| "01".to_string());
         Self {
-            base: UsMarketBase::new(client, cano, acnt_prdt_cd, throttler),
+            base: UsMarketBase::new(
+                vts_client,
+                cano.clone(),
+                acnt_prdt_cd.clone(),
+                throttler.clone(),
+            ),
+            data_base: UsMarketBase::new(real_client, cano, acnt_prdt_cd, throttler),
         }
     }
 }
@@ -297,7 +310,7 @@ impl MarketAdapter for UsVtsAdapter {
     }
 
     async fn daily_chart(&self, symbol: &str, days: u32) -> Result<Vec<UnifiedDailyBar>, BotError> {
-        us_daily_chart(&self.base, symbol, days).await
+        us_daily_chart(&self.data_base, symbol, days).await
     }
 
     async fn intraday_candles(
@@ -305,15 +318,15 @@ impl MarketAdapter for UsVtsAdapter {
         symbol: &str,
         interval_mins: u32,
     ) -> Result<Vec<UnifiedCandleBar>, BotError> {
-        us_intraday_candles(&self.base, symbol, interval_mins).await
+        us_intraday_candles(&self.data_base, symbol, interval_mins).await
     }
 
     async fn current_price(&self, symbol: &str) -> Result<Decimal, BotError> {
-        us_current_price(&self.base, symbol).await
+        us_current_price(&self.data_base, symbol).await
     }
 
     async fn volume_ranking(&self, count: u32) -> Result<Vec<String>, BotError> {
-        us_volume_ranking(&self.base, count).await
+        us_volume_ranking(&self.data_base, count).await
     }
 
     fn market_timing(&self) -> MarketTiming {
@@ -321,7 +334,7 @@ impl MarketAdapter for UsVtsAdapter {
     }
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
-        us_is_holiday(&self.base).await
+        us_is_holiday(&self.data_base).await
     }
 
     fn fx_spread_pct(&self) -> Decimal {
@@ -354,8 +367,8 @@ async fn us_place_order(
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             ovrs_excg_cd: exchange,
             pdno: req.symbol.clone(),
-            ord_qty: req.qty.into(),
-            ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO),
+            ord_qty: req.qty.to_string(),
+            ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
             ..Default::default()
         })
         .await
@@ -393,7 +406,7 @@ async fn us_cancel_order(
             pdno: order.symbol.clone(),
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(),
-            ord_qty: order.remaining_qty.into(),
+            ord_qty: order.remaining_qty.to_string(),
             ..Default::default()
         })
         .await
@@ -573,19 +586,34 @@ async fn us_daily_chart(
     _days: u32,
 ) -> Result<Vec<UnifiedDailyBar>, BotError> {
     base.throttler.wait().await;
+    let now = Utc::now().with_timezone(&New_York);
+    let today = now.format("%Y%m%d").to_string();
+
+    let exchange = if symbol.len() == 3 || symbol == "QQQ" || symbol == "SPY" {
+        "NASD".to_string()
+    } else if symbol.len() == 1 || symbol.len() == 2 {
+        "NYSE".to_string()
+    } else {
+        "NASD".to_string() // Fallback
+    };
+
     let resp = base
         .client
         .overseas()
         .quotations()
         .overseas_price_v1_quotations_dailyprice(OverseasPriceV1QuotationsDailypriceRequest {
-            excd: UsMarketBase::quotation_exchange_from_hint(None, symbol),
+            excd: exchange,
             symb: symbol.to_string(),
+            bymd: today,
+            modp: "0".to_string(),
             ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("us dailyprice: {}", e),
+            msg: format!("us daily_chart: {}", e),
         })?;
+
+    let symbol_name = resp["output1"]["name"].as_str().map(|s| s.to_string());
 
     Ok(resp["output2"]
         .as_array()
@@ -596,6 +624,7 @@ async fn us_daily_chart(
             chrono::NaiveDate::parse_from_str(b["xymd"].as_str()?, "%Y%m%d")
                 .ok()
                 .map(|date| UnifiedDailyBar {
+                    symbol_name: symbol_name.clone(),
                     date,
                     open: b["open"]
                         .as_str()
@@ -664,9 +693,7 @@ async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
             },
         )
         .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("countries_holiday: {}", e),
-        })?;
+        .map_err(BotError::from)?;
 
     Ok(resp["output"]
         .as_array()
@@ -782,21 +809,27 @@ fn us_market_timing() -> MarketTiming {
     let is_weekend = matches!(weekday, chrono::Weekday::Sat | chrono::Weekday::Sun);
 
     let is_open = !is_weekend && total_mins >= open_mins && total_mins < close_mins;
-    let mins_since_open = if total_mins >= open_mins {
-        total_mins - open_mins
+
+    let mins_since_open = if is_open { total_mins - open_mins } else { -1 };
+    let mins_until_close = if is_open { close_mins - total_mins } else { -1 };
+    let mins_until_open = if is_weekend {
+        let days_to_mon = match weekday {
+            chrono::Weekday::Sat => 2,
+            chrono::Weekday::Sun => 1,
+            _ => 0,
+        };
+        (days_to_mon * 1440) + (open_mins - total_mins)
+    } else if total_mins < open_mins {
+        open_mins - total_mins
     } else {
-        i64::MAX
-    };
-    let mins_until_close = if total_mins < close_mins {
-        close_mins - total_mins
-    } else {
-        i64::MAX
+        (1440 - total_mins) + open_mins
     };
 
     MarketTiming {
         is_open,
         mins_since_open,
         mins_until_close,
+        mins_until_open,
         is_holiday: false,
     }
 }
