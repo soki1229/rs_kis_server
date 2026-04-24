@@ -194,12 +194,21 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let trade_signal = match signal_strategy.evaluate(&strategy_ctx).await {
         Some(sig) => sig,
         None => {
+            tracing::debug!("[{}] {} 신호 없음", market.label(), symbol);
             activity.record_eval(market.label(), &symbol, 0, "skip", "no_signal");
             return;
         }
     };
 
     let score = (trade_signal.strength * 100.0) as i32;
+    tracing::info!(
+        "[{}] 📶 신호 발생: {} score={} {:?} @ {}",
+        market.label(),
+        symbol,
+        trade_signal.setup_score.unwrap_or(0),
+        trade_signal.direction,
+        current_price
+    );
 
     let candidate = SignalCandidate {
         signal: trade_signal.clone(),
@@ -212,6 +221,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let qual_result = qual_strategy.qualify(&candidate);
 
     if let QualResult::Block { reason } = qual_result {
+        tracing::info!("[{}] 🚫 {} 진입 차단 — {}", market.label(), symbol, reason);
         activity.record_eval(market.label(), &symbol, score, "blocked", &reason);
         return;
     }
@@ -228,6 +238,11 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     let qty = sized_qty.to_u64().unwrap_or(0);
     if qty == 0 {
+        tracing::info!(
+            "[{}] ⚠️ {} 수량 산출 0 (잔고 부족 또는 리스크 제한) → skip",
+            market.label(),
+            symbol
+        );
         activity.record_eval(market.label(), &symbol, score, "skip", "qty_zero");
         return;
     }
@@ -257,6 +272,14 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     let bot_state = summary.read().unwrap().bot_state.clone();
     if matches!(bot_state, BotState::Active) {
+        tracing::info!(
+            "[{}] 📤 주문 전송: {} {}주 @ ~{} ({:?})",
+            market.label(),
+            symbol,
+            qty,
+            current_price,
+            regime
+        );
         let req = OrderRequest {
             symbol: symbol.clone(),
             side: Side::Buy,
@@ -267,6 +290,14 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             strength: Some(trade_signal.strength),
         };
         let _ = order_tx.send(req).await;
+    } else {
+        tracing::info!(
+            "[{}] 🔍 평가 전용: {} {}주 @ ~{} (봇 비활성 — 실제 주문 없음)",
+            market.label(),
+            symbol,
+            qty,
+            current_price
+        );
     }
 }
 
@@ -332,7 +363,7 @@ pub async fn run_signal_task(
                 let candle = state.candles.entry(tick.symbol.clone()).or_insert_with(CandleAccumulator::new);
                 candle.push(tick.clone());
                 if state.candle_start.entry(tick.symbol.clone()).or_insert_with(Instant::now).elapsed() >= candle_interval && candle.is_signal_eligible() {
-                    tracing::info!(symbol = %tick.symbol, "🕯️ 캔들 완성 (분석 시작)");
+                    tracing::info!("[{market_id}] 🕯️ {} O={} H={} L={} C={} V={}", tick.symbol, candle.open, candle.high, candle.low, candle.close, candle.volume);
                     let completed_candle = CompletedCandle { open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume, ts: tick.timestamp };
                     let cq = state.completed.entry(tick.symbol.clone()).or_default();
                     cq.push_back(completed_candle); if cq.len() > MAX_COMPLETED_CANDLES { cq.pop_front(); }
