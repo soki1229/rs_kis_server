@@ -169,7 +169,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let shared_stream = pipeline::stream::StreamManager::connect(
         ws_url,
         ws_approval_key,
-        ws_client.app_key().to_string(),
+        ws_client.clone(),
         4096,
     )
     .await?;

@@ -1,14 +1,14 @@
 use chrono::{DateTime, FixedOffset, NaiveTime, Utc};
 use chrono::TimeZone;
 use futures_util::{SinkExt, StreamExt};
-use kis_api::KisError;
+use kis_api::{KisClient, KisError};
 use rand::Rng;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
@@ -65,7 +65,9 @@ pub struct StreamManager {
 
 struct StreamInner {
     ws_url: String,
-    approval_key: String,
+    approval_key: RwLock<String>,
+    kis_client: KisClient,
+    key_in_use: AtomicBool,
     tx: broadcast::Sender<KisEvent>,
     subscriptions: RwLock<HashMap<(String, SubscriptionKind), ()>>,
     cmd_tx: mpsc::Sender<StreamCmd>,
@@ -81,7 +83,7 @@ impl StreamManager {
     pub async fn connect(
         ws_url: &str,
         approval_key: String,
-        _app_key: String,
+        kis_client: KisClient,
         event_buffer: usize,
     ) -> Result<Self, KisError> {
         let (tx, _) = broadcast::channel(event_buffer);
@@ -90,7 +92,9 @@ impl StreamManager {
 
         let inner = Arc::new(StreamInner {
             ws_url: ws_url.to_string(),
-            approval_key,
+            approval_key: RwLock::new(approval_key),
+            kis_client,
+            key_in_use: AtomicBool::new(false),
             tx: tx.clone(),
             subscriptions: RwLock::new(HashMap::new()),
             cmd_tx,
@@ -145,19 +149,34 @@ impl EventReceiver {
 async fn run_connection_loop(inner: Arc<StreamInner>, mut cmd_rx: mpsc::Receiver<StreamCmd>) {
     let mut attempt = 0;
     loop {
+        // If the last disconnect was due to OPSP8996 (key already in use),
+        // refresh the approval_key before reconnecting and wait longer.
+        if inner.key_in_use.swap(false, Ordering::Relaxed) {
+            tracing::info!("WS: ALREADY IN USE detected — refreshing approval_key before reconnect");
+            match inner.kis_client.approval_key().await {
+                Ok(new_key) => {
+                    *inner.approval_key.write().await = new_key;
+                    tracing::info!("WS: approval_key refreshed");
+                }
+                Err(e) => tracing::warn!("WS: approval_key refresh failed: {e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+
         tracing::info!("WS connecting to {}...", inner.ws_url);
         match connect_async(&inner.ws_url).await {
             Ok((mut ws_stream, _)) => {
                 tracing::info!("WS connected successfully.");
                 attempt = 0;
-                
+
                 // Resubscribe existing (rate-limited, errors logged but continue)
                 let subs_snapshot: Vec<_> = inner.subscriptions.read().await.keys().cloned().collect();
                 if !subs_snapshot.is_empty() {
                     tracing::info!("WS: resubscribing {} entries after reconnect", subs_snapshot.len());
                 }
+                let current_key = inner.approval_key.read().await.clone();
                 for (tr_key, kind) in &subs_snapshot {
-                    if let Err(e) = send_sub(&mut ws_stream, &inner.approval_key, &tr_key, *kind, true).await {
+                    if let Err(e) = send_sub(&mut ws_stream, &current_key, tr_key, *kind, true).await {
                         tracing::warn!("WS: resubscribe failed for {tr_key}: {e}");
                         break;
                     }
@@ -183,11 +202,11 @@ async fn handle_stream(inner: &StreamInner, ws: &mut FullWsStream, cmd_rx: &mut 
             msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     if text.starts_with('{') {
-                        // JSON frame: subscription response or PINGPONG
                         if text.contains("\"tr_id\":\"PINGPONG\"") {
                             ws.send(Message::Text(text.into())).await.ok();
-                        } else {
-                            log_server_json_response(&text);
+                        } else if log_server_json_response(&text) {
+                            // OPSP8996: key already in use — signal reconnect loop to refresh key
+                            inner.key_in_use.store(true, Ordering::Relaxed);
                         }
                     } else if let Some(event) = parse_ws_message(&text) {
                         let _ = inner.tx.send(event);
@@ -202,18 +221,19 @@ async fn handle_stream(inner: &StreamInner, ws: &mut FullWsStream, cmd_rx: &mut 
                 Some(StreamCmd::Subscribe(key, kind)) => {
                     let already = inner.subscriptions.read().await.contains_key(&(key.clone(), kind));
                     if !already {
-                        if let Err(e) = send_sub(ws, &inner.approval_key, &key, kind, true).await {
+                        let current_key = inner.approval_key.read().await.clone();
+                        if let Err(e) = send_sub(ws, &current_key, &key, kind, true).await {
                             return Err(e.to_string());
                         }
                         inner.subscriptions.write().await.insert((key, kind), ());
-                        // Rate-limit: release lock before sleeping so reconnect can proceed
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                     }
                 }
                 Some(StreamCmd::Unsubscribe(key, kind)) => {
                     let was_present = inner.subscriptions.write().await.remove(&(key.clone(), kind)).is_some();
                     if was_present {
-                        send_sub(ws, &inner.approval_key, &key, kind, false).await.ok();
+                        let current_key = inner.approval_key.read().await.clone();
+                        send_sub(ws, &current_key, &key, kind, false).await.ok();
                     }
                 }
                 None => break,
@@ -292,21 +312,29 @@ fn parse_time(hms: &str) -> Option<DateTime<FixedOffset>> {
     FixedOffset::east_opt(9 * 3600)?.from_local_datetime(&now.date_naive().and_time(time)).single()
 }
 
-fn log_server_json_response(text: &str) {
+/// Returns true if the message is a fatal rejection that requires key refresh (OPSP8996).
+fn log_server_json_response(text: &str) -> bool {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-        let rt_cd = v.pointer("/body/rt_cd").and_then(|x| x.as_str()).unwrap_or("");
-        let msg1  = v.pointer("/body/msg1").and_then(|x| x.as_str()).unwrap_or("");
+        let rt_cd  = v.pointer("/body/rt_cd").and_then(|x| x.as_str()).unwrap_or("");
+        let msg1   = v.pointer("/body/msg1").and_then(|x| x.as_str()).unwrap_or("");
         let msg_cd = v.pointer("/body/msg_cd").and_then(|x| x.as_str()).unwrap_or("");
         let tr_id  = v.pointer("/header/tr_id").and_then(|x| x.as_str()).unwrap_or("");
         let tr_key = v.pointer("/header/tr_key").and_then(|x| x.as_str()).unwrap_or("");
         if rt_cd == "0" {
             tracing::debug!(tr_id, tr_key, msg1, "WS server ack");
+            false
+        } else if msg_cd == "OPSP8996" {
+            tracing::warn!(tr_id, tr_key, rt_cd, msg_cd, msg1, "WS: ALREADY IN USE — will refresh key");
+            true
         } else if !rt_cd.is_empty() {
             tracing::warn!(tr_id, tr_key, rt_cd, msg_cd, msg1, "WS server rejected subscription");
+            false
         } else {
             tracing::debug!("WS server message: {}", text);
+            false
         }
     } else {
         tracing::debug!("WS server non-JSON: {}", text);
+        false
     }
 }
