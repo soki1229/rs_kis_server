@@ -219,6 +219,8 @@ impl MarketAdapter for UsRealAdapter {
     }
 
     fn get_ws_key(&self, symbol: &str) -> String {
+        // According to KIS Official Guide for Overseas Real-time:
+        // D + (NAS or NYS or AMS) + Symbol
         let exchange = if symbol.len() == 3 || symbol == "QQQ" || symbol == "SPY" {
             "NAS"
         } else if symbol.len() == 1 || symbol.len() == 2 {
@@ -353,6 +355,8 @@ impl MarketAdapter for UsVtsAdapter {
     }
 
     fn get_ws_key(&self, symbol: &str) -> String {
+        // According to KIS Official Guide for Overseas Real-time:
+        // D + (NAS or NYS or AMS) + Symbol
         let exchange = if symbol.len() == 3 || symbol == "QQQ" || symbol == "SPY" {
             "NAS"
         } else if symbol.len() == 1 || symbol.len() == 2 {
@@ -646,8 +650,12 @@ async fn us_daily_chart(
     {
         Some(name) => Some(name.to_string()),
         None => {
-            // Last-ditch effort: check first item in output2 if it has a name (rare but happens)
-            resp["output2"][0]["name"].as_str().map(|s| s.to_string())
+            // Check first item in output2 array properly
+            resp["output2"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|first| first["name"].as_str())
+                .map(|s| s.to_string())
         }
     };
 

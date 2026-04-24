@@ -158,17 +158,13 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         ws_url
     );
 
-    let approval_cache_path = if is_vts_ws {
-        PathBuf::from(shellexpand::tilde(&cfg.token_cache.vts_approval_path).into_owned())
-    } else {
-        PathBuf::from(shellexpand::tilde(&cfg.token_cache.real_approval_path).into_owned())
-    };
-
-    let approval_cache = shared::token::ApprovalKeyCache::new(600, Some(approval_cache_path));
-    let ws_approval_key = approval_cache
-        .get(ws_client)
+    // Bypass cache and force fetch a fresh approval key for WebSocket
+    let ws_approval_key = ws_client
+        .approval_key()
         .await
-        .expect("WebSocket approval_key 발급 실패");
+        .expect("WebSocket approval_key 강제 발급 실패");
+    
+    tracing::info!("WebSocket approval_key 발급 완료 (Fresh)");
 
     let shared_stream = pipeline::stream::StreamManager::connect(
         ws_url,
@@ -380,10 +376,24 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             regime_rx,
             kr_db_pool.clone(),
             t,
-            pipeline::scheduler::kr_market_close_utc(
-                chrono::Utc::now().with_timezone(&Asia::Seoul).date_naive(),
-            )
-            .unwrap(),
+            {
+                let now = chrono::Utc::now();
+                let close = pipeline::scheduler::kr_market_close_utc(
+                    chrono::Utc::now().with_timezone(&Asia::Seoul).date_naive(),
+                )
+                .unwrap();
+                if close > now {
+                    close
+                } else {
+                    // Already closed today, set for tomorrow
+                    pipeline::scheduler::kr_market_close_utc(
+                        (chrono::Utc::now().with_timezone(&Asia::Seoul)
+                            + chrono::Duration::days(1))
+                        .date_naive(),
+                    )
+                    .unwrap()
+                }
+            },
             cfg.position.clone(),
         )));
     }
@@ -501,12 +511,25 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             regime_rx,
             us_db_pool.clone(),
             t,
-            pipeline::scheduler::us_market_close_utc(
-                chrono::Utc::now()
-                    .with_timezone(&America::New_York)
-                    .date_naive(),
-            )
-            .unwrap(),
+            {
+                let now = chrono::Utc::now();
+                let close = pipeline::scheduler::us_market_close_utc(
+                    chrono::Utc::now()
+                        .with_timezone(&America::New_York)
+                        .date_naive(),
+                )
+                .unwrap();
+                if close > now {
+                    close
+                } else {
+                    pipeline::scheduler::us_market_close_utc(
+                        (chrono::Utc::now().with_timezone(&America::New_York)
+                            + chrono::Duration::days(1))
+                        .date_naive(),
+                    )
+                    .unwrap()
+                }
+            },
             cfg.position.clone(),
         )));
     }

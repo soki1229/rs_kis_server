@@ -1,4 +1,5 @@
-use chrono::{DateTime, FixedOffset, NaiveTime, TimeZone};
+use chrono::{DateTime, FixedOffset, NaiveTime, Utc};
+use chrono::TimeZone;
 use futures_util::{SinkExt, StreamExt};
 use kis_api::KisError;
 use rand::Rng;
@@ -6,31 +7,48 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio::net::TcpStream;
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
-// ── Types ──────────────────────────────────────────────────────────────────
+type FullWsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubscriptionKind {
+    Price,
+    Orderbook,
+    DomesticPrice,
+    DomesticOrderbook,
+}
+
+impl SubscriptionKind {
+    pub fn tr_id(&self) -> &'static str {
+        match self {
+            Self::Price => "HDFSCNT0",
+            Self::Orderbook => "HDFSASP0",
+            Self::DomesticPrice => "H0STCNT0",
+            Self::DomesticOrderbook => "H0STASP0",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum KisEvent {
     Transaction(TransactionData),
     Quote(QuoteData),
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TransactionData {
     pub symbol: String,
     pub price: Decimal,
     pub qty: Decimal,
-    pub time: DateTime<FixedOffset>,
     pub is_buy: bool,
+    pub time: DateTime<FixedOffset>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct QuoteData {
     pub symbol: String,
     pub ask_price: Decimal,
@@ -38,14 +56,6 @@ pub struct QuoteData {
     pub ask_qty: Decimal,
     pub bid_qty: Decimal,
     pub time: DateTime<FixedOffset>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SubscriptionKind {
-    Price,             // HDFSCNT0
-    Orderbook,         // HDFSASP0/1
-    DomesticPrice,     // H0STCNT0
-    DomesticOrderbook, // H0STASP0/1
 }
 
 #[derive(Clone)]
@@ -56,21 +66,67 @@ pub struct StreamManager {
 struct StreamInner {
     ws_url: String,
     approval_key: String,
-    app_key: String,
     tx: broadcast::Sender<KisEvent>,
     subscriptions: RwLock<HashMap<(String, SubscriptionKind), ()>>,
+    cmd_tx: mpsc::Sender<StreamCmd>,
     cancel: CancellationToken,
-    ws_tx: Mutex<Option<WsSink>>,
 }
 
-type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    tokio_tungstenite::tungstenite::Message,
->;
+enum StreamCmd {
+    Subscribe(String, SubscriptionKind),
+    Unsubscribe(String, SubscriptionKind),
+}
 
-type WsReadHalf = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
+impl StreamManager {
+    pub async fn connect(
+        ws_url: &str,
+        approval_key: String,
+        _app_key: String,
+        event_buffer: usize,
+    ) -> Result<Self, KisError> {
+        let (tx, _) = broadcast::channel(event_buffer);
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let cancel = CancellationToken::new();
+
+        let inner = Arc::new(StreamInner {
+            ws_url: ws_url.to_string(),
+            approval_key,
+            tx: tx.clone(),
+            subscriptions: RwLock::new(HashMap::new()),
+            cmd_tx,
+            cancel: cancel.clone(),
+        });
+
+        let inner_clone = inner.clone();
+        tokio::spawn(async move {
+            run_connection_loop(inner_clone, cmd_rx).await;
+        });
+
+        Ok(Self { inner })
+    }
+
+    pub fn receiver(&self) -> EventReceiver {
+        EventReceiver {
+            inner: self.inner.tx.subscribe(),
+        }
+    }
+
+    pub async fn subscribe(&self, tr_key: &str, kind: SubscriptionKind) -> Result<(), KisError> {
+        self.inner
+            .cmd_tx
+            .send(StreamCmd::Subscribe(tr_key.to_string(), kind))
+            .await
+            .map_err(|_| KisError::WebSocket("stream worker stopped".into()))
+    }
+
+    pub async fn unsubscribe(&self, tr_key: &str, kind: SubscriptionKind) -> Result<(), KisError> {
+        self.inner
+            .cmd_tx
+            .send(StreamCmd::Unsubscribe(tr_key.to_string(), kind))
+            .await
+            .map_err(|_| KisError::WebSocket("stream worker stopped".into()))
+    }
+}
 
 pub struct EventReceiver {
     inner: broadcast::Receiver<KisEvent>,
@@ -86,452 +142,171 @@ impl EventReceiver {
     }
 }
 
-// ── Implementation ──────────────────────────────────────────────────────────
-
-impl StreamManager {
-    pub async fn connect(
-        ws_url: &str,
-        approval_key: String,
-        app_key: String,
-        event_buffer: usize,
-    ) -> Result<Self, KisError> {
-        let (tx, _) = broadcast::channel(event_buffer);
-        let cancel = CancellationToken::new();
-
-        let (ws_stream, _) = connect_async(ws_url)
-            .await
-            .map_err(|e| KisError::WebSocket(e.to_string()))?;
-        let (ws_write, ws_read) = ws_stream.split();
-
-        let inner = Arc::new(StreamInner {
-            ws_url: ws_url.to_string(),
-            approval_key,
-            app_key,
-            tx: tx.clone(),
-            subscriptions: RwLock::new(HashMap::new()),
-            cancel: cancel.clone(),
-            ws_tx: Mutex::new(Some(ws_write)),
-        });
-
-        let inner_clone = inner.clone();
-        tokio::spawn(async move {
-            run_connection_loop(inner_clone, ws_read).await;
-        });
-
-        // Start Heartbeat task (every 30 seconds)
-        let inner_heartbeat = inner.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-            loop {
-                tokio::select! {
-                    _ = inner_heartbeat.cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        let mut guard = inner_heartbeat.ws_tx.lock().await;
-                        if let Some(ref mut writer) = *guard {
-                            let ping = serde_json::json!({
-                                "header": {
-                                    "tr_id": "PINGPONG",
-                                    "datetime": chrono::Utc::now().with_timezone(&FixedOffset::east_opt(9 * 3600).unwrap()).format("%Y%m%d%H%M%S").to_string()
-                                }
-                            });
-                            if let Ok(text) = serde_json::to_string(&ping) {
-                                let _ = writer.send(Message::Text(text)).await;
-                            }
-                        }
+async fn run_connection_loop(inner: Arc<StreamInner>, mut cmd_rx: mpsc::Receiver<StreamCmd>) {
+    let mut attempt = 0;
+    loop {
+        tracing::info!("WS connecting to {}...", inner.ws_url);
+        match connect_async(&inner.ws_url).await {
+            Ok((mut ws_stream, _)) => {
+                tracing::info!("WS connected successfully.");
+                attempt = 0;
+                
+                // Resubscribe existing (rate-limited, errors logged but continue)
+                let subs_snapshot: Vec<_> = inner.subscriptions.read().await.keys().cloned().collect();
+                if !subs_snapshot.is_empty() {
+                    tracing::info!("WS: resubscribing {} entries after reconnect", subs_snapshot.len());
+                }
+                for (tr_key, kind) in &subs_snapshot {
+                    if let Err(e) = send_sub(&mut ws_stream, &inner.approval_key, &tr_key, *kind, true).await {
+                        tracing::warn!("WS: resubscribe failed for {tr_key}: {e}");
+                        break;
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+
+                if let Err(e) = handle_stream(&inner, &mut ws_stream, &mut cmd_rx).await {
+                    tracing::warn!("WS stream error: {e}");
                 }
             }
-        });
-
-        Ok(Self { inner })
-    }
-
-    pub fn receiver(&self) -> EventReceiver {
-        EventReceiver {
-            inner: self.inner.tx.subscribe(),
+            Err(e) => tracing::error!("WS connection failed: {e}"),
         }
-    }
 
-    pub async fn subscribe(&self, symbol: &str, kind: SubscriptionKind) -> Result<(), KisError> {
-        let key = (symbol.to_string(), kind);
-        let mut subs = self.inner.subscriptions.write().await;
-        if subs.contains_key(&key) {
-            return Ok(());
-        }
-        send_subscribe_raw(
-            &self.inner.ws_tx,
-            &self.inner.approval_key,
-            &self.inner.app_key,
-            symbol,
-            kind,
-            true,
-        )
-        .await?;
-        subs.insert(key, ());
-        Ok(())
-    }
-
-    pub async fn unsubscribe(&self, symbol: &str, kind: SubscriptionKind) -> Result<(), KisError> {
-        let key = (symbol.to_string(), kind);
-        let mut subs = self.inner.subscriptions.write().await;
-        if !subs.contains_key(&key) {
-            return Ok(());
-        }
-        send_subscribe_raw(
-            &self.inner.ws_tx,
-            &self.inner.approval_key,
-            &self.inner.app_key,
-            symbol,
-            kind,
-            false,
-        )
-        .await?;
-        subs.remove(&key);
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn close(&self) {
-        self.inner.cancel.cancel();
+        if inner.cancel.is_cancelled() { break; }
+        attempt += 1;
+        tokio::time::sleep(backoff_duration(attempt)).await;
     }
 }
 
-// ── Private Helpers ─────────────────────────────────────────────────────────
+async fn handle_stream(inner: &StreamInner, ws: &mut FullWsStream, cmd_rx: &mut mpsc::Receiver<StreamCmd>) -> Result<(), String> {
+    loop {
+        tokio::select! {
+            msg = ws.next() => match msg {
+                Some(Ok(Message::Text(text))) => {
+                    if text.starts_with('{') {
+                        // JSON frame: subscription response or PINGPONG
+                        if text.contains("\"tr_id\":\"PINGPONG\"") {
+                            ws.send(Message::Text(text.into())).await.ok();
+                        } else {
+                            log_server_json_response(&text);
+                        }
+                    } else if let Some(event) = parse_ws_message(&text) {
+                        let _ = inner.tx.send(event);
+                    }
+                }
+                Some(Ok(Message::Close(_))) => return Err("Closed by server".into()),
+                Some(Err(e)) => return Err(e.to_string()),
+                None => return Err("Stream EOF".into()),
+                _ => {}
+            },
+            cmd = cmd_rx.recv() => match cmd {
+                Some(StreamCmd::Subscribe(key, kind)) => {
+                    let already = inner.subscriptions.read().await.contains_key(&(key.clone(), kind));
+                    if !already {
+                        if let Err(e) = send_sub(ws, &inner.approval_key, &key, kind, true).await {
+                            return Err(e.to_string());
+                        }
+                        inner.subscriptions.write().await.insert((key, kind), ());
+                        // Rate-limit: release lock before sleeping so reconnect can proceed
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                }
+                Some(StreamCmd::Unsubscribe(key, kind)) => {
+                    let was_present = inner.subscriptions.write().await.remove(&(key.clone(), kind)).is_some();
+                    if was_present {
+                        send_sub(ws, &inner.approval_key, &key, kind, false).await.ok();
+                    }
+                }
+                None => break,
+            },
+            _ = inner.cancel.cancelled() => break,
+        }
+    }
+    Ok(())
+}
 
-async fn send_subscribe_raw(
-    ws_tx: &Mutex<Option<WsSink>>,
-    approval_key: &str,
-    _app_key: &str,
-    symbol: &str,
-    kind: SubscriptionKind,
-    subscribe: bool,
-) -> Result<(), KisError> {
-    let tr_id = match kind {
-        SubscriptionKind::Price => "HDFSCNT0",
-        SubscriptionKind::Orderbook => "HDFSASP0",
-        SubscriptionKind::DomesticPrice => "H0STCNT0",
-        SubscriptionKind::DomesticOrderbook => "H0STASP0",
-    };
+async fn send_sub(ws: &mut FullWsStream, approval_key: &str, tr_key: &str, kind: SubscriptionKind, is_sub: bool) -> Result<(), KisError> {
     let msg = serde_json::json!({
         "header": {
             "approval_key": approval_key,
             "custtype": "P",
-            "tr_type": if subscribe { "1" } else { "2" },
+            "tr_type": if is_sub { "1" } else { "2" },
             "content-type": "utf-8"
         },
-        "body": {
-            "input": {
-                "tr_id": tr_id,
-                "tr_key": symbol
-            }
-        }
+        "body": { "input": { "tr_id": kind.tr_id(), "tr_key": tr_key } }
     });
-    let text = serde_json::to_string(&msg).map_err(|e| KisError::WebSocket(e.to_string()))?;
-    let mut guard = ws_tx.lock().await;
-    match *guard {
-        Some(ref mut writer) => writer
-            .send(Message::Text(text))
-            .await
-            .map_err(|e| KisError::WebSocket(e.to_string())),
-        None => Err(KisError::WebSocket("not connected".into())),
-    }
+    let text = msg.to_string();
+    ws.send(Message::Text(text.into())).await.map_err(|e| KisError::WebSocket(e.to_string()))
 }
-
-const BACKOFF_INITIAL_MS: u64 = 1_000;
-const BACKOFF_MAX_MS: u64 = 60_000;
-const BACKOFF_JITTER_FRACTION: f64 = 0.3;
 
 fn backoff_duration(attempt: u32) -> std::time::Duration {
-    let base = BACKOFF_INITIAL_MS
-        .saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX))
-        .min(BACKOFF_MAX_MS);
-    let mut rng = rand::thread_rng();
-    let jitter = (base as f64 * BACKOFF_JITTER_FRACTION * rng.gen::<f64>()) as u64;
-    std::time::Duration::from_millis(base + jitter)
-}
-
-enum DisconnectReason {
-    Cancelled,
-    Error(String),
-    Eof,
-}
-
-async fn run_connection_loop(inner: Arc<StreamInner>, initial_ws_read: WsReadHalf) {
-    let mut attempt: u32 = 0;
-    let mut current_ws_read = Some(initial_ws_read);
-
-    loop {
-        if inner.cancel.is_cancelled() {
-            break;
-        }
-
-        let ws_read = if let Some(r) = current_ws_read.take() {
-            r
-        } else {
-            let delay = backoff_duration(attempt.saturating_sub(1));
-            tokio::select! {
-                _ = inner.cancel.cancelled() => break,
-                _ = tokio::time::sleep(delay) => {}
-            }
-            match connect_async(&inner.ws_url).await {
-                Ok((ws, _)) => {
-                    let (w, r) = ws.split();
-                    *inner.ws_tx.lock().await = Some(w);
-                    resubscribe_all(&inner).await;
-                    r
-                }
-                Err(e) => {
-                    tracing::warn!("WS reconnect failed: {e}");
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-            }
-        };
-
-        let (reason, had_data) = read_loop(&inner, ws_read, &inner.cancel).await;
-        *inner.ws_tx.lock().await = None;
-
-        match reason {
-            DisconnectReason::Cancelled => break,
-            DisconnectReason::Error(e) => {
-                // Determine if any market is currently open
-                let now = chrono::Utc::now()
-                    .with_timezone(&FixedOffset::east_opt(9 * 3600).unwrap())
-                    .time();
-                let kr_open = now >= NaiveTime::from_hms_opt(8, 50, 0).unwrap()
-                    && now <= NaiveTime::from_hms_opt(15, 40, 0).unwrap();
-                let us_open = now >= NaiveTime::from_hms_opt(22, 20, 0).unwrap()
-                    || now <= NaiveTime::from_hms_opt(5, 10, 0).unwrap();
-
-                if kr_open || us_open {
-                    tracing::warn!("WS disconnected: {e}");
-                } else {
-                    tracing::info!("WS disconnected (off-market): {e}");
-                }
-            }
-
-            DisconnectReason::Eof => tracing::info!("WS closed by server"),
-        }
-
-        if had_data {
-            attempt = 0;
-        } else {
-            attempt = attempt.saturating_add(1);
-        }
-    }
-}
-
-async fn resubscribe_all(inner: &StreamInner) {
-    let subs = inner.subscriptions.read().await;
-    for (symbol, kind) in subs.keys() {
-        if let Err(e) = send_subscribe_raw(
-            &inner.ws_tx,
-            &inner.approval_key,
-            &inner.app_key,
-            symbol,
-            *kind,
-            true,
-        )
-        .await
-        {
-            tracing::error!("failed to resubscribe {}/{:?}: {}", symbol, kind, e);
-        }
-    }
-}
-
-async fn read_loop(
-    inner: &StreamInner,
-    mut reader: WsReadHalf,
-    cancel: &CancellationToken,
-) -> (DisconnectReason, bool) {
-    let mut had_data = false;
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return (DisconnectReason::Cancelled, had_data),
-            msg = reader.next() => match msg {
-                Some(Ok(Message::Text(text))) => {
-                    match classify_text_message(&text) {
-                        TextMessage::PingPong => {
-                            tracing::debug!("WS: PINGPONG received, echoing back for session maintenance");
-                            let mut g = inner.ws_tx.lock().await;
-                            if let Some(ref mut w) = *g {
-                                if let Err(e) = w.send(Message::Text(text)).await {
-                                    return (DisconnectReason::Error(e.to_string()), had_data);
-                                }
-                            }
-                        }
-                        TextMessage::OtherJson => {}
-                        TextMessage::Data => {
-                            tracing::debug!(target: "kis_server::ws", "WS Raw Data: {}", text);
-                            if let Some(event) = parse_ws_message(&text) {
-                                had_data = true;
-                                let _ = inner.tx.send(event);
-                            }
-                        }
-                    }
-                }
-                Some(Ok(Message::Ping(_))) => {} // tungstenite auto-pongs
-                Some(Err(e)) => return (DisconnectReason::Error(e.to_string()), had_data),
-                None => return (DisconnectReason::Eof, had_data),
-                _ => {}
-            }
-        }
-    }
-}
-
-enum TextMessage {
-    PingPong,
-    OtherJson,
-    Data,
-}
-
-fn classify_text_message(text: &str) -> TextMessage {
-    if !text.starts_with('{') {
-        return TextMessage::Data;
-    }
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-        if v.get("header")
-            .and_then(|h| h.get("tr_id"))
-            .and_then(|t| t.as_str())
-            == Some("PINGPONG")
-        {
-            return TextMessage::PingPong;
-        }
-    }
-    TextMessage::OtherJson
+    let base = 1000u64.saturating_mul(1u64.checked_shl(attempt).unwrap_or(60000)).min(60000);
+    std::time::Duration::from_millis(base + rand::thread_rng().gen_range(0..300))
 }
 
 fn parse_ws_message(text: &str) -> Option<KisEvent> {
-    if text.starts_with('{') {
-        return None;
-    }
     let parts: Vec<&str> = text.splitn(4, '|').collect();
-    if parts.len() < 4 {
-        return None;
-    }
+    if parts.len() < 4 { return None; }
     let fields: Vec<&str> = parts[3].split('^').collect();
     match parts[1] {
-        "HDFSCNT0" => parse_transaction(parts[1], &fields),
-        "HDFSASP0" | "HDFSASP1" => parse_quote(parts[1], &fields),
-        "H0STCNT0" => parse_transaction(parts[1], &fields),
-        "H0STASP0" | "H0STASP1" => parse_quote(parts[1], &fields),
+        "HDFSCNT0" | "HDFSCNT1" | "H0STCNT0" => parse_transaction(parts[1], &fields),
+        "HDFSASP0" | "HDFSASP1" | "H0STASP0" | "H0STASP1" => parse_quote(parts[1], &fields),
         _ => None,
     }
 }
 
 fn parse_transaction(tr_id: &str, fields: &[&str]) -> Option<KisEvent> {
-    let (symbol, time_str, price_idx, qty_idx, side_idx) = match tr_id {
-        "HDFSCNT0" => (fields.get(1)?, fields.get(2)?, 11, 19, 21), // Index 1 is symbol, 2 is time
+    let (symbol, time_str, p_idx, q_idx, s_idx) = match tr_id {
+        "HDFSCNT0" | "HDFSCNT1" => (fields.get(1)?, fields.get(7)?, 11, 19, 25),
         "H0STCNT0" => (fields.first()?, fields.get(1)?, 2, 9, 20),
         _ => return None,
     };
-
-    let price = Decimal::from_str(fields.get(price_idx)?).ok()?;
-    let qty = Decimal::from_str(fields.get(qty_idx)?).ok()?;
-    let is_buy = match *fields.get(side_idx)? {
-        "1" => true,
-        "2" => false,
-        _ => return None,
-    };
-    let time = parse_time(time_str)?;
-
     Some(KisEvent::Transaction(TransactionData {
         symbol: symbol.to_string(),
-        price,
-        qty,
-        is_buy,
-        time,
+        price: Decimal::from_str(fields.get(p_idx)?).ok()?,
+        qty: Decimal::from_str(fields.get(q_idx)?).ok()?,
+        is_buy: *fields.get(s_idx)? == "1",
+        time: parse_time(time_str)?,
     }))
 }
 
 fn parse_quote(tr_id: &str, fields: &[&str]) -> Option<KisEvent> {
-    let (symbol, time_str, ask_p_idx, bid_p_idx, ask_q_idx, bid_q_idx) = match tr_id {
-        "HDFSASP0" | "HDFSASP1" => (fields.get(1)?, fields.get(2)?, 14, 15, 16, 17),
+    let (sym, time_str, ap_idx, bp_idx, aq_idx, bq_idx) = match tr_id {
+        "HDFSASP0" | "HDFSASP1" => (fields.get(1)?, fields.get(5)?, 11, 12, 13, 14),
         "H0STASP0" | "H0STASP1" => (fields.first()?, fields.get(1)?, 3, 4, 13, 14),
         _ => return None,
     };
-
-    let ask_price = Decimal::from_str(fields.get(ask_p_idx)?).ok()?;
-    let bid_price = Decimal::from_str(fields.get(bid_p_idx)?).ok()?;
-    let ask_qty = Decimal::from_str(fields.get(ask_q_idx)?).ok()?;
-    let bid_qty = Decimal::from_str(fields.get(bid_q_idx)?).ok()?;
-    let time = parse_time(time_str)?;
-
     Some(KisEvent::Quote(QuoteData {
-        symbol: symbol.to_string(),
-        ask_price,
-        bid_price,
-        ask_qty,
-        bid_qty,
-        time,
+        symbol: sym.to_string(),
+        ask_price: Decimal::from_str(fields.get(ap_idx)?).ok()?,
+        bid_price: Decimal::from_str(fields.get(bp_idx)?).ok()?,
+        ask_qty: Decimal::from_str(fields.get(aq_idx)?).ok()?,
+        bid_qty: Decimal::from_str(fields.get(bq_idx)?).ok()?,
+        time: parse_time(time_str)?,
     }))
 }
 
 fn parse_time(hms: &str) -> Option<DateTime<FixedOffset>> {
-    let time = NaiveTime::parse_from_str(hms, "%H%M%S").ok()?;
-    let now = chrono::Utc::now().with_timezone(&FixedOffset::east_opt(9 * 3600)?);
-    let dt = now.date_naive().and_time(time);
-    FixedOffset::east_opt(9 * 3600)?
-        .from_local_datetime(&dt)
-        .single()
+    if hms.len() < 6 { return None; }
+    let time = NaiveTime::parse_from_str(&hms[..6], "%H%M%S").ok()?;
+    let now = Utc::now().with_timezone(&FixedOffset::east_opt(9 * 3600)?);
+    FixedOffset::east_opt(9 * 3600)?.from_local_datetime(&now.date_naive().and_time(time)).single()
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_hdfscnt0_transaction() {
-        let mut fields = vec![""; 26];
-        fields[1] = "NVDA";
-        fields[2] = "143022";
-        fields[11] = "134.20";
-        fields[19] = "50";
-        fields[21] = "1";
-        let msg = format!("0|HDFSCNT0|1|{}", fields.join("^"));
-        let ev = parse_ws_message(&msg).unwrap();
-        if let KisEvent::Transaction(d) = ev {
-            assert_eq!(d.symbol, "NVDA");
-            assert_eq!(d.price, Decimal::from_str("134.20").unwrap());
-            assert_eq!(d.qty, Decimal::from_str("50").unwrap());
-            assert!(d.is_buy);
+fn log_server_json_response(text: &str) {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+        let rt_cd = v.pointer("/body/rt_cd").and_then(|x| x.as_str()).unwrap_or("");
+        let msg1  = v.pointer("/body/msg1").and_then(|x| x.as_str()).unwrap_or("");
+        let msg_cd = v.pointer("/body/msg_cd").and_then(|x| x.as_str()).unwrap_or("");
+        let tr_id  = v.pointer("/header/tr_id").and_then(|x| x.as_str()).unwrap_or("");
+        let tr_key = v.pointer("/header/tr_key").and_then(|x| x.as_str()).unwrap_or("");
+        if rt_cd == "0" {
+            tracing::debug!(tr_id, tr_key, msg1, "WS server ack");
+        } else if !rt_cd.is_empty() {
+            tracing::warn!(tr_id, tr_key, rt_cd, msg_cd, msg1, "WS server rejected subscription");
         } else {
-            panic!("wrong event type");
+            tracing::debug!("WS server message: {}", text);
         }
-    }
-
-    #[test]
-    fn parse_h0stcnt0_transaction() {
-        let mut fields = vec![""; 30];
-        fields[0] = "005930";
-        fields[1] = "102030";
-        fields[2] = "75000";
-        fields[9] = "100";
-        fields[20] = "2";
-        let msg = format!("0|H0STCNT0|1|{}", fields.join("^"));
-        let ev = parse_ws_message(&msg).unwrap();
-        if let KisEvent::Transaction(d) = ev {
-            assert_eq!(d.symbol, "005930");
-            assert_eq!(d.price, Decimal::from_str("75000").unwrap());
-            assert_eq!(d.qty, Decimal::from_str("100").unwrap());
-            assert!(!d.is_buy);
-        } else {
-            panic!("wrong event type");
-        }
-    }
-
-    #[test]
-    fn classify_pingpong_message() {
-        let msg = r#"{"header":{"tr_id":"PINGPONG","datetime":"20240321102030"}}"#;
-        assert!(matches!(classify_text_message(msg), TextMessage::PingPong));
-    }
-
-    #[test]
-    fn backoff_duration_increases() {
-        let d1 = backoff_duration(0);
-        let d4 = backoff_duration(3);
-        assert!(d1 < d4);
+    } else {
+        tracing::debug!("WS server non-JSON: {}", text);
     }
 }

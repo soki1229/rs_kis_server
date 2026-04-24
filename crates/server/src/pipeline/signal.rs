@@ -421,8 +421,8 @@ pub async fn seed_symbols(
                         .bind(sym).bind(symbol_name.clone()).bind(date_str).bind(b.open.to_string()).bind(b.high.to_string()).bind(b.low.to_string()).bind(b.close.to_string()).bind(b.volume.to_string()).execute(pool).await;
                 }
 
-                // If bars were found, we are good. If not, try to fetch name via current_price to update DB
-                if bar_count == 0 {
+                // If name is still missing, try to fetch it via current_price to update DB
+                if symbol_name.is_none() {
                     let _ = adapter.current_price(sym).await;
                 }
 

@@ -721,19 +721,50 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .quotations()
         .domestic_stock_v1_quotations_volume_rank(DomesticStockV1QuotationsVolumeRankRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
-            fid_vol_cnt: count.to_string(),
+            fid_cond_scr_div_code: "20171".to_string(),
+            fid_input_iscd: "0000".to_string(),
+            fid_div_cls_code: "0".to_string(),
+            fid_blng_cls_code: "0".to_string(),
+            fid_trgt_cls_code: "0".to_string(),
+            fid_trgt_exls_cls_code: "0".to_string(),
+            fid_input_price_1: "".to_string(),
+            fid_input_price_2: "".to_string(),
+            fid_vol_cnt: "".to_string(),
             ..Default::default()
         })
         .await
-        .map_err(BotError::from)
-        .or_else(|e| e.handle_vts_error("kr_volume_ranking"))?;
+        .map_err(BotError::from)?;
 
-    Ok(resp["output"]
-        .as_array()
+    // Try all possible output paths in Real API
+    let items = if resp["output"].is_array() {
+        resp["output"].as_array()
+    } else if resp["output1"].is_array() {
+        resp["output1"].as_array()
+    } else if resp["output2"].is_array() {
+        resp["output2"].as_array()
+    } else {
+        None
+    };
+
+    Ok(items
         .cloned()
         .unwrap_or_default()
         .iter()
-        .filter_map(|i| i["mksc_shrn_iscd"].as_str().map(|s| s.to_string()))
+        .take(count as usize)
+        .filter_map(|i| {
+            // Try every possible symbol field used by KIS across different versions
+            let s = i["stck_shrn_iscd"]
+                .as_str()
+                .or_else(|| i["mksc_shrn_iscd"].as_str())
+                .or_else(|| i["symb"].as_str())
+                .or_else(|| i["item_code"].as_str())?
+                .trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
         .collect())
 }
 
