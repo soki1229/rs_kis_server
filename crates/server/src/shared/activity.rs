@@ -133,7 +133,7 @@ impl ActivityLog {
             }
             _ => {}
         }
-        tracing::info!(target: "kis_server::activity", "Tick recorded for market: {}", market);
+        tracing::debug!(target: "kis_server::activity", "Tick recorded for market: {}", market);
     }
 
     #[allow(dead_code)]

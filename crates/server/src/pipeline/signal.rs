@@ -430,7 +430,11 @@ pub async fn seed_symbols(
                     let _ = adapter.current_price(sym).await;
                 }
 
-                tracing::info!(symbol = %sym, name = ?symbol_name, bars = bar_count, "History seeded successfully");
+                let sym_label = match &symbol_name {
+                    Some(n) if !n.is_empty() => format!("{n}({sym})"),
+                    _ => sym.clone(),
+                };
+                tracing::info!("히스토리 로드: {sym_label} ({bar_count}봉)");
                 exch_map.insert(sym.clone(), exch);
             }
             Err(_) => {

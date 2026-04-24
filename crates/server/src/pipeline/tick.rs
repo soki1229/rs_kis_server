@@ -63,7 +63,7 @@ pub async fn run_tick_task(
                     Ok(KisEvent::Transaction(tx)) if current_syms.contains(&tx.symbol) => {
                         tick_count += 1;
                         activity.record_tick(label);
-                        if tick_count == 1 { tracing::info!(symbol = %tx.symbol, price = %tx.price, "{label} TickTask: first tick received"); }
+                        if tick_count == 1 { tracing::info!("[{label}] 첫 체결 수신: {} @ {}", tx.symbol, tx.price); }
                         forward_tick(tx.into(), &tick_tx, &tick_pos_tx).await;
                     }
                     Ok(KisEvent::Quote(q)) if current_syms.contains(&q.symbol) => {
@@ -87,9 +87,9 @@ pub async fn run_tick_task(
             }
             _ = log_interval.tick() => {
                 if tick_count > 0 {
-                    tracing::info!("{label} TickTask: {tick_count} ticks received so far");
+                    tracing::info!("[{label}] 체결 수신: {}건 (누적)", tick_count);
                 } else if !current_syms.is_empty() {
-                    tracing::warn!("{label} TickTask: no ticks received yet (subscribed to {} symbols)", current_syms.len());
+                    tracing::warn!("[{label}] 체결 수신 없음 (구독 {}종목)", current_syms.len());
                 }
             }
             _ = watchlist_rx.changed() => {
@@ -162,7 +162,7 @@ async fn subscribe_symbols(
         match (price_ok, ob_ok) {
             (Ok(()), Ok(())) => {
                 ok += 1;
-                tracing::info!("{label} WS: SUBSCRIBE SUCCESS [{display_name}] (key: {ws_key})");
+                tracing::info!("[{label}] ✅ 구독: {display_name}");
             }
             (Err(e), _) => {
                 let msg =
@@ -199,7 +199,7 @@ async fn unsubscribe_symbol(
     if stream.unsubscribe(&ws_key, p_kind).await.is_ok()
         && stream.unsubscribe(&ws_key, ob_kind).await.is_ok()
     {
-        tracing::info!("{label} WS: UNSUBSCRIBE SUCCESS [{symbol}] (key: {ws_key})");
+        tracing::info!("[{label}] 🔕 구독 해제: {symbol}");
     }
 }
 

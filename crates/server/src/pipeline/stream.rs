@@ -174,10 +174,10 @@ async fn run_connection_loop(inner: Arc<StreamInner>, mut cmd_rx: mpsc::Receiver
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
 
-        tracing::info!("WS connecting to {}...", inner.ws_url);
+        tracing::info!("WS 접속 중...");
         match connect_async(&inner.ws_url).await {
             Ok((mut ws_stream, _)) => {
-                tracing::info!("WS connected successfully.");
+                tracing::info!("WS 접속 완료 ✓");
                 attempt = 0;
 
                 // Resubscribe existing (rate-limited, errors logged but continue)
@@ -201,10 +201,10 @@ async fn run_connection_loop(inner: Arc<StreamInner>, mut cmd_rx: mpsc::Receiver
                 }
 
                 if let Err(e) = handle_stream(&inner, &mut ws_stream, &mut cmd_rx).await {
-                    tracing::warn!("WS stream error: {e}");
+                    tracing::warn!("WS 연결 끊김: {e} — 재접속 시도");
                 }
             }
-            Err(e) => tracing::error!("WS connection failed: {e}"),
+            Err(e) => tracing::error!("WS 접속 실패: {e}"),
         }
 
         if inner.cancel.is_cancelled() {

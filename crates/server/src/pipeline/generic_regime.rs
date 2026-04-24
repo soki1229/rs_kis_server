@@ -78,14 +78,8 @@ pub async fn run_generic_regime_task(
                     if let Some(input) = build_regime_input(&bars) {
                         let regime = regime_strategy.classify(&input);
                         tracing::info!(
-                            market = %market_name,
-                            task = "regime",
-                            ?regime,
-                            ma5 = input.ma5,
-                            ma20 = input.ma20,
-                            daily_change_pct = input.daily_change_pct,
-                            volume_ratio = input.volume_ratio,
-                            "regime classified"
+                            "[{market_name}] 레짐: {regime:?} | MA5={:.1} MA20={:.1} 일변동={:+.2}% 거래량비={:.2}",
+                            input.ma5, input.ma20, input.daily_change_pct, input.volume_ratio
                         );
                         let _ = regime_tx.send(regime);
                     } else {

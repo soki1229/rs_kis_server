@@ -58,7 +58,8 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         );
         match nc.bootstrap().await {
             Ok(ids) => {
-                tracing::info!("Notion workspace bootstrapped: {:?}", ids);
+                let _ = ids;
+                tracing::info!("Notion workspace bootstrapped");
                 Some(Arc::new(tokio::sync::RwLock::new(nc)))
             }
             Err(e) => {
@@ -163,16 +164,12 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         .approval_key()
         .await
         .expect("WebSocket approval_key 강제 발급 실패");
-    
+
     tracing::info!("WebSocket approval_key 발급 완료 (Fresh)");
 
-    let shared_stream = pipeline::stream::StreamManager::connect(
-        ws_url,
-        ws_approval_key,
-        ws_client.clone(),
-        4096,
-    )
-    .await?;
+    let shared_stream =
+        pipeline::stream::StreamManager::connect(ws_url, ws_approval_key, ws_client.clone(), 4096)
+            .await?;
     tracing::info!("WebSocket stream 연결 완료");
 
     // Construct final adapters with ReadOnly protection if needed
