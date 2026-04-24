@@ -340,7 +340,11 @@ pub async fn run_signal_task(
                     if state.cached_balance.map(|(_, t)| t.elapsed().as_secs() >= BALANCE_CACHE_TTL_SECS).unwrap_or(true) {
                         match adapter.balance().await {
                             Ok(resp) => { state.cached_balance = Some((resp.available_cash, Instant::now())); }
-                            Err(e) => { tracing::error!(market = %market_id, "SignalTask: balance() failed: {e}"); }
+                            Err(e) => {
+                                tracing::warn!(market = %market_id, "SignalTask: balance() failed (using 0, retry in {BALANCE_CACHE_TTL_SECS}s): {e}");
+                                // Store sentinel so we don't hammer the API on every candle
+                                state.cached_balance = Some((Decimal::ZERO, Instant::now()));
+                            }
                         }
                     }
                     let account_balance = state.cached_balance.map(|(v, _)| v).unwrap_or(Decimal::ZERO);
