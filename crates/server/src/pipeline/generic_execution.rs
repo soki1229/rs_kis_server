@@ -132,7 +132,7 @@ async fn process_order(
 
     // 1. Record in DB
     if let Err(e) = sqlx::query("INSERT INTO orders (id, symbol, side, qty, price, atr, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(&order_id).bind(&req.symbol).bind(format!("{:?}", req.side)).bind(req.qty as i64).bind(req.price.map(|p| p.to_string())).bind(req.atr.map(|v| v.to_string())).bind("Created").bind(&now)
+        .bind(&order_id).bind(&req.symbol).bind(req.side.to_string()).bind(req.qty as i64).bind(req.price.map(|p| p.to_string())).bind(req.atr.map(|v| v.to_string())).bind("Created").bind(&now)
         .execute(db_pool).await {
         alert.warn(format!("DB error recording order {}: {}", req.symbol, e));
         return;
