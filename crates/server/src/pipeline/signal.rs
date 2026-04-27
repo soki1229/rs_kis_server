@@ -229,7 +229,11 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     {
         let live = live_state_rx.borrow();
         if live.positions.iter().any(|p| p.symbol == symbol) {
-            tracing::debug!("[{}] {} 이미 보유 중 → 중복 매수 skip", market.label(), symbol);
+            tracing::debug!(
+                "[{}] {} 이미 보유 중 → 중복 매수 skip",
+                market.label(),
+                symbol
+            );
             activity.record_eval(market.label(), &symbol, score, "skip", "already_held");
             return;
         }
