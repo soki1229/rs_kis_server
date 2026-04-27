@@ -384,23 +384,27 @@ async fn us_place_order(
         .price
         .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
 
-    let resp = base
-        .client
-        .overseas()
-        .trading()
-        .overseas_stock_v1_trading_order(OverseasStockV1TradingOrderRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ovrs_excg_cd: exchange,
-            pdno: req.symbol.clone(),
-            ord_qty: req.qty.to_string(),
-            ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("overseas order: {}", e),
-        })?;
+    let order_req = OverseasStockV1TradingOrderRequest {
+        cano: base.cano.clone(),
+        acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+        ovrs_excg_cd: exchange,
+        pdno: req.symbol.clone(),
+        ord_qty: req.qty.to_string(),
+        ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
+        ..Default::default()
+    };
+    let trading = base.client.overseas().trading();
+    let resp = match req.side {
+        UnifiedSide::Buy => trading.overseas_stock_v1_trading_order_buy(order_req).await,
+        UnifiedSide::Sell => {
+            trading
+                .overseas_stock_v1_trading_order_sell(order_req)
+                .await
+        }
+    }
+    .map_err(|e| BotError::ApiError {
+        msg: format!("overseas order: {}", e),
+    })?;
 
     let order_no = resp["output"]["odno"].as_str().unwrap_or("").to_string();
 

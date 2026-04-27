@@ -390,23 +390,31 @@ async fn kr_place_order(
         .price
         .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
 
-    let resp = base
-        .client
-        .stock()
-        .trading()
-        .domestic_stock_v1_trading_order_cash(DomesticStockV1TradingOrderCashRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            pdno: req.symbol.clone(),
-            ord_dvsn: "00".to_string(), // 지정가
-            ord_qty: req.qty.to_string(),
-            ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("order_cash: {}", e),
-        })?;
+    let order_req = DomesticStockV1TradingOrderCashRequest {
+        cano: base.cano.clone(),
+        acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+        pdno: req.symbol.clone(),
+        ord_dvsn: "00".to_string(), // 지정가
+        ord_qty: req.qty.to_string(),
+        ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
+        ..Default::default()
+    };
+    let trading = base.client.stock().trading();
+    let resp = match req.side {
+        UnifiedSide::Buy => {
+            trading
+                .domestic_stock_v1_trading_order_cash_buy(order_req)
+                .await
+        }
+        UnifiedSide::Sell => {
+            trading
+                .domestic_stock_v1_trading_order_cash_sell(order_req)
+                .await
+        }
+    }
+    .map_err(|e| BotError::ApiError {
+        msg: format!("order_cash: {}", e),
+    })?;
 
     let order_no = resp["output"]["ODNO"].as_str().unwrap_or("").to_string();
 
@@ -496,7 +504,7 @@ async fn kr_order_history(
         .client
         .stock()
         .trading()
-        .domestic_stock_v1_trading_inquire_daily_ccld(
+        .domestic_stock_v1_trading_inquire_daily_ccld_recent(
             DomesticStockV1TradingInquireDailyCcldRequest {
                 cano: base.cano.clone(),
                 acnt_prdt_cd: base.acnt_prdt_cd.clone(),
