@@ -2,7 +2,7 @@ use crate::config::{Secrets, ServerConfig};
 use crate::market::{MarketAdapter, ReadOnlyAdapter};
 use crate::pipeline;
 use crate::shared;
-use crate::state::PipelineConfig;
+use crate::state::{BotState, PipelineConfig};
 use crate::strategy::StrategyBundle;
 use crate::types::Market;
 
@@ -192,6 +192,12 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     // ── Pipeline State & Channels ──────────────────────────────────────────
     let (kr_live_tx, kr_state) = PipelineConfig::new(activity.clone()).build();
     let (us_live_tx, us_state) = PipelineConfig::new(activity.clone()).build();
+
+    if execution_enabled {
+        kr_state.summary.write().unwrap().bot_state = BotState::Active;
+        us_state.summary.write().unwrap().bot_state = BotState::Active;
+        tracing::info!("execution_enabled=1 → BotState 초기값 Active 설정");
+    }
 
     let mut kr_pipeline = pipeline::MarketPipeline::new(cfg.kr.db_path.clone());
     let mut us_pipeline = pipeline::MarketPipeline::new(cfg.us.db_path.clone());
