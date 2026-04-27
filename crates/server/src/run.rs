@@ -306,7 +306,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             regime_tx,
             kr_alert_router.clone(),
             t,
-            "QQQ",
+            "069500", // KODEX 200 (KOSPI200 ETF) — KR 시장 벤치마크
         )));
 
         let t = token.clone();
