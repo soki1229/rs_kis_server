@@ -595,8 +595,10 @@ async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
         })
         .collect();
 
-    let cash = resp["output2"][0]["dncl_amt"]
+    // VTS: dnca_tot_amt / real: dncl_amt
+    let cash = resp["output2"][0]["dnca_tot_amt"]
         .as_str()
+        .or_else(|| resp["output2"][0]["dncl_amt"].as_str())
         .unwrap_or("0")
         .parse()
         .unwrap_or(Decimal::ZERO);
