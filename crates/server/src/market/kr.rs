@@ -338,43 +338,22 @@ async fn kr_daily_chart(
             msg: format!("kr daily_chart: {}", e),
         })?;
 
-    let symbol_name = resp["output1"]["hts_kor_isnm"]
-        .as_str()
-        .map(|s| s.to_string());
+    let symbol_name = resp.output1.first().map(|o| o.hts_kor_isnm.clone());
 
-    Ok(resp["output2"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output2
         .iter()
         .filter_map(|b| {
-            let date_str = b["stck_bsop_date"].as_str()?;
-            chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d")
+            chrono::NaiveDate::parse_from_str(&b.stck_bsop_date, "%Y%m%d")
                 .ok()
                 .map(|date| UnifiedDailyBar {
                     symbol_name: symbol_name.clone(),
                     date,
-                    open: b["stck_oprc"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    high: b["stck_hgpr"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    low: b["stck_lwpr"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    close: b["stck_clpr"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    volume: b["acml_vol"].as_str().unwrap_or("0").parse().unwrap_or(0),
+                    open: b.stck_oprc.parse().unwrap_or(Decimal::ZERO),
+                    high: b.stck_hgpr.parse().unwrap_or(Decimal::ZERO),
+                    low: b.stck_lwpr.parse().unwrap_or(Decimal::ZERO),
+                    close: b.stck_clpr.parse().unwrap_or(Decimal::ZERO),
+                    volume: b.acml_vol.to_string().parse().unwrap_or(0),
                 })
         })
         .collect())
@@ -416,7 +395,7 @@ async fn kr_place_order(
         msg: format!("order_cash: {}", e),
     })?;
 
-    let order_no = resp["output"]["ODNO"].as_str().unwrap_or("").to_string();
+    let order_no = resp.output.as_ref().map(|o| o.odno.clone()).unwrap_or_default();
 
     Ok(UnifiedOrderResult {
         internal_id: uuid::Uuid::new_v4().to_string(),
@@ -470,25 +449,19 @@ async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOr
             msg: format!("inquire_psbl_rvsecncl: {}", e),
         })?;
 
-    Ok(resp["output"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output
         .iter()
         .map(|o| UnifiedUnfilledOrder {
-            order_no: o["odno"].as_str().unwrap_or("").to_string(),
-            symbol: o["pdno"].as_str().unwrap_or("").to_string(),
-            side: match o["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
+            order_no: o.odno.clone(),
+            symbol: o.pdno.clone(),
+            side: match o.sll_buy_dvsn_cd.as_str() {
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: o["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            remaining_qty: o["psbl_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            price: o["ord_unpr"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
+            qty: o.ord_qty.to_string().parse().unwrap_or(0),
+            remaining_qty: o.psbl_qty.to_string().parse().unwrap_or(0),
+            price: o.ord_unpr,
             exchange_code: None,
         })
         .collect())
@@ -518,35 +491,21 @@ async fn kr_order_history(
             msg: format!("inquire_daily_ccld: {}", e),
         })?;
 
-    Ok(resp["output1"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output1
         .iter()
         .map(|h| UnifiedOrderHistoryItem {
-            order_no: h["odno"].as_str().unwrap_or("").to_string(),
-            symbol: h["pdno"].as_str().unwrap_or("").to_string(),
-            side: match h["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
+            order_no: h.odno.clone(),
+            symbol: h.pdno.clone(),
+            side: match h.sll_buy_dvsn_cd.as_str() {
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: h["ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            filled_qty: h["tot_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
-            filled_price: h["avg_prvs"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            price: h["ord_unpr"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            status: h["cncl_yn"].as_str().unwrap_or("").to_string(),
+            qty: h.ord_qty.to_string().parse().unwrap_or(0),
+            filled_qty: h.tot_ccld_qty.to_string().parse().unwrap_or(0),
+            filled_price: h.avg_prvs.parse().unwrap_or(Decimal::ZERO),
+            price: h.ord_unpr,
+            status: h.cncl_yn.clone(),
         })
         .collect())
 }
@@ -567,48 +526,24 @@ async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
             msg: format!("kr balance: {}", e),
         })?;
 
-    let positions = resp["output1"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let positions = resp
+        .output1
         .iter()
         .map(|item| UnifiedPosition {
-            symbol: item["pdno"].as_str().unwrap_or("").to_string(),
-            name: Some(item["prdt_name"].as_str().unwrap_or("").to_string()),
-            qty: item["hldg_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            avg_price: item["pchs_avg_pric"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            current_price: item["prpr"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            unrealized_pnl: item["evlu_pfls_amt"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            pnl_pct: item["evlu_pfls_rt"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0.0),
+            symbol: item.pdno.clone(),
+            name: Some(item.prdt_name.clone()),
+            qty: item.hldg_qty,
+            avg_price: item.pchs_avg_pric,
+            current_price: item.prpr,
+            unrealized_pnl: item.evlu_pfls_amt,
+            pnl_pct: item.evlu_pfls_rt.to_string().parse().unwrap_or(0.0),
         })
         .collect();
 
-    // VTS: dnca_tot_amt / real: dncl_amt
-    let cash = resp["output2"][0]["dnca_tot_amt"]
-        .as_str()
-        .or_else(|| resp["output2"][0]["dncl_amt"].as_str())
-        .unwrap_or("0")
-        .parse()
+    let cash = resp
+        .output2
+        .first()
+        .map(|o| o.dnca_tot_amt)
         .unwrap_or(Decimal::ZERO);
 
     Ok(UnifiedBalance {
@@ -652,15 +587,16 @@ async fn kr_intraday_candles(
         .format("%Y%m%d")
         .to_string();
 
-    Ok(resp["output2"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output2
         .iter()
         .filter_map(|b| {
-            let time_str = b["stck_cntg_hour"].as_str()?;
-            let date_str = b["stck_bsop_date"].as_str().unwrap_or(&today);
-            let dt_str = format!("{} {}", date_str, time_str);
+            let date_str = if b.stck_bsop_date.is_empty() {
+                today.as_str()
+            } else {
+                b.stck_bsop_date.as_str()
+            };
+            let dt_str = format!("{} {}", date_str, b.stck_cntg_hour);
 
             chrono::NaiveDateTime::parse_from_str(&dt_str, "%Y%m%d %H%M%S")
                 .ok()
@@ -671,27 +607,11 @@ async fn kr_intraday_candles(
                         .with_timezone(&Utc);
                     UnifiedCandleBar {
                         timestamp: dt,
-                        open: b["stck_oprc"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        high: b["stck_hgpr"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        low: b["stck_lwpr"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        close: b["stck_prpr"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        volume: b["cntg_vol"].as_str().unwrap_or("0").parse().unwrap_or(0),
+                        open: b.stck_oprc.parse().unwrap_or(Decimal::ZERO),
+                        high: b.stck_hgpr.parse().unwrap_or(Decimal::ZERO),
+                        low: b.stck_lwpr.parse().unwrap_or(Decimal::ZERO),
+                        close: b.stck_prpr.parse().unwrap_or(Decimal::ZERO),
+                        volume: b.cntg_vol.to_string().parse().unwrap_or(0),
                     }
                 })
         })
@@ -714,13 +634,10 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
             msg: format!("kr current_price: {}", e),
         })?;
 
-    resp["output"]["stck_prpr"]
-        .as_str()
-        .unwrap_or("0")
-        .parse()
-        .map_err(|e| BotError::ApiError {
-            msg: format!("parse stck_prpr: {}", e),
-        })
+    resp.output
+        .as_ref()
+        .map(|o| o.stck_prpr.parse().map_err(|e| BotError::ApiError { msg: format!("parse stck_prpr: {}", e) }))
+        .unwrap_or(Ok(Decimal::ZERO))
 }
 
 async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String>, BotError> {
@@ -745,35 +662,13 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .await
         .map_err(BotError::from)?;
 
-    // Try all possible output paths in Real API
-    let items = if resp["output"].is_array() {
-        resp["output"].as_array()
-    } else if resp["output1"].is_array() {
-        resp["output1"].as_array()
-    } else if resp["output2"].is_array() {
-        resp["output2"].as_array()
-    } else {
-        None
-    };
-
-    Ok(items
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output
         .iter()
         .take(count as usize)
         .filter_map(|i| {
-            // Try every possible symbol field used by KIS across different versions
-            let s = i["stck_shrn_iscd"]
-                .as_str()
-                .or_else(|| i["mksc_shrn_iscd"].as_str())
-                .or_else(|| i["symb"].as_str())
-                .or_else(|| i["item_code"].as_str())?
-                .trim();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
-            }
+            let s = i.mksc_shrn_iscd.trim();
+            if s.is_empty() { None } else { Some(s.to_string()) }
         })
         .collect())
 }
@@ -797,12 +692,7 @@ async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
         .await
         .map_err(BotError::from)?;
 
-    Ok(resp["output"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .any(|h| h["bzdy_yn"].as_str().unwrap_or("Y") == "N"))
+    Ok(resp.output.iter().any(|h| h.bzdy_yn == "N"))
 }
 
 fn kr_market_timing() -> MarketTiming {

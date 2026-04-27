@@ -406,7 +406,7 @@ async fn us_place_order(
         msg: format!("overseas order: {}", e),
     })?;
 
-    let order_no = resp["output"]["ODNO"].as_str().unwrap_or("").to_string();
+    let order_no = resp.output.as_ref().map(|o| o.odno.clone()).unwrap_or_default();
 
     Ok(UnifiedOrderResult {
         internal_id: uuid::Uuid::new_v4().to_string(),
@@ -463,26 +463,20 @@ async fn us_unfilled_orders(base: &UsMarketBase) -> Result<Vec<UnifiedUnfilledOr
             msg: format!("inquire_nccs: {}", e),
         })?;
 
-    Ok(resp["output"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output
         .iter()
         .map(|o| UnifiedUnfilledOrder {
-            order_no: o["odno"].as_str().unwrap_or("").to_string(),
-            symbol: o["pdno"].as_str().unwrap_or("").to_string(),
-            side: match o["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
+            order_no: o.odno.clone(),
+            symbol: o.pdno.clone(),
+            side: match o.sll_buy_dvsn_cd.as_str() {
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: o["ft_ord_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            remaining_qty: o["nccs_qty"].as_str().unwrap_or("0").parse().unwrap_or(0),
-            price: o["ft_ord_unpr3"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            exchange_code: Some(o["ovrs_excg_cd"].as_str().unwrap_or("NASD").to_string()),
+            qty: o.ft_ord_qty.to_string().parse().unwrap_or(0),
+            remaining_qty: o.nccs_qty.to_string().parse().unwrap_or(0),
+            price: o.ft_ord_unpr3,
+            exchange_code: Some(o.ovrs_excg_cd.clone()),
         })
         .collect())
 }
@@ -507,39 +501,21 @@ async fn us_order_history(
             msg: format!("inquire_ccnl: {}", e),
         })?;
 
-    Ok(resp["output1"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output
         .iter()
         .map(|h| UnifiedOrderHistoryItem {
-            order_no: h["odno"].as_str().unwrap_or("").to_string(),
-            symbol: h["pdno"].as_str().unwrap_or("").to_string(),
-            side: match h["sll_buy_dvsn_cd"].as_str().unwrap_or("") {
+            order_no: h.odno.clone(),
+            symbol: h.pdno.clone(),
+            side: match h.sll_buy_dvsn_cd.as_str() {
                 "02" => UnifiedSide::Buy,
                 _ => UnifiedSide::Sell,
             },
-            qty: h["ft_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
-            filled_qty: h["ft_ccld_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0),
-            filled_price: h["ft_ccld_unpr3"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            price: h["ft_ord_unpr3"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            status: h["cncl_yn"].as_str().unwrap_or("").to_string(),
+            qty: h.ft_ccld_qty.to_string().parse().unwrap_or(0),
+            filled_qty: h.ft_ccld_qty.to_string().parse().unwrap_or(0),
+            filled_price: h.ft_ccld_unpr3,
+            price: h.ft_ord_unpr3,
+            status: h.rvse_cncl_dvsn.clone(),
         })
         .collect())
 }
@@ -561,39 +537,17 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
             msg: format!("overseas balance: {}", e),
         })?;
 
-    let positions = resp["output1"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let positions = resp
+        .output1
         .iter()
         .map(|item| UnifiedPosition {
-            symbol: item["ovrs_pdno"].as_str().unwrap_or("").to_string(),
-            name: Some(item["ovrs_item_name"].as_str().unwrap_or("").to_string()),
-            qty: item["ovrs_cblc_qty"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            avg_price: item["pchs_avg_pric"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            current_price: item["now_pric2"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            unrealized_pnl: item["frcr_evlu_pfls_amt"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(Decimal::ZERO),
-            pnl_pct: item["evlu_pfls_rt"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0.0),
+            symbol: item.ovrs_pdno.clone(),
+            name: Some(item.ovrs_item_name.clone()),
+            qty: item.ovrs_cblc_qty,
+            avg_price: item.pchs_avg_pric,
+            current_price: item.now_pric2.parse().unwrap_or(Decimal::ZERO),
+            unrealized_pnl: item.frcr_evlu_pfls_amt,
+            pnl_pct: item.evlu_pfls_rt.to_string().parse().unwrap_or(0.0),
         })
         .collect();
 
@@ -619,11 +573,9 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         })?;
 
     let cash = pres_resp
-        .get("output2")
-        .and_then(|o| o.get(0))
-        .and_then(|o| o["frcr_dncl_amt_2"].as_str())
-        .unwrap_or("0")
-        .parse()
+        .output2
+        .first()
+        .map(|o| o.frcr_dncl_amt_2.parse::<Decimal>().unwrap_or(Decimal::ZERO))
         .unwrap_or(Decimal::ZERO);
 
     Ok(UnifiedBalance {
@@ -670,54 +622,23 @@ async fn us_daily_chart(
             msg: format!("us daily_chart: {}", e),
         })?;
 
-    let symbol_name = match resp["output1"]["ovrs_entp_kor_nm"]
-        .as_str()
-        .or_else(|| resp["output1"]["hts_kor_isnm"].as_str())
-        .or_else(|| resp["output1"]["name"].as_str())
-    {
-        Some(name) => Some(name.to_string()),
-        None => {
-            // Check first item in output2 array properly
-            resp["output2"]
-                .as_array()
-                .and_then(|a| a.first())
-                .and_then(|first| first["name"].as_str())
-                .map(|s| s.to_string())
-        }
-    };
+    // output1 has only rsym/zdiv/nrec; no company name in dailyprice API
+    let symbol_name: Option<String> = None;
 
-    Ok(resp["output2"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output2
         .iter()
         .filter_map(|b| {
-            chrono::NaiveDate::parse_from_str(b["xymd"].as_str()?, "%Y%m%d")
+            chrono::NaiveDate::parse_from_str(&b.xymd, "%Y%m%d")
                 .ok()
                 .map(|date| UnifiedDailyBar {
                     symbol_name: symbol_name.clone(),
                     date,
-                    open: b["open"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    high: b["high"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    low: b["low"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    close: b["clos"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(Decimal::ZERO),
-                    volume: b["tvol"].as_str().unwrap_or("0").parse().unwrap_or(0),
+                    open: b.open.parse().unwrap_or(Decimal::ZERO),
+                    high: b.high.parse().unwrap_or(Decimal::ZERO),
+                    low: b.low.parse().unwrap_or(Decimal::ZERO),
+                    close: b.clos.parse().unwrap_or(Decimal::ZERO),
+                    volume: b.tvol.parse().unwrap_or(0),
                 })
         })
         .collect())
@@ -737,13 +658,14 @@ async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String
         .map_err(BotError::from)
         .or_else(|e| e.handle_vts_error("us_volume_ranking"))?;
 
-    Ok(resp["output2"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output2
         .iter()
         .take(count as usize)
-        .filter_map(|i| i["symb"].as_str().map(|s| s.to_string()))
+        .filter_map(|i| {
+            let s = i.symb.trim();
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        })
         .collect())
 }
 
@@ -766,12 +688,9 @@ async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
         .await
         .map_err(BotError::from)?;
 
-    Ok(resp["output"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .any(|h| h["bzdy_yn"].as_str().unwrap_or("Y") == "N"))
+    // countries-holiday API returns settlement dates, not holiday flags; always assume open
+    let _ = resp;
+    Ok(false)
 }
 
 async fn us_intraday_candles(
@@ -796,15 +715,11 @@ async fn us_intraday_candles(
             msg: format!("us intraday_candles: {}", e),
         })?;
 
-    Ok(resp["output2"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    Ok(resp
+        .output2
         .iter()
         .filter_map(|b| {
-            let time_str = b["khms"].as_str()?; // HHMMSS
-            let date_str = b["xymd"].as_str()?; // YYYYMMDD
-            let dt_str = format!("{} {}", date_str, time_str);
+            let dt_str = format!("{} {}", b.xymd, b.khms);
 
             chrono::NaiveDateTime::parse_from_str(&dt_str, "%Y%m%d %H%M%S")
                 .ok()
@@ -815,27 +730,11 @@ async fn us_intraday_candles(
                         .with_timezone(&Utc);
                     UnifiedCandleBar {
                         timestamp: dt,
-                        open: b["open"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        high: b["high"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        low: b["low"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        close: b["clos"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .parse()
-                            .unwrap_or(Decimal::ZERO),
-                        volume: b["tvol"].as_str().unwrap_or("0").parse().unwrap_or(0),
+                        open: b.open.parse().unwrap_or(Decimal::ZERO),
+                        high: b.high.parse().unwrap_or(Decimal::ZERO),
+                        low: b.low.parse().unwrap_or(Decimal::ZERO),
+                        close: b.last.parse().unwrap_or(Decimal::ZERO),
+                        volume: b.evol.parse().unwrap_or(0),
                     }
                 })
         })
@@ -858,13 +757,10 @@ async fn us_current_price(base: &UsMarketBase, symbol: &str) -> Result<Decimal, 
             msg: format!("us current_price: {}", e),
         })?;
 
-    resp["output"]["last"]
-        .as_str()
-        .unwrap_or("0")
-        .parse()
-        .map_err(|e| BotError::ApiError {
-            msg: format!("parse last price: {}", e),
-        })
+    resp.output
+        .as_ref()
+        .map(|o| o.last.parse().map_err(|e| BotError::ApiError { msg: format!("parse last price: {}", e) }))
+        .unwrap_or(Ok(Decimal::ZERO))
 }
 
 fn us_market_timing() -> MarketTiming {
