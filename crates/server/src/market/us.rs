@@ -406,7 +406,7 @@ async fn us_place_order(
         msg: format!("overseas order: {}", e),
     })?;
 
-    let order_no = resp["output"]["odno"].as_str().unwrap_or("").to_string();
+    let order_no = resp["output"]["ODNO"].as_str().unwrap_or("").to_string();
 
     Ok(UnifiedOrderResult {
         internal_id: uuid::Uuid::new_v4().to_string(),
@@ -597,8 +597,31 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         })
         .collect();
 
-    let cash = resp["output2"][0]["frcr_dncl_amt_2"]
-        .as_str()
+    // inquire-balance/output2 has no deposit field; use inquire-present-balance for cash.
+    base.throttler.wait().await;
+    let pres_resp = base
+        .client
+        .overseas()
+        .trading()
+        .overseas_stock_v1_trading_inquire_present_balance(
+            OverseasStockV1TradingInquirePresentBalanceRequest {
+                cano: base.cano.clone(),
+                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+                wcrc_frcr_dvsn_cd: "01".to_string(),
+                natn_cd: "840".to_string(),
+                tr_mket_cd: "00".to_string(),
+                inqr_dvsn_cd: "00".to_string(),
+            },
+        )
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("overseas present-balance: {}", e),
+        })?;
+
+    let cash = pres_resp
+        .get("output2")
+        .and_then(|o| o.get(0))
+        .and_then(|o| o["frcr_dncl_amt_2"].as_str())
         .unwrap_or("0")
         .parse()
         .unwrap_or(Decimal::ZERO);
