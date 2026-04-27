@@ -802,7 +802,7 @@ async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
         .cloned()
         .unwrap_or_default()
         .iter()
-        .any(|h| h["hldy_yn"].as_str().unwrap_or("N") == "Y"))
+        .any(|h| h["bzdy_yn"].as_str().unwrap_or("Y") == "N"))
 }
 
 fn kr_market_timing() -> MarketTiming {
