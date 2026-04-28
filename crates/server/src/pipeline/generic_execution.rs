@@ -141,8 +141,8 @@ async fn process_order(
     // 2. Place Order
     match adapter.place_order(unified_req).await {
         Ok(res) => {
-            sqlx::query("UPDATE orders SET broker_order_id = ?, state = 'Submitted', updated_at = ? WHERE id = ?")
-                .bind(&res.broker_id).bind(&now).bind(&order_id).execute(db_pool).await.ok();
+            sqlx::query("UPDATE orders SET broker_order_id = ?, state = 'Submitted', submitted_at = ?, updated_at = ? WHERE id = ?")
+                .bind(&res.broker_id).bind(&now).bind(&now).bind(&order_id).execute(db_pool).await.ok();
 
             // 3. Poll for status
             let start = Duration::from_secs(1);
@@ -212,12 +212,23 @@ async fn process_order(
             }
         }
         Err(e) => {
+            let market_label = adapter.market_id().label();
             sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
                 .bind(&now)
                 .bind(&order_id)
                 .execute(db_pool)
                 .await
                 .ok();
+            sqlx::query(
+                "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('order_failed', ?, ?, ?, ?)",
+            )
+            .bind(market_label)
+            .bind(&req.symbol)
+            .bind(format!("place_order error: {e}"))
+            .bind(&now)
+            .execute(db_pool)
+            .await
+            .ok();
             alert.warn(format!("Order placement failed for {}: {}", req.symbol, e));
         }
     }
