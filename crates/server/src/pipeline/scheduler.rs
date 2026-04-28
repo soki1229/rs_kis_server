@@ -3,44 +3,11 @@ use crate::market::MarketAdapter;
 use crate::monitoring::alert::AlertRouter;
 use crate::strategy::DiscoveryStrategy;
 use crate::types::WatchlistSet;
-use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
-use chrono_tz::America::New_York;
-use chrono_tz::Asia::Seoul;
+use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub fn us_market_open_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
-    let open_time = NaiveTime::from_hms_opt(9, 30, 0)?;
-    New_York
-        .from_local_datetime(&date.and_time(open_time))
-        .earliest()
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-pub fn us_market_close_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
-    let close_time = NaiveTime::from_hms_opt(16, 0, 0)?;
-    New_York
-        .from_local_datetime(&date.and_time(close_time))
-        .earliest()
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-pub fn kr_market_open_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
-    let open_time = NaiveTime::from_hms_opt(9, 0, 0)?;
-    Seoul
-        .from_local_datetime(&date.and_time(open_time))
-        .earliest()
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-pub fn kr_market_close_utc(date: NaiveDate) -> Option<DateTime<Utc>> {
-    let close_time = NaiveTime::from_hms_opt(15, 30, 0)?;
-    Seoul
-        .from_local_datetime(&date.and_time(close_time))
-        .earliest()
-        .map(|dt| dt.with_timezone(&Utc))
-}
 pub async fn build_watchlist(
     adapter: Arc<dyn MarketAdapter>,
     strategy: &Arc<dyn DiscoveryStrategy>,
@@ -87,74 +54,12 @@ async fn sleep_until_or_cancel(target: DateTime<Utc>, token: &CancellationToken)
 
 async fn sleep_until_next_day(token: &CancellationToken) {
     let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
-    let wake_up = Utc
-        .from_local_datetime(&tomorrow.and_hms_opt(0, 0, 0).unwrap())
-        .unwrap();
+    let wake_up = chrono::TimeZone::from_local_datetime(
+        &Utc,
+        &tomorrow.and_hms_opt(0, 0, 0).unwrap(),
+    )
+    .unwrap();
     sleep_until_or_cancel(wake_up, token).await;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_kr_scheduler_task(
-    adapter: Arc<dyn MarketAdapter>,
-    discovery_strategy: Arc<dyn crate::strategy::DiscoveryStrategy>,
-    watchlist_tx: tokio::sync::watch::Sender<WatchlistSet>,
-    eod_tx: tokio::sync::mpsc::Sender<()>,
-    config: MarketConfig,
-    alert: AlertRouter,
-    summary_alert: AlertRouter,
-    activity: crate::shared::activity::ActivityLog,
-    db: SqlitePool,
-    token: CancellationToken,
-) {
-    loop {
-        let now_kst = Utc::now().with_timezone(&Seoul);
-        let today = now_kst.date_naive();
-        let open = kr_market_open_utc(today).unwrap();
-        let close = kr_market_close_utc(today).unwrap();
-        let pre_open = open - chrono::Duration::hours(1);
-        let post_close = close + chrono::Duration::hours(1);
-        let now = Utc::now();
-
-        let current_wl = watchlist_tx.borrow().clone();
-        if !current_wl.all_unique().is_empty() {
-            activity.set_watchlist("KR", &current_wl.all_unique());
-        }
-
-        let is_holiday = adapter.is_holiday().await.unwrap_or(false);
-        if is_holiday {
-            activity.set_phase("KR", "공휴일 휴장");
-            watchlist_tx.send(WatchlistSet::default()).ok();
-            sleep_until_next_day(&token).await;
-        } else if now >= post_close {
-            if !watchlist_tx.borrow().all_unique().is_empty() {
-                activity.set_phase("KR", "장 마감");
-                watchlist_tx.send(WatchlistSet::default()).ok();
-                eod_tx.send(()).await.ok();
-            }
-            sleep_until_next_day(&token).await;
-        } else if now >= pre_open {
-            activity.set_phase("KR", "장 중");
-            let merged =
-                build_watchlist(adapter.clone(), &discovery_strategy, &config, &alert, &db).await;
-            if merged != *watchlist_tx.borrow() {
-                activity.set_watchlist("KR", &merged.all_unique());
-                watchlist_tx.send(merged.clone()).ok();
-                summary_alert.info(format!(
-                    "✅ [국내] 관심종목 동기화 완료 (안정: {}, 적극: {})",
-                    merged.stable.len(),
-                    merged.aggressive.len()
-                ));
-            }
-            tokio::select! { _ = token.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {} }
-        } else {
-            activity.set_phase("KR", "장 오픈 대기");
-            watchlist_tx.send(WatchlistSet::default()).ok();
-            sleep_until_or_cancel(pre_open, &token).await;
-        }
-        if token.is_cancelled() {
-            return;
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -170,48 +75,50 @@ pub async fn run_scheduler_task(
     db: SqlitePool,
     token: CancellationToken,
 ) {
+    let market_label = adapter.market_id().label();
+    let locale_label = adapter.market_id().locale_label();
     loop {
-        let now_ny = Utc::now().with_timezone(&New_York);
-        let today = now_ny.date_naive();
-        let open = us_market_open_utc(today).unwrap();
-        let close = us_market_close_utc(today).unwrap();
+        let today = adapter.local_today();
+        let open = adapter.market_open_utc(today).unwrap();
+        let close = adapter.market_close_utc(today).unwrap();
         let pre_open = open - chrono::Duration::hours(1);
         let post_close = close + chrono::Duration::hours(1);
         let now = Utc::now();
 
         let current_wl = watchlist_tx.borrow().clone();
         if !current_wl.all_unique().is_empty() {
-            activity.set_watchlist("US", &current_wl.all_unique());
+            activity.set_watchlist(market_label, &current_wl.all_unique());
         }
 
         let is_holiday = adapter.is_holiday().await.unwrap_or(false);
         if is_holiday {
-            activity.set_phase("US", "공휴일 휴장");
+            activity.set_phase(market_label, "공휴일 휴장");
             watchlist_tx.send(WatchlistSet::default()).ok();
             sleep_until_next_day(&token).await;
         } else if now >= post_close {
             if !watchlist_tx.borrow().all_unique().is_empty() {
-                activity.set_phase("US", "장 마감");
+                activity.set_phase(market_label, "장 마감");
                 watchlist_tx.send(WatchlistSet::default()).ok();
                 eod_tx.send(()).await.ok();
             }
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
-            activity.set_phase("US", "장 중");
+            activity.set_phase(market_label, "장 중");
             let merged =
                 build_watchlist(adapter.clone(), &discovery_strategy, &config, &alert, &db).await;
             if merged != *watchlist_tx.borrow() {
-                activity.set_watchlist("US", &merged.all_unique());
+                activity.set_watchlist(market_label, &merged.all_unique());
                 watchlist_tx.send(merged.clone()).ok();
                 summary_alert.info(format!(
-                    "✅ [미국] 관심종목 동기화 완료 (안정: {}, 적극: {})",
+                    "✅ [{}] 관심종목 동기화 완료 (안정: {}, 적극: {})",
+                    locale_label,
                     merged.stable.len(),
                     merged.aggressive.len()
                 ));
             }
             tokio::select! { _ = token.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {} }
         } else {
-            activity.set_phase("US", "장 오픈 대기");
+            activity.set_phase(market_label, "장 오픈 대기");
             watchlist_tx.send(WatchlistSet::default()).ok();
             sleep_until_or_cancel(pre_open, &token).await;
         }
@@ -312,6 +219,31 @@ mod tests {
         }
         fn fx_spread_pct(&self) -> Decimal {
             Decimal::ZERO
+        }
+
+        fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+            use chrono::TimeZone;
+            use chrono_tz::America::New_York;
+            let open_time = chrono::NaiveTime::from_hms_opt(9, 30, 0)?;
+            New_York
+                .from_local_datetime(&date.and_time(open_time))
+                .earliest()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        }
+
+        fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+            use chrono::TimeZone;
+            use chrono_tz::America::New_York;
+            let close_time = chrono::NaiveTime::from_hms_opt(16, 0, 0)?;
+            New_York
+                .from_local_datetime(&date.and_time(close_time))
+                .earliest()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        }
+
+        fn local_today(&self) -> chrono::NaiveDate {
+            use chrono_tz::America::New_York;
+            chrono::Utc::now().with_timezone(&New_York).date_naive()
         }
     }
 

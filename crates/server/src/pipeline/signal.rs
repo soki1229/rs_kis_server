@@ -602,6 +602,31 @@ mod tests {
         async fn is_holiday(&self) -> Result<bool, BotError> {
             Ok(false)
         }
+
+        fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+            use chrono::TimeZone;
+            use chrono_tz::America::New_York;
+            let open_time = chrono::NaiveTime::from_hms_opt(9, 30, 0)?;
+            New_York
+                .from_local_datetime(&date.and_time(open_time))
+                .earliest()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        }
+
+        fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+            use chrono::TimeZone;
+            use chrono_tz::America::New_York;
+            let close_time = chrono::NaiveTime::from_hms_opt(16, 0, 0)?;
+            New_York
+                .from_local_datetime(&date.and_time(close_time))
+                .earliest()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        }
+
+        fn local_today(&self) -> chrono::NaiveDate {
+            use chrono_tz::America::New_York;
+            chrono::Utc::now().with_timezone(&New_York).date_naive()
+        }
     }
 
     struct AlwaysBuySignal;

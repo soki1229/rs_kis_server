@@ -6,7 +6,6 @@ use crate::state::{BotState, PipelineConfig};
 use crate::strategy::StrategyBundle;
 use crate::types::Market;
 
-use chrono_tz::{America, Asia};
 use kis_api::{KisClient, KisEnv};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -381,20 +380,18 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             t,
             {
                 let now = chrono::Utc::now();
-                let close = pipeline::scheduler::kr_market_close_utc(
-                    chrono::Utc::now().with_timezone(&Asia::Seoul).date_naive(),
-                )
-                .unwrap();
+                let close = kr_adapter
+                    .market_close_utc(kr_adapter.local_today())
+                    .unwrap();
                 if close > now {
                     close
                 } else {
                     // Already closed today, set for tomorrow
-                    pipeline::scheduler::kr_market_close_utc(
-                        (chrono::Utc::now().with_timezone(&Asia::Seoul)
-                            + chrono::Duration::days(1))
-                        .date_naive(),
-                    )
-                    .unwrap()
+                    kr_adapter
+                        .market_close_utc(
+                            kr_adapter.local_today() + chrono::Duration::days(1),
+                        )
+                        .unwrap()
                 }
             },
             cfg.position.clone(),
@@ -516,21 +513,17 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             t,
             {
                 let now = chrono::Utc::now();
-                let close = pipeline::scheduler::us_market_close_utc(
-                    chrono::Utc::now()
-                        .with_timezone(&America::New_York)
-                        .date_naive(),
-                )
-                .unwrap();
+                let close = us_adapter
+                    .market_close_utc(us_adapter.local_today())
+                    .unwrap();
                 if close > now {
                     close
                 } else {
-                    pipeline::scheduler::us_market_close_utc(
-                        (chrono::Utc::now().with_timezone(&America::New_York)
-                            + chrono::Duration::days(1))
-                        .date_naive(),
-                    )
-                    .unwrap()
+                    us_adapter
+                        .market_close_utc(
+                            us_adapter.local_today() + chrono::Duration::days(1),
+                        )
+                        .unwrap()
                 }
             },
             cfg.position.clone(),
@@ -539,7 +532,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     // Scheduler (KR)
     let t = token.clone();
-    let h_kr_sched = Some(tokio::spawn(pipeline::scheduler::run_kr_scheduler_task(
+    let h_kr_sched = Some(tokio::spawn(pipeline::scheduler::run_scheduler_task(
         kr_adapter,
         discovery_strategy.clone(),
         kr_pipeline.watchlist_tx,
