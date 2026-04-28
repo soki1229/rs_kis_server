@@ -532,6 +532,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         )));
     }
 
+    // Capture market labels before adapters are moved into scheduler tasks
+    let kr_market_label = kr_adapter.market_id().label();
+    let us_market_label = us_adapter.market_id().label();
+
     // Scheduler (KR)
     let t = token.clone();
     let h_kr_sched = Some(tokio::spawn(pipeline::scheduler::run_scheduler_task(
@@ -569,7 +573,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     let bot_start_detail = format!("mode={mode}");
     let bot_start_at = chrono::Utc::now().to_rfc3339();
-    for (pool, market) in [(&kr_db_pool, "KR"), (&us_db_pool, "US")] {
+    for (pool, market) in [(&kr_db_pool, kr_market_label), (&us_db_pool, us_market_label)] {
         sqlx::query(
             "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_started', ?, NULL, ?, ?)",
         )
@@ -585,7 +589,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     tracing::info!("Received Ctrl+C — initiating graceful shutdown");
 
     let bot_stop_at = chrono::Utc::now().to_rfc3339();
-    for (pool, market) in [(&kr_db_pool, "KR"), (&us_db_pool, "US")] {
+    for (pool, market) in [(&kr_db_pool, kr_market_label), (&us_db_pool, us_market_label)] {
         sqlx::query(
             "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_stopped', ?, NULL, 'Ctrl+C graceful shutdown', ?)",
         )
