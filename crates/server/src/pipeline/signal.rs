@@ -79,6 +79,7 @@ struct SignalState {
     cached_balance: Option<(Decimal, Instant)>,
     symbol_exchange: HashMap<String, String>,
     pending_symbols: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    last_order_sent: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
 }
 
 struct SignalContext {
@@ -99,6 +100,7 @@ struct SignalContext {
     qual_strategy: Arc<dyn QualificationStrategy>,
     risk_strategy: Arc<dyn RiskStrategy>,
     live_state_rx: watch::Receiver<crate::state::MarketLiveState>,
+    last_order_sent: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
 }
 
 async fn evaluate_and_maybe_order(ctx: SignalContext) {
@@ -120,6 +122,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         qual_strategy,
         risk_strategy,
         live_state_rx,
+        last_order_sent,
     } = ctx;
     use rust_decimal::prelude::ToPrimitive;
 
@@ -302,7 +305,9 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             exchange_code,
             strength: Some(trade_signal.strength),
         };
-        let _ = order_tx.send(req).await;
+        if order_tx.send(req).await.is_ok() {
+            last_order_sent.lock().unwrap().insert(symbol.clone(), Instant::now());
+        }
     } else {
         tracing::info!(
             "[{}] 🔍 평가 전용: {} {}주 @ ~{} (봇 비활성 — 실제 주문 없음)",
@@ -344,6 +349,7 @@ pub async fn run_signal_task(
         cached_balance: None,
         symbol_exchange: HashMap::new(),
         pending_symbols: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        last_order_sent: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     let candle_interval = Duration::from_secs(signal_cfg.candle_interval_secs);
     let initial_wl = watchlist_rx.borrow().clone();
@@ -392,6 +398,18 @@ pub async fn run_signal_task(
                         }
                     }
                     let account_balance = state.cached_balance.map(|(v, _)| v).unwrap_or(Decimal::ZERO);
+                    {
+                        let los = state.last_order_sent.lock().unwrap();
+                        if los.get(&tick.symbol)
+                            .map(|t| t.elapsed() < Duration::from_secs(300))
+                            .unwrap_or(false)
+                        {
+                            tracing::debug!("[{market_id}] {} 5분 쿨다운 중 → skip", tick.symbol);
+                            candle.reset();
+                            state.candle_start.insert(tick.symbol.clone(), Instant::now());
+                            continue;
+                        }
+                    }
                     { let mut ps = state.pending_symbols.lock().unwrap(); if ps.contains(&tick.symbol) { candle.reset(); continue; } ps.insert(tick.symbol.clone()); }
                     let sym_for_eval = tick.symbol.clone(); let sym_for_guard = tick.symbol.clone();
                     let pool = db_pool.clone(); let order_tx = order_tx.clone(); let regime = regime_rx.borrow().clone();
@@ -399,6 +417,7 @@ pub async fn run_signal_task(
                     let summary_clone = summary.clone();
                     let ex_code = state.symbol_exchange.get(&sym_for_eval).cloned();
                     let ps_clone = Arc::clone(&state.pending_symbols);
+                    let los_clone = Arc::clone(&state.last_order_sent);
                     let permit = eval_sem.clone().acquire_owned().await.unwrap();
                     let act = activity.clone(); let strategies_snap = strategies.clone(); let notion_clone = notion.clone();
                     let sig_strat = Arc::clone(&signal_strategy);
@@ -418,6 +437,7 @@ pub async fn run_signal_task(
                                 strategy, activity: act.clone(), notion: notion_clone.clone(),
                                 signal_strategy: Arc::clone(&sig_strat), qual_strategy: Arc::clone(&q_strat), risk_strategy: Arc::clone(&r_strat),
                                 live_state_rx: live_rx.clone(),
+                                last_order_sent: Arc::clone(&los_clone),
                             }).await;
                         }
                     });
@@ -809,5 +829,30 @@ mod tests {
 
         assert_eq!(stop_price, dec!(146.25));
         assert_eq!(pt1, dec!(155.0));
+    }
+
+    #[tokio::test]
+    async fn cooldown_prevents_second_order() {
+        use std::collections::HashMap;
+        use tokio::time::Duration;
+
+        let los: Arc<std::sync::Mutex<HashMap<String, Instant>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // 10초 전 주문 기록 → 쿨다운 중이어야 함
+        los.lock().unwrap().insert("AAPL".to_string(), Instant::now() - Duration::from_secs(10));
+        let in_cooldown = los.lock().unwrap()
+            .get("AAPL")
+            .map(|t| t.elapsed() < Duration::from_secs(300))
+            .unwrap_or(false);
+        assert!(in_cooldown, "10초 경과 → 아직 쿨다운 중이어야 함");
+
+        // 400초 전 주문 기록 → 쿨다운 만료여야 함
+        los.lock().unwrap().insert("AAPL".to_string(), Instant::now() - Duration::from_secs(400));
+        let expired = los.lock().unwrap()
+            .get("AAPL")
+            .map(|t| t.elapsed() < Duration::from_secs(300))
+            .unwrap_or(false);
+        assert!(!expired, "400초 경과 → 쿨다운 만료여야 함");
     }
 }
