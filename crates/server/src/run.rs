@@ -312,6 +312,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             kr_alert_router.clone(),
             t,
             "069500", // KODEX 200 (KOSPI200 ETF) — KR 시장 벤치마크
+            kr_db_pool.clone(),
         )));
 
         let t = token.clone();
@@ -445,6 +446,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             us_alert_router.clone(),
             t,
             "QQQ",
+            us_db_pool.clone(),
         )));
 
         let t = token.clone();
@@ -541,7 +543,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         kr_alert_router.clone(),
         kr_pipeline.summary_alert.clone(),
         activity.clone(),
-        kr_db_pool,
+        kr_db_pool.clone(),
         t,
     )));
 
@@ -556,7 +558,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         us_alert_router,
         us_pipeline.summary_alert.clone(),
         activity,
-        us_db_pool,
+        us_db_pool.clone(),
         t,
     )));
 
@@ -565,8 +567,34 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         mode
     ));
 
+    let bot_start_detail = format!("mode={mode}");
+    let bot_start_at = chrono::Utc::now().to_rfc3339();
+    for (pool, market) in [(&kr_db_pool, "KR"), (&us_db_pool, "US")] {
+        sqlx::query(
+            "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_started', ?, NULL, ?, ?)",
+        )
+        .bind(market)
+        .bind(&bot_start_detail)
+        .bind(&bot_start_at)
+        .execute(pool)
+        .await
+        .ok();
+    }
+
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C — initiating graceful shutdown");
+
+    let bot_stop_at = chrono::Utc::now().to_rfc3339();
+    for (pool, market) in [(&kr_db_pool, "KR"), (&us_db_pool, "US")] {
+        sqlx::query(
+            "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_stopped', ?, NULL, 'Ctrl+C graceful shutdown', ?)",
+        )
+        .bind(market)
+        .bind(&bot_stop_at)
+        .execute(pool)
+        .await
+        .ok();
+    }
 
     crate::notion::spawn_system_event(
         &notion_client,

@@ -115,6 +115,21 @@ pub async fn run_scheduler_task(
                     merged.stable.len(),
                     merged.aggressive.len()
                 ));
+                let detail = format!(
+                    "stable:{} aggressive:{} symbols:[{}]",
+                    merged.stable.len(),
+                    merged.aggressive.len(),
+                    merged.all_unique().join(",")
+                );
+                sqlx::query(
+                    "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('watchlist_updated', ?, NULL, ?, ?)",
+                )
+                .bind(market_label)
+                .bind(&detail)
+                .bind(chrono::Utc::now().to_rfc3339())
+                .execute(&db)
+                .await
+                .ok();
             }
             tokio::select! { _ = token.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {} }
         } else {

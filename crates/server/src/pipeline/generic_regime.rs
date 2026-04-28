@@ -52,6 +52,7 @@ pub async fn run_generic_regime_task(
     alert: AlertRouter,
     token: CancellationToken,
     benchmark_symbol: &str,
+    db_pool: sqlx::SqlitePool,
 ) {
     let market_id = adapter.market_id();
     let market_name = adapter.name();
@@ -63,6 +64,8 @@ pub async fn run_generic_regime_task(
         benchmark = %benchmark_symbol,
         "starting generic regime task"
     );
+
+    let mut prev_regime: Option<crate::types::MarketRegime> = None;
 
     loop {
         let timing = adapter.market_timing();
@@ -81,6 +84,23 @@ pub async fn run_generic_regime_task(
                             "[{market_name}] 레짐: {regime:?} | MA5={:.1} MA20={:.1} 일변동={:+.2}% 거래량비={:.2}",
                             input.ma5, input.ma20, input.daily_change_pct, input.volume_ratio
                         );
+                        if prev_regime.as_ref() != Some(&regime) {
+                            let detail = match &prev_regime {
+                                Some(p) => format!("{p:?} → {regime:?}"),
+                                None => format!("초기 레짐: {regime:?}"),
+                            };
+                            sqlx::query(
+                                "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('regime_change', ?, ?, ?, ?)",
+                            )
+                            .bind(market_id.label())
+                            .bind(benchmark_symbol)
+                            .bind(&detail)
+                            .bind(chrono::Utc::now().to_rfc3339())
+                            .execute(&db_pool)
+                            .await
+                            .ok();
+                            prev_regime = Some(regime.clone());
+                        }
                         let _ = regime_tx.send(regime);
                     } else {
                         tracing::warn!(market = %market_name, task = "regime", "bars insufficient — keeping last regime");
