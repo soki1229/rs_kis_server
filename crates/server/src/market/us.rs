@@ -487,38 +487,41 @@ async fn us_cancel_order(
 }
 
 async fn us_unfilled_orders(base: &UsMarketBase) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-    base.throttler.wait().await;
-    let resp = base
-        .client
-        .overseas()
-        .trading()
-        .overseas_stock_v1_trading_inquire_nccs(OverseasStockV1TradingInquireNccsRequest {
-            cano: base.cano.clone(),
-            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ovrs_excg_cd: "NASD".to_string(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("inquire_nccs: {}", e),
-        })?;
+    // KIS inquire_nccs requires a specific exchange code — query all 3 and merge.
+    let mut results = Vec::new();
+    for excd in ["NASD", "NYSE", "AMEX"] {
+        base.throttler.wait().await;
+        let resp = base
+            .client
+            .overseas()
+            .trading()
+            .overseas_stock_v1_trading_inquire_nccs(OverseasStockV1TradingInquireNccsRequest {
+                cano: base.cano.clone(),
+                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+                ovrs_excg_cd: excd.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| BotError::ApiError {
+                msg: format!("inquire_nccs({excd}): {}", e),
+            })?;
 
-    Ok(resp
-        .output
-        .iter()
-        .map(|o| UnifiedUnfilledOrder {
-            order_no: o.odno.clone(),
-            symbol: o.pdno.clone(),
-            side: match o.sll_buy_dvsn_cd.as_str() {
-                "02" => UnifiedSide::Buy,
-                _ => UnifiedSide::Sell,
-            },
-            qty: o.ft_ord_qty.to_string().parse().unwrap_or(0),
-            remaining_qty: o.nccs_qty.to_string().parse().unwrap_or(0),
-            price: o.ft_ord_unpr3,
-            exchange_code: Some(o.ovrs_excg_cd.clone()),
-        })
-        .collect())
+        for o in &resp.output {
+            results.push(UnifiedUnfilledOrder {
+                order_no: o.odno.clone(),
+                symbol: o.pdno.clone(),
+                side: match o.sll_buy_dvsn_cd.as_str() {
+                    "02" => UnifiedSide::Buy,
+                    _ => UnifiedSide::Sell,
+                },
+                qty: o.ft_ord_qty.to_string().parse().unwrap_or(0),
+                remaining_qty: o.nccs_qty.to_string().parse().unwrap_or(0),
+                price: o.ft_ord_unpr3,
+                exchange_code: Some(o.ovrs_excg_cd.clone()),
+            });
+        }
+    }
+    Ok(results)
 }
 
 async fn us_order_history(
