@@ -425,15 +425,15 @@ fn log_server_json_response(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Timelike;
     use super::*;
+    use chrono::Timelike;
 
     #[test]
     fn test_parse_time_kr() {
         let tr_id = "H0STCNT0"; // KR
         let hms = "090000";
         let dt = parse_time(hms, tr_id).unwrap();
-        
+
         // KST 09:00:00 should be UTC 00:00:00
         assert_eq!(dt.time().hour(), 0);
         assert_eq!(dt.time().minute(), 0);
@@ -444,12 +444,12 @@ mod tests {
         let tr_id = "HDFSCNT0"; // US
         let hms = "100000"; // 10:00 AM ET
         let dt = parse_time(hms, tr_id).unwrap();
-        
+
         // US ET is UTC-5 (Standard) or UTC-4 (DST).
         // Since we use Utc::now() to get the date, the exact offset depends on current date.
         // But it should definitely NOT be KST (UTC+9).
         // KST 10:00 AM would be UTC 01:00 AM.
         // ET 10:00 AM would be UTC 14:00 or 15:00.
-        assert!(dt.time().hour() >= 14); 
+        assert!(dt.time().hour() >= 14);
     }
 }
