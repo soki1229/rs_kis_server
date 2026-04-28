@@ -23,6 +23,13 @@ impl MarketId {
         }
     }
 
+    pub fn locale_label(&self) -> &'static str {
+        match self {
+            Self::Kr | Self::KrVts => "국내",
+            Self::Us | Self::UsVts => "미국",
+        }
+    }
+
     pub fn is_vts(&self) -> bool {
         matches!(self, Self::KrVts | Self::UsVts)
     }

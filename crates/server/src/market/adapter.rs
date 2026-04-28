@@ -90,6 +90,15 @@ pub trait MarketAdapter: Send + Sync + 'static {
     /// Check if today is a trading holiday.
     async fn is_holiday(&self) -> Result<bool, BotError>;
 
+    /// 지정 날짜의 장 개장 UTC 시각 (스케줄러용)
+    fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>>;
+
+    /// 지정 날짜의 장 마감 UTC 시각 (스케줄러용)
+    fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>>;
+
+    /// 시장 현지 시간 기준 오늘 날짜 (KR: Seoul, US: New_York)
+    fn local_today(&self) -> chrono::NaiveDate;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Cost Adjustments
     // ─────────────────────────────────────────────────────────────────────────
@@ -195,6 +204,18 @@ impl MarketAdapter for Arc<dyn MarketAdapter> {
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
         (**self).is_holiday().await
+    }
+
+    fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        (**self).market_open_utc(date)
+    }
+
+    fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        (**self).market_close_utc(date)
+    }
+
+    fn local_today(&self) -> chrono::NaiveDate {
+        (**self).local_today()
     }
 
     fn fx_spread_pct(&self) -> Decimal {
@@ -303,6 +324,18 @@ impl MarketAdapter for ReadOnlyAdapter {
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
         self.inner.is_holiday().await
+    }
+
+    fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.inner.market_open_utc(date)
+    }
+
+    fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.inner.market_close_utc(date)
+    }
+
+    fn local_today(&self) -> chrono::NaiveDate {
+        self.inner.local_today()
     }
 
     fn fx_spread_pct(&self) -> Decimal {

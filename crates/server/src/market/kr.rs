@@ -180,6 +180,26 @@ impl MarketAdapter for KrRealAdapter {
     async fn is_holiday(&self) -> Result<bool, BotError> {
         kr_is_holiday(&self.base).await
     }
+
+    fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        let open_time = chrono::NaiveTime::from_hms_opt(9, 0, 0)?;
+        Seoul
+            .from_local_datetime(&date.and_time(open_time))
+            .earliest()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+
+    fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        let close_time = chrono::NaiveTime::from_hms_opt(15, 30, 0)?;
+        Seoul
+            .from_local_datetime(&date.and_time(close_time))
+            .earliest()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+
+    fn local_today(&self) -> chrono::NaiveDate {
+        Utc::now().with_timezone(&Seoul).date_naive()
+    }
 }
 
 /// Korean VTS Market Adapter.
@@ -298,6 +318,26 @@ impl MarketAdapter for KrVtsAdapter {
 
     async fn is_holiday(&self) -> Result<bool, BotError> {
         kr_is_holiday(&self.data_base).await
+    }
+
+    fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        let open_time = chrono::NaiveTime::from_hms_opt(9, 0, 0)?;
+        Seoul
+            .from_local_datetime(&date.and_time(open_time))
+            .earliest()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+
+    fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        let close_time = chrono::NaiveTime::from_hms_opt(15, 30, 0)?;
+        Seoul
+            .from_local_datetime(&date.and_time(close_time))
+            .earliest()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+
+    fn local_today(&self) -> chrono::NaiveDate {
+        Utc::now().with_timezone(&Seoul).date_naive()
     }
 }
 
