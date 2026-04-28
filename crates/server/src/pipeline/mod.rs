@@ -31,7 +31,7 @@ impl From<crate::pipeline::stream::TransactionData> for TickData {
             symbol: tx.symbol,
             price: tx.price,
             volume: tx.qty.to_u64().unwrap_or(0),
-            timestamp: tx.time.with_timezone(&chrono::Utc),
+            timestamp: tx.time,
         }
     }
 }

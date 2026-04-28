@@ -1,5 +1,5 @@
 use chrono::TimeZone;
-use chrono::{DateTime, FixedOffset, NaiveTime, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use kis_api::{KisClient, KisError};
 use rand::Rng;
@@ -51,7 +51,7 @@ pub struct TransactionData {
     pub qty: Decimal,
     #[allow(dead_code)]
     pub is_buy: bool,
-    pub time: DateTime<FixedOffset>,
+    pub time: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ pub struct QuoteData {
     pub ask_qty: Decimal,
     pub bid_qty: Decimal,
     #[allow(dead_code)]
-    pub time: DateTime<FixedOffset>,
+    pub time: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -320,7 +320,7 @@ fn parse_transaction(tr_id: &str, fields: &[&str]) -> Option<KisEvent> {
         price: Decimal::from_str(fields.get(p_idx)?).ok()?,
         qty: Decimal::from_str(fields.get(q_idx)?).ok()?,
         is_buy: *fields.get(s_idx)? == "1",
-        time: parse_time(time_str)?,
+        time: parse_time(time_str, tr_id)?,
     }))
 }
 
@@ -336,19 +336,35 @@ fn parse_quote(tr_id: &str, fields: &[&str]) -> Option<KisEvent> {
         bid_price: Decimal::from_str(fields.get(bp_idx)?).ok()?,
         ask_qty: Decimal::from_str(fields.get(aq_idx)?).ok()?,
         bid_qty: Decimal::from_str(fields.get(bq_idx)?).ok()?,
-        time: parse_time(time_str)?,
+        time: parse_time(time_str, tr_id)?,
     }))
 }
 
-fn parse_time(hms: &str) -> Option<DateTime<FixedOffset>> {
+fn parse_time(hms: &str, tr_id: &str) -> Option<DateTime<Utc>> {
     if hms.len() < 6 {
         return None;
     }
     let time = NaiveTime::parse_from_str(&hms[..6], "%H%M%S").ok()?;
-    let now = Utc::now().with_timezone(&FixedOffset::east_opt(9 * 3600)?);
-    FixedOffset::east_opt(9 * 3600)?
-        .from_local_datetime(&now.date_naive().and_time(time))
-        .single()
+
+    // KR 이벤트: H0STCNT0, H0STASP0 → KST (+09:00)
+    // US 이벤트: HDFSCNT0, HDFSCNT1, HDFSASP0, HDFSASP1 → ET (America/New_York)
+    let is_kr = tr_id.starts_with("H0ST");
+
+    if is_kr {
+        use chrono_tz::Asia::Seoul;
+        let now_kst = Utc::now().with_timezone(&Seoul);
+        Seoul
+            .from_local_datetime(&now_kst.date_naive().and_time(time))
+            .single()
+            .map(|dt| dt.with_timezone(&Utc))
+    } else {
+        use chrono_tz::America::New_York;
+        let now_ny = Utc::now().with_timezone(&New_York);
+        New_York
+            .from_local_datetime(&now_ny.date_naive().and_time(time))
+            .single()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
 }
 
 /// Returns true if the message is a fatal rejection that requires key refresh (OPSP8996).
@@ -404,5 +420,36 @@ fn log_server_json_response(text: &str) -> bool {
     } else {
         tracing::debug!("WS server non-JSON: {}", text);
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Timelike;
+    use super::*;
+
+    #[test]
+    fn test_parse_time_kr() {
+        let tr_id = "H0STCNT0"; // KR
+        let hms = "090000";
+        let dt = parse_time(hms, tr_id).unwrap();
+        
+        // KST 09:00:00 should be UTC 00:00:00
+        assert_eq!(dt.time().hour(), 0);
+        assert_eq!(dt.time().minute(), 0);
+    }
+
+    #[test]
+    fn test_parse_time_us() {
+        let tr_id = "HDFSCNT0"; // US
+        let hms = "100000"; // 10:00 AM ET
+        let dt = parse_time(hms, tr_id).unwrap();
+        
+        // US ET is UTC-5 (Standard) or UTC-4 (DST).
+        // Since we use Utc::now() to get the date, the exact offset depends on current date.
+        // But it should definitely NOT be KST (UTC+9).
+        // KST 10:00 AM would be UTC 01:00 AM.
+        // ET 10:00 AM would be UTC 14:00 or 15:00.
+        assert!(dt.time().hour() >= 14); 
     }
 }
