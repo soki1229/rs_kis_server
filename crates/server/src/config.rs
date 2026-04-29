@@ -83,6 +83,36 @@ fn default_watchlist_refresh_interval() -> u64 {
     600
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TwapConfig {
+    #[serde(default = "default_twap_threshold")]
+    pub threshold_qty: u64,
+    #[serde(default = "default_twap_slices")]
+    pub slice_count: u32,
+    #[serde(default = "default_twap_delay")]
+    pub delay_secs_per_slice: u64,
+}
+
+fn default_twap_threshold() -> u64 {
+    100
+}
+fn default_twap_slices() -> u32 {
+    5
+}
+fn default_twap_delay() -> u64 {
+    30
+}
+
+impl Default for TwapConfig {
+    fn default() -> Self {
+        Self {
+            threshold_qty: 100,
+            slice_count: 5,
+            delay_secs_per_slice: 30,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RiskConfig {
     pub max_open_positions: u32,
@@ -104,6 +134,8 @@ pub struct RiskConfig {
     pub mdd_soft_kill_pct: Decimal,
     #[serde(default = "default_mdd_hard_kill_pct")]
     pub mdd_hard_kill_pct: Decimal,
+    #[serde(default)]
+    pub twap: TwapConfig,
 }
 
 fn default_weekly_loss_limit_pct() -> Decimal {
@@ -143,6 +175,7 @@ impl Default for RiskConfig {
             entry_blackout_open_mins: 15,
             mdd_soft_kill_pct: dec!(0.10),
             mdd_hard_kill_pct: dec!(0.15),
+            twap: TwapConfig::default(),
         }
     }
 }
@@ -372,7 +405,7 @@ impl TunableConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TokenCacheConfig {
     /// 실전 토큰 캐시 파일 경로
     #[serde(default = "default_real_token_cache_path")]

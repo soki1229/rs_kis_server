@@ -31,6 +31,7 @@ pub async fn run_generic_execution_task(
     db_pool: SqlitePool,
     summary: Arc<RwLock<MarketSummary>>,
     alert: AlertRouter,
+    twap_cfg: crate::config::TwapConfig,
     token: CancellationToken,
     pending_count: Arc<AtomicU32>,
     poll_sem: Arc<Semaphore>,
@@ -66,8 +67,9 @@ pub async fn run_generic_execution_task(
                         if matches!(state, BotState::Active) {
                             let adapter_clone = Arc::clone(&adapter);
                             let (tx, db, al, ps) = (fill_tx.clone(), db_pool.clone(), alert.clone(), Arc::clone(&poll_sem));
+                            let tc = twap_cfg.clone();
                             handles.push(tokio::spawn(async move {
-                                process_order(adapter_clone.as_ref(), r, &tx, &db, &al, &ps).await
+                                process_order(adapter_clone.as_ref(), r, &tx, &db, &al, tc, &ps).await
                             }));
                         } else {
                             tracing::warn!(market = %market_name, state = ?state, "regular order blocked due to bot state");
@@ -86,8 +88,9 @@ pub async fn run_generic_execution_task(
                         } else {
                             let adapter_clone = Arc::clone(&adapter);
                             let (tx, db, al, ps) = (fill_tx.clone(), db_pool.clone(), alert.clone(), Arc::clone(&poll_sem));
+                            let tc = twap_cfg.clone();
                             handles.push(tokio::spawn(async move {
-                                process_order(adapter_clone.as_ref(), r, &tx, &db, &al, &ps).await
+                                process_order(adapter_clone.as_ref(), r, &tx, &db, &al, tc, &ps).await
                             }));
                         }
                         handles.retain(|h| !h.is_finished());
@@ -103,6 +106,55 @@ pub async fn run_generic_execution_task(
 }
 
 async fn process_order(
+    adapter: &dyn MarketAdapter,
+    req: OrderRequest,
+    fill_tx: &mpsc::Sender<FillInfo>,
+    db_pool: &SqlitePool,
+    alert: &AlertRouter,
+    twap_cfg: crate::config::TwapConfig,
+    poll_sem: &Arc<Semaphore>,
+) {
+    if req.qty >= twap_cfg.threshold_qty && twap_cfg.slice_count > 1 {
+        let slice_count = twap_cfg.slice_count;
+        let base_qty = req.qty / slice_count as u64;
+        let mut remaining_qty = req.qty % slice_count as u64;
+
+        tracing::info!(
+            symbol = %req.symbol,
+            total_qty = req.qty,
+            slices = slice_count,
+            "Starting TWAP execution"
+        );
+
+        for i in 0..slice_count {
+            let mut slice_qty = base_qty;
+            if remaining_qty > 0 {
+                slice_qty += 1;
+                remaining_qty -= 1;
+            }
+
+            if slice_qty == 0 {
+                continue;
+            }
+
+            let slice_req = OrderRequest {
+                qty: slice_qty,
+                ..req.clone()
+            };
+
+            if i > 0 {
+                let delay_ms = rand::random::<u64>() % (twap_cfg.delay_secs_per_slice * 1000);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+
+            process_single_order(adapter, slice_req, fill_tx, db_pool, alert, poll_sem).await;
+        }
+    } else {
+        process_single_order(adapter, req, fill_tx, db_pool, alert, poll_sem).await;
+    }
+}
+
+async fn process_single_order(
     adapter: &dyn MarketAdapter,
     req: OrderRequest,
     fill_tx: &mpsc::Sender<FillInfo>,
