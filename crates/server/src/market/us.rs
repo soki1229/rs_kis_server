@@ -420,9 +420,16 @@ async fn us_place_order(
     base.throttler.wait().await;
     let exchange =
         UsMarketBase::exchange_from_hint(req.metadata.exchange_hint.as_deref(), &req.symbol);
-    let adjusted_price = req
+    let mut adjusted_price = req
         .price
         .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
+
+    // 해외 API는 시장가 미지원 → 가격이 없으면 현재가를 limit가로 사용
+    if adjusted_price.is_none() {
+        if let Ok(cp) = adapter.current_price(&req.symbol).await {
+            adjusted_price = Some(cp);
+        }
+    }
 
     let order_req = OverseasStockV1TradingOrderRequest {
         cano: base.cano.clone(),
