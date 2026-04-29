@@ -15,11 +15,17 @@ pub async fn build_watchlist(
     _alert: &AlertRouter,
     db: &SqlitePool,
 ) -> WatchlistSet {
-    let stable = strategy
+    let mut dynamic = strategy
         .build_watchlist(adapter.clone(), cfg.dynamic_watchlist_size)
         .await;
+    // 정적 watchlist(config)에 있지만 dynamic에 없는 종목을 앞에 삽입
+    for sym in cfg.watchlist.iter().rev() {
+        if !dynamic.contains(sym) {
+            dynamic.insert(0, sym.clone());
+        }
+    }
     let fresh = WatchlistSet {
-        stable,
+        stable: dynamic,
         aggressive: vec![],
     };
     merge_with_protected_symbols(fresh, db, cfg).await
