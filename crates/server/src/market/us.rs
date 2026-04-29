@@ -619,13 +619,17 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
             msg: format!("overseas present-balance: {}", e),
         })?;
 
+    // Real: output2.frcr_dncl_amt_2 / VTS: output3만 지원 (output2 비어있음)
     let cash = pres_resp
         .output2
         .first()
-        .map(|o| {
-            o.frcr_dncl_amt_2
-                .parse::<Decimal>()
-                .unwrap_or(Decimal::ZERO)
+        .and_then(|o| o.frcr_dncl_amt_2.parse::<Decimal>().ok())
+        .filter(|v| !v.is_zero())
+        .or_else(|| {
+            pres_resp
+                .output3
+                .first()
+                .map(|o| o.frcr_use_psbl_amt)
         })
         .unwrap_or(Decimal::ZERO);
 
