@@ -389,9 +389,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
                 } else {
                     // Already closed today, set for tomorrow
                     kr_adapter
-                        .market_close_utc(
-                            kr_adapter.local_today() + chrono::Duration::days(1),
-                        )
+                        .market_close_utc(kr_adapter.local_today() + chrono::Duration::days(1))
                         .unwrap()
                 }
             },
@@ -522,9 +520,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
                     close
                 } else {
                     us_adapter
-                        .market_close_utc(
-                            us_adapter.local_today() + chrono::Duration::days(1),
-                        )
+                        .market_close_utc(us_adapter.local_today() + chrono::Duration::days(1))
                         .unwrap()
                 }
             },
@@ -573,7 +569,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
 
     let bot_start_detail = format!("mode={mode}");
     let bot_start_at = chrono::Utc::now().to_rfc3339();
-    for (pool, market) in [(&kr_db_pool, kr_market_label), (&us_db_pool, us_market_label)] {
+    for (pool, market) in [
+        (&kr_db_pool, kr_market_label),
+        (&us_db_pool, us_market_label),
+    ] {
         sqlx::query(
             "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_started', ?, NULL, ?, ?)",
         )
@@ -589,7 +588,10 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     tracing::info!("Received Ctrl+C — initiating graceful shutdown");
 
     let bot_stop_at = chrono::Utc::now().to_rfc3339();
-    for (pool, market) in [(&kr_db_pool, kr_market_label), (&us_db_pool, us_market_label)] {
+    for (pool, market) in [
+        (&kr_db_pool, kr_market_label),
+        (&us_db_pool, us_market_label),
+    ] {
         sqlx::query(
             "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_stopped', ?, NULL, 'Ctrl+C graceful shutdown', ?)",
         )

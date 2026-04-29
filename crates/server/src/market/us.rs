@@ -446,7 +446,11 @@ async fn us_place_order(
         msg: format!("overseas order: {}", e),
     })?;
 
-    let order_no = resp.output.as_ref().map(|o| o.odno.clone()).unwrap_or_default();
+    let order_no = resp
+        .output
+        .as_ref()
+        .map(|o| o.odno.clone())
+        .unwrap_or_default();
 
     Ok(UnifiedOrderResult {
         internal_id: uuid::Uuid::new_v4().to_string(),
@@ -618,7 +622,11 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
     let cash = pres_resp
         .output2
         .first()
-        .map(|o| o.frcr_dncl_amt_2.parse::<Decimal>().unwrap_or(Decimal::ZERO))
+        .map(|o| {
+            o.frcr_dncl_amt_2
+                .parse::<Decimal>()
+                .unwrap_or(Decimal::ZERO)
+        })
         .unwrap_or(Decimal::ZERO);
 
     Ok(UnifiedBalance {
@@ -707,33 +715,129 @@ async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String
         .take(count as usize)
         .filter_map(|i| {
             let s = i.symb.trim();
-            if s.is_empty() { None } else { Some(s.to_string()) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
         })
         .collect())
 }
 
 async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
     base.throttler.wait().await;
-    let today = Utc::now()
-        .with_timezone(&New_York)
-        .format("%Y%m%d")
-        .to_string();
-    let resp = base
-        .client
-        .overseas()
-        .quotations()
-        .overseas_stock_v1_quotations_countries_holiday(
-            OverseasStockV1QuotationsCountriesHolidayRequest {
-                trad_dt: today.clone(),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(BotError::from)?;
+    let today = Utc::now().with_timezone(&New_York).date_naive();
+    Ok(is_nyse_holiday(today))
+}
 
-    // countries-holiday API returns settlement dates, not holiday flags; always assume open
-    let _ = resp;
-    Ok(false)
+fn is_nyse_holiday(date: chrono::NaiveDate) -> bool {
+    use chrono::Weekday;
+    let (y, m, d) = (date.year(), date.month(), date.day());
+    let weekday = date.weekday();
+
+    // Weekends
+    if weekday == Weekday::Sat || weekday == Weekday::Sun {
+        return true;
+    }
+
+    // New Year's Day (Jan 1)
+    if is_observed_holiday(y, 1, 1, date) {
+        return true;
+    }
+    // If Jan 1 is a Saturday, it's observed on Dec 31 of previous year
+    if m == 12 && d == 31 && weekday == Weekday::Fri {
+        if let Some(next_jan1) = chrono::NaiveDate::from_ymd_opt(y + 1, 1, 1) {
+            if next_jan1.weekday() == Weekday::Sat {
+                return true;
+            }
+        }
+    }
+
+    // MLK Day (3rd Mon in Jan)
+    if m == 1 && (15..=21).contains(&d) && weekday == Weekday::Mon {
+        return true;
+    }
+
+    // Presidents' Day (3rd Mon in Feb)
+    if m == 2 && (15..=21).contains(&d) && weekday == Weekday::Mon {
+        return true;
+    }
+
+    // Good Friday (Friday before Easter Sunday)
+    if let Some(good_friday) = get_good_friday(y) {
+        if date == good_friday {
+            return true;
+        }
+    }
+
+    // Memorial Day (Last Mon in May)
+    if m == 5 && (25..=31).contains(&d) && weekday == Weekday::Mon {
+        return true;
+    }
+
+    // Juneteenth (Jun 19) - since 2021
+    if y >= 2021 && is_observed_holiday(y, 6, 19, date) {
+        return true;
+    }
+
+    // Independence Day (Jul 4)
+    if is_observed_holiday(y, 7, 4, date) {
+        return true;
+    }
+
+    // Labor Day (1st Mon in Sep)
+    if m == 9 && (1..=7).contains(&d) && weekday == Weekday::Mon {
+        return true;
+    }
+
+    // Thanksgiving (4th Thu in Nov)
+    if m == 11 && (22..=28).contains(&d) && weekday == Weekday::Thu {
+        return true;
+    }
+
+    // Christmas (Dec 25)
+    if is_observed_holiday(y, 12, 25, date) {
+        return true;
+    }
+
+    false
+}
+
+fn is_observed_holiday(y: i32, m: u32, d: u32, date: chrono::NaiveDate) -> bool {
+    use chrono::Weekday;
+    let holiday = match chrono::NaiveDate::from_ymd_opt(y, m, d) {
+        Some(h) => h,
+        None => return false,
+    };
+    let weekday = holiday.weekday();
+
+    match weekday {
+        Weekday::Sat => date == holiday.pred_opt().unwrap(), // Observed Friday
+        Weekday::Sun => date == holiday.succ_opt().unwrap(), // Observed Monday
+        _ => date == holiday,
+    }
+}
+
+fn get_good_friday(year: i32) -> Option<chrono::NaiveDate> {
+    // Meeus/Jones/Butcher algorithm for Easter Sunday
+    let a = year % 19;
+    let b = year / 100;
+    let c = year % 100;
+    let d = b / 4;
+    let e = b % 4;
+    let f = (b + 8) / 25;
+    let g = (b - f + 1) / 3;
+    let h = (19 * a + b - d - g + 15) % 30;
+    let i = c / 4;
+    let k = c % 4;
+    let l = (32 + 2 * e + 2 * i - h - k) % 7;
+    let m = (a + 11 * h + 22 * l) / 451;
+    let month = (h + l - 7 * m + 114) / 31;
+    let day = ((h + l - 7 * m + 114) % 31) + 1;
+
+    chrono::NaiveDate::from_ymd_opt(year, month as u32, day as u32)?
+        .pred_opt()? // Sat
+        .pred_opt() // Fri
 }
 
 async fn us_intraday_candles(
@@ -802,12 +906,19 @@ async fn us_current_price(base: &UsMarketBase, symbol: &str) -> Result<Decimal, 
 
     resp.output
         .as_ref()
-        .map(|o| o.last.parse().map_err(|e| BotError::ApiError { msg: format!("parse last price: {}", e) }))
+        .map(|o| {
+            o.last.parse().map_err(|e| BotError::ApiError {
+                msg: format!("parse last price: {}", e),
+            })
+        })
         .unwrap_or(Ok(Decimal::ZERO))
 }
 
 fn us_market_timing() -> MarketTiming {
     let now = Utc::now().with_timezone(&New_York);
+    let today = now.date_naive();
+    let is_holiday = is_nyse_holiday(today);
+
     let hour = now.hour();
     let minute = now.minute();
     let total_mins = (hour * 60 + minute) as i64;
@@ -815,18 +926,20 @@ fn us_market_timing() -> MarketTiming {
     let open_mins = 9 * 60 + 30;
     let close_mins = 16 * 60;
 
-    let weekday = now.weekday();
-    let is_weekend = matches!(weekday, chrono::Weekday::Sat | chrono::Weekday::Sun);
-
-    let is_open = !is_weekend && total_mins >= open_mins && total_mins < close_mins;
+    let is_open = !is_holiday && total_mins >= open_mins && total_mins < close_mins;
 
     let mins_since_open = if is_open { total_mins - open_mins } else { -1 };
     let mins_until_close = if is_open { close_mins - total_mins } else { -1 };
-    let mins_until_open = if is_weekend {
+
+    let weekday = now.weekday();
+    let mins_until_open = if is_holiday {
+        // Very simplified: if holiday, assume next open is at least 1440 mins away
+        // or just calculate based on days until Monday if it's a weekend.
+        // For a more accurate value, we'd need to find the next business day.
         let days_to_mon = match weekday {
             chrono::Weekday::Sat => 2,
             chrono::Weekday::Sun => 1,
-            _ => 0,
+            _ => 1, // Holiday on weekday, assume tomorrow
         };
         (days_to_mon * 1440) + (open_mins - total_mins)
     } else if total_mins < open_mins {
@@ -840,6 +953,103 @@ fn us_market_timing() -> MarketTiming {
         mins_since_open,
         mins_until_close,
         mins_until_open,
-        is_holiday: false,
+        is_holiday,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn test_is_nyse_holiday() {
+        // Weekends
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 12, 28).unwrap()
+        )); // Saturday
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 12, 29).unwrap()
+        )); // Sunday
+
+        // Fixed holidays 2024
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        )); // New Year
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 6, 19).unwrap()
+        )); // Juneteenth
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 7, 4).unwrap()
+        )); // Independence Day
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 12, 25).unwrap()
+        )); // Christmas
+
+        // Moving holidays 2024
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        )); // MLK Day
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 2, 19).unwrap()
+        )); // Presidents' Day
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 3, 29).unwrap()
+        )); // Good Friday
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 5, 27).unwrap()
+        )); // Memorial Day
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 9, 2).unwrap()
+        )); // Labor Day
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 11, 28).unwrap()
+        )); // Thanksgiving
+
+        // Observation rules
+        // Jul 4, 2026 (Saturday) -> Observed on Jul 3
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2026, 7, 3).unwrap()
+        ));
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2026, 7, 4).unwrap()
+        )); // It's Saturday anyway
+
+        // Jul 4, 2027 (Sunday) -> Observed on Jul 5
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2027, 7, 4).unwrap()
+        )); // It's Sunday anyway
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2027, 7, 5).unwrap()
+        ));
+
+        // Jan 1, 2022 (Saturday) -> Observed on Dec 31, 2021
+        assert!(is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2021, 12, 31).unwrap()
+        ));
+
+        // Business days
+        assert!(!is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 4, 29).unwrap()
+        )); // Monday
+        assert!(!is_nyse_holiday(
+            NaiveDate::from_ymd_opt(2024, 12, 24).unwrap()
+        )); // Xmas Eve (Open)
+    }
+
+    #[test]
+    fn test_good_friday() {
+        assert_eq!(
+            get_good_friday(2024),
+            Some(NaiveDate::from_ymd_opt(2024, 3, 29).unwrap())
+        );
+        assert_eq!(
+            get_good_friday(2025),
+            Some(NaiveDate::from_ymd_opt(2025, 4, 18).unwrap())
+        );
+        assert_eq!(
+            get_good_friday(2026),
+            Some(NaiveDate::from_ymd_opt(2026, 4, 3).unwrap())
+        );
     }
 }

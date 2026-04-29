@@ -54,11 +54,9 @@ async fn sleep_until_or_cancel(target: DateTime<Utc>, token: &CancellationToken)
 
 async fn sleep_until_next_day(token: &CancellationToken) {
     let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
-    let wake_up = chrono::TimeZone::from_local_datetime(
-        &Utc,
-        &tomorrow.and_hms_opt(0, 0, 0).unwrap(),
-    )
-    .unwrap();
+    let wake_up =
+        chrono::TimeZone::from_local_datetime(&Utc, &tomorrow.and_hms_opt(0, 0, 0).unwrap())
+            .unwrap();
     sleep_until_or_cancel(wake_up, token).await;
 }
 
@@ -236,7 +234,10 @@ mod tests {
             Decimal::ZERO
         }
 
-        fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        fn market_open_utc(
+            &self,
+            date: chrono::NaiveDate,
+        ) -> Option<chrono::DateTime<chrono::Utc>> {
             use chrono::TimeZone;
             use chrono_tz::America::New_York;
             let open_time = chrono::NaiveTime::from_hms_opt(9, 30, 0)?;
@@ -246,7 +247,10 @@ mod tests {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
         }
 
-        fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        fn market_close_utc(
+            &self,
+            date: chrono::NaiveDate,
+        ) -> Option<chrono::DateTime<chrono::Utc>> {
             use chrono::TimeZone;
             use chrono_tz::America::New_York;
             let close_time = chrono::NaiveTime::from_hms_opt(16, 0, 0)?;
