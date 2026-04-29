@@ -248,6 +248,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             balance: account_balance,
             open_position_count: live.positions.len() as u32,
             daily_pnl_r: live.daily_pnl_r,
+            positions: live.positions.clone(),
         }
     };
     let sized_qty = risk_strategy.size(&trade_signal, &portfolio);
@@ -809,6 +810,7 @@ mod tests {
             balance: dec!(10000),
             open_position_count: 0,
             daily_pnl_r: 0.0,
+            positions: vec![],
         };
         let qty = risk_strat.size(&signal, &portfolio);
         assert_eq!(qty, dec!(50));

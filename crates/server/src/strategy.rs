@@ -127,6 +127,8 @@ pub struct Portfolio {
     pub balance: Decimal,
     pub open_position_count: u32,
     pub daily_pnl_r: f64,
+    /// 현재 보유 포지션 목록 (섹터 익스포저 계산에 사용).
+    pub positions: Vec<crate::types::Position>,
 }
 
 /// 리스크 전략. 진입 허용된 신호의 포지션 크기를 결정한다.
