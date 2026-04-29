@@ -8,6 +8,7 @@ use crate::market::{MarketAdapter, OrderMetadata, PollOutcome, UnifiedOrderReque
 use crate::monitoring::alert::AlertRouter;
 use crate::state::{BotState, MarketSummary};
 use crate::types::{FillInfo, OrderRequest, Side};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use std::sync::{
@@ -164,6 +165,44 @@ async fn process_order(
                             } => {
                                 sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
                                     .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await.ok();
+
+                                // Slippage measurement: compare fill vs. order price.
+                                if let Some(order_price) = req.price {
+                                    if !order_price.is_zero() {
+                                        let slippage_pct = ((filled_price - order_price).abs()
+                                            / order_price
+                                            * rust_decimal::Decimal::from(100))
+                                        .to_f64()
+                                        .unwrap_or(0.0);
+                                        if slippage_pct > 0.5 {
+                                            tracing::warn!(
+                                                symbol = %req.symbol,
+                                                order_price = %order_price,
+                                                filled_price = %filled_price,
+                                                slippage_pct = format!("{:.3}%", slippage_pct),
+                                                "High slippage detected"
+                                            );
+                                            sqlx::query(
+                                                "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('slippage_warn', ?, ?, ?, ?)",
+                                            )
+                                            .bind(adapter.market_id().label())
+                                            .bind(&req.symbol)
+                                            .bind(format!(
+                                                "order={} fill={} slippage={:.3}%",
+                                                order_price, filled_price, slippage_pct
+                                            ))
+                                            .bind(chrono::Utc::now().to_rfc3339())
+                                            .execute(db_pool)
+                                            .await
+                                            .ok();
+                                        } else {
+                                            tracing::info!(symbol = %req.symbol, qty = filled_qty, price = %filled_price, slippage_pct = format!("{:.3}%", slippage_pct), "Order filled");
+                                        }
+                                    }
+                                } else {
+                                    tracing::info!(symbol = %req.symbol, qty = filled_qty, price = %filled_price, "Order filled (market order)");
+                                }
+
                                 fill_tx
                                     .send(FillInfo {
                                         order_id: order_id.clone(),
@@ -175,7 +214,6 @@ async fn process_order(
                                     })
                                     .await
                                     .ok();
-                                tracing::info!(symbol = %req.symbol, qty = filled_qty, price = %filled_price, "Order filled");
                                 return;
                             }
                             PollOutcome::PartialFilled {
