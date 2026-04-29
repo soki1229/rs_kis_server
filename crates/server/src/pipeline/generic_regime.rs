@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Build regime input from daily bars.
-/// bars[0] = most recent day.
+/// bars[0] = most recent day. Requires ≥21 bars; ADX-14 computed when ≥30 bars available.
 pub fn build_regime_input(bars: &[crate::market::UnifiedDailyBar]) -> Option<RegimeInput> {
     if bars.len() < 21 {
         return None;
@@ -36,12 +36,97 @@ pub fn build_regime_input(bars: &[crate::market::UnifiedDailyBar]) -> Option<Reg
         volumes[0] as f64 / avg_vol as f64
     };
 
+    let adx = compute_adx(bars, 14);
+
     Some(RegimeInput {
         ma5: ma5.to_f64().unwrap_or(0.0),
         ma20: ma20.to_f64().unwrap_or(0.0),
         daily_change_pct,
         volume_ratio,
+        adx,
     })
+}
+
+/// Compute ADX-`period` using Wilder's smoothing.
+/// bars[0] = most recent; reversed internally. Returns None when bars < 2*period+1.
+fn compute_adx(bars: &[crate::market::UnifiedDailyBar], period: usize) -> Option<f64> {
+    if bars.len() < 2 * period + 1 {
+        return None;
+    }
+
+    // Work in chronological order (oldest first).
+    let bars: Vec<_> = bars.iter().rev().collect();
+    let n = bars.len();
+
+    let mut tr_vals = Vec::with_capacity(n - 1);
+    let mut plus_dm_vals = Vec::with_capacity(n - 1);
+    let mut minus_dm_vals = Vec::with_capacity(n - 1);
+
+    for i in 1..n {
+        let high = bars[i].high.to_f64().unwrap_or(0.0);
+        let low = bars[i].low.to_f64().unwrap_or(0.0);
+        let prev_close = bars[i - 1].close.to_f64().unwrap_or(0.0);
+        let prev_high = bars[i - 1].high.to_f64().unwrap_or(0.0);
+        let prev_low = bars[i - 1].low.to_f64().unwrap_or(0.0);
+
+        let tr = (high - low)
+            .max((high - prev_close).abs())
+            .max((low - prev_close).abs());
+
+        let up_move = high - prev_high;
+        let down_move = prev_low - low;
+
+        let plus_dm = if up_move > down_move && up_move > 0.0 {
+            up_move
+        } else {
+            0.0
+        };
+        let minus_dm = if down_move > up_move && down_move > 0.0 {
+            down_move
+        } else {
+            0.0
+        };
+
+        tr_vals.push(tr);
+        plus_dm_vals.push(plus_dm);
+        minus_dm_vals.push(minus_dm);
+    }
+
+    // Wilder's initial sum.
+    let mut smooth_tr: f64 = tr_vals[..period].iter().sum();
+    let mut smooth_plus: f64 = plus_dm_vals[..period].iter().sum();
+    let mut smooth_minus: f64 = minus_dm_vals[..period].iter().sum();
+
+    let dx_for_period = |sp: f64, sm: f64, st: f64| -> f64 {
+        if st == 0.0 {
+            return 0.0;
+        }
+        let di_plus = 100.0 * sp / st;
+        let di_minus = 100.0 * sm / st;
+        let denom = di_plus + di_minus;
+        if denom == 0.0 {
+            0.0
+        } else {
+            100.0 * (di_plus - di_minus).abs() / denom
+        }
+    };
+
+    let mut dx_vals = vec![dx_for_period(smooth_plus, smooth_minus, smooth_tr)];
+
+    for i in period..tr_vals.len() {
+        smooth_tr = smooth_tr - smooth_tr / period as f64 + tr_vals[i];
+        smooth_plus = smooth_plus - smooth_plus / period as f64 + plus_dm_vals[i];
+        smooth_minus = smooth_minus - smooth_minus / period as f64 + minus_dm_vals[i];
+        dx_vals.push(dx_for_period(smooth_plus, smooth_minus, smooth_tr));
+    }
+
+    if dx_vals.len() < period {
+        return None;
+    }
+
+    // ADX = Wilder's smoothing of DX (simple average of last period as initial).
+    let adx = dx_vals[dx_vals.len() - period..].iter().sum::<f64>() / period as f64;
+    Some(adx)
 }
 
 /// Generic regime task that works with any MarketAdapter.
@@ -76,12 +161,13 @@ pub async fn run_generic_regime_task(
             || (timing.mins_until_close < 30 && timing.mins_until_close != i64::MAX);
 
         if is_active_window {
-            match adapter.daily_chart(benchmark_symbol, 25).await {
+            match adapter.daily_chart(benchmark_symbol, 35).await {
                 Ok(bars) => {
                     if let Some(input) = build_regime_input(&bars) {
                         let regime = regime_strategy.classify(&input);
+                        let adx_str = input.adx.map_or("-".to_string(), |v| format!("{:.1}", v));
                         tracing::info!(
-                            "[{market_name}] 레짐: {regime:?} | MA5={:.1} MA20={:.1} 일변동={:+.2}% 거래량비={:.2}",
+                            "[{market_name}] 레짐: {regime:?} | MA5={:.1} MA20={:.1} 일변동={:+.2}% 거래량비={:.2} ADX={adx_str}",
                             input.ma5, input.ma20, input.daily_change_pct, input.volume_ratio
                         );
                         if prev_regime.as_ref() != Some(&regime) {
@@ -159,12 +245,23 @@ mod tests {
 
     #[test]
     fn build_regime_input_from_bars() {
-        let bars = make_bars(25);
+        let bars = make_bars(30);
         let input = build_regime_input(&bars);
         assert!(input.is_some());
         let input = input.unwrap();
         assert!(input.ma5 > 0.0);
         assert!(input.ma20 > 0.0);
+        // ADX should be computed with 30 bars (2*14+1=29 minimum met)
+        assert!(input.adx.is_some());
+    }
+
+    #[test]
+    fn build_regime_input_adx_none_when_bars_insufficient_for_adx() {
+        // 25 bars: enough for MA/volume but not for ADX-14 (needs 29)
+        let bars = make_bars(25);
+        let input = build_regime_input(&bars);
+        assert!(input.is_some());
+        assert!(input.unwrap().adx.is_none());
     }
 
     #[test]

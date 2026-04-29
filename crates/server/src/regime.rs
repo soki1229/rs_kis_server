@@ -5,6 +5,8 @@ pub struct RegimeInput {
     pub ma20: f64,
     pub daily_change_pct: f64,
     pub volume_ratio: f64,
+    /// ADX-14. None when bars insufficient (<30).
+    pub adx: Option<f64>,
 }
 
 pub type RegimeSender = tokio::sync::watch::Sender<MarketRegime>;
