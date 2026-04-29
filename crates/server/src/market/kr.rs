@@ -408,13 +408,19 @@ async fn kr_place_order(
         .price
         .map(|p| adapter.adjust_aggressive_price(p, req.side, req.strength));
 
+    // price가 없으면 시장가(01), 있으면 지정가(00)
+    let (ord_dvsn, ord_unpr) = match adjusted_price {
+        Some(p) => ("00".to_string(), p.to_string()),
+        None => ("01".to_string(), "0".to_string()),
+    };
+
     let order_req = DomesticStockV1TradingOrderCashRequest {
         cano: base.cano.clone(),
         acnt_prdt_cd: base.acnt_prdt_cd.clone(),
         pdno: req.symbol.clone(),
-        ord_dvsn: "00".to_string(), // 지정가
+        ord_dvsn,
         ord_qty: req.qty.to_string(),
-        ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
+        ord_unpr,
         ..Default::default()
     };
     let trading = base.client.stock().trading();
