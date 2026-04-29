@@ -625,12 +625,7 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         .first()
         .and_then(|o| o.frcr_dncl_amt_2.parse::<Decimal>().ok())
         .filter(|v| !v.is_zero())
-        .or_else(|| {
-            pres_resp
-                .output3
-                .first()
-                .map(|o| o.frcr_use_psbl_amt)
-        })
+        .or_else(|| pres_resp.output3.first().map(|o| o.frcr_use_psbl_amt))
         .unwrap_or(Decimal::ZERO);
 
     Ok(UnifiedBalance {
