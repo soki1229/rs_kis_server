@@ -431,6 +431,12 @@ async fn us_place_order(
         }
     }
 
+    // 공매도(대차 매도): sll_type = "L"
+    let sll_type = if req.is_short {
+        "L".to_string()
+    } else {
+        String::new()
+    };
     let order_req = OverseasStockV1TradingOrderRequest {
         cano: base.cano.clone(),
         acnt_prdt_cd: base.acnt_prdt_cd.clone(),
@@ -438,12 +444,16 @@ async fn us_place_order(
         pdno: req.symbol.clone(),
         ord_qty: req.qty.to_string(),
         ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
+        sll_type,
         ..Default::default()
     };
     let trading = base.client.overseas().trading();
     let resp = match req.side {
         UnifiedSide::Buy => trading.overseas_stock_v1_trading_order_buy(order_req).await,
         UnifiedSide::Sell => {
+            if req.is_short {
+                tracing::info!(symbol = %req.symbol, qty = req.qty, "short sell (대차 매도)");
+            }
             trading
                 .overseas_stock_v1_trading_order_sell(order_req)
                 .await

@@ -181,6 +181,7 @@ async fn process_single_order(
         atr: req.atr,
         metadata,
         strength: req.strength,
+        is_short: req.is_short,
     };
 
     // 1. Record in DB

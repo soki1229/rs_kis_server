@@ -403,6 +403,11 @@ async fn kr_place_order(
     req: UnifiedOrderRequest,
     adapter: &impl MarketAdapter,
 ) -> Result<UnifiedOrderResult, BotError> {
+    if req.is_short {
+        return Err(BotError::ApiError {
+            msg: "KR market does not support short sell (대주 API 미연동)".to_string(),
+        });
+    }
     base.throttler.wait().await;
     let adjusted_price = req
         .price

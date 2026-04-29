@@ -61,6 +61,8 @@ pub struct UnifiedOrderRequest {
     pub strength: Option<f64>,
     /// Market-specific metadata (e.g., exchange code for KR)
     pub metadata: OrderMetadata,
+    /// True when the order is a short-sell (대차 매도). US only.
+    pub is_short: bool,
 }
 
 /// Order side
@@ -248,6 +250,7 @@ impl From<crate::types::OrderRequest> for UnifiedOrderRequest {
                 exchange_code: req.exchange_code,
                 exchange_hint: None,
             },
+            is_short: req.is_short,
         }
     }
 }

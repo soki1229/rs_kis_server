@@ -186,7 +186,7 @@ pub async fn run_generic_position_task(
                 eod_fallback_fired = true;
                 for (symbol, (state, qty)) in &pos_states {
                     let _ = force_order_tx.send(OrderRequest {
-                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                     }).await;
                 }
             }
@@ -194,7 +194,7 @@ pub async fn run_generic_position_task(
                 tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
                 for (symbol, (state, qty)) in &pos_states {
                     let _ = force_order_tx.send(OrderRequest {
-                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                     }).await;
                 }
             }
@@ -270,7 +270,7 @@ pub async fn run_generic_position_task(
                                 let exit_qty = *qty / 2;
                                 if exit_qty > 0 {
                                     let _ = force_order_tx.send(OrderRequest {
-                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
+                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                                     }).await;
                                 }
                                 state.partial_exit_done = true;
@@ -279,7 +279,7 @@ pub async fn run_generic_position_task(
                         }
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
                             let _ = force_order_tx.send(OrderRequest {
-                                symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None,
+                                symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                             }).await;
                             tracing::info!(symbol = %tick.symbol, ?decision, "Exit triggered");
                         }

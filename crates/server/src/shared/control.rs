@@ -170,6 +170,7 @@ mod tests {
             atr: None,
             exchange_code: None,
             strength: None,
+            is_short: false,
         };
         cmd_tx
             .send(BotCommand::ForceOrder(req.clone()))

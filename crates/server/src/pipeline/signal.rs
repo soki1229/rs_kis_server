@@ -2,7 +2,7 @@ use crate::market::{MarketAdapter, MarketId};
 use crate::pipeline::TickData;
 use crate::state::BotState;
 use crate::strategy::{
-    Portfolio, QualResult, QualificationStrategy, RiskStrategy, SignalCandidate,
+    Direction, Portfolio, QualResult, QualificationStrategy, RiskStrategy, SignalCandidate,
     SignalContext as StrategySignalContext, SignalStrategy,
 };
 use crate::types::{CandleBar, MarketRegime, QuoteSnapshot};
@@ -297,14 +297,19 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             current_price,
             regime
         );
+        let (order_side, is_short) = match trade_signal.direction {
+            Direction::Short => (Side::Sell, true),
+            _ => (Side::Buy, false),
+        };
         let req = OrderRequest {
             symbol: symbol.clone(),
-            side: Side::Buy,
+            side: order_side,
             qty,
             price: None,
             atr: Some(trade_signal.atr),
             exchange_code,
             strength: Some(trade_signal.strength),
+            is_short,
         };
         if order_tx.send(req).await.is_ok() {
             last_order_sent
@@ -840,6 +845,7 @@ mod tests {
             atr: Some(signal.atr),
             exchange_code: None,
             strength: None,
+            is_short: false,
         };
         assert_eq!(req.atr, Some(atr_value));
 

@@ -115,6 +115,9 @@ pub struct OrderRequest {
     /// Signal strength (0.0-1.0) for aggressive limit pricing
     #[serde(default)]
     pub strength: Option<f64>,
+    /// True when the order is a short-sell (대차 매도). US only; KR always returns error.
+    #[serde(default)]
+    pub is_short: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
