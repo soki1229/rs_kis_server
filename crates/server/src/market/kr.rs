@@ -734,14 +734,18 @@ async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
         .stock()
         .quotations()
         .domestic_stock_v1_quotations_chk_holiday(DomesticStockV1QuotationsChkHolidayRequest {
-            bass_dt: today,
+            bass_dt: today.clone(),
             ctx_area_fk: "".to_string(),
             ctx_area_nk: "".to_string(),
         })
         .await
         .map_err(BotError::from)?;
 
-    Ok(resp.output.iter().any(|h| h.bzdy_yn == "N"))
+    // API가 여러 날짜 범위를 반환할 수 있으므로 오늘 날짜 항목만 확인한다
+    Ok(resp
+        .output
+        .iter()
+        .any(|h| h.bass_dt == today && h.bzdy_yn == "N"))
 }
 
 fn kr_market_timing() -> MarketTiming {
