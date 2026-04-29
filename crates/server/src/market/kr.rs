@@ -370,7 +370,6 @@ async fn kr_daily_chart(
                 fid_input_date_2: today,
                 fid_period_div_code: "D".to_string(),
                 fid_org_adj_prc: "0".to_string(),
-                ..Default::default()
             },
         )
         .await
@@ -435,7 +434,11 @@ async fn kr_place_order(
         msg: format!("order_cash: {}", e),
     })?;
 
-    let order_no = resp.output.as_ref().map(|o| o.odno.clone()).unwrap_or_default();
+    let order_no = resp
+        .output
+        .as_ref()
+        .map(|o| o.odno.clone())
+        .unwrap_or_default();
 
     Ok(UnifiedOrderResult {
         internal_id: uuid::Uuid::new_v4().to_string(),
@@ -667,7 +670,6 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
         .domestic_stock_v1_quotations_inquire_price(DomesticStockV1QuotationsInquirePriceRequest {
             fid_cond_mrkt_div_code: "J".to_string(),
             fid_input_iscd: symbol.to_string(),
-            ..Default::default()
         })
         .await
         .map_err(|e| BotError::ApiError {
@@ -676,7 +678,11 @@ async fn kr_current_price(base: &KrMarketBase, symbol: &str) -> Result<Decimal, 
 
     resp.output
         .as_ref()
-        .map(|o| o.stck_prpr.parse().map_err(|e| BotError::ApiError { msg: format!("parse stck_prpr: {}", e) }))
+        .map(|o| {
+            o.stck_prpr.parse().map_err(|e| BotError::ApiError {
+                msg: format!("parse stck_prpr: {}", e),
+            })
+        })
         .unwrap_or(Ok(Decimal::ZERO))
 }
 
@@ -708,7 +714,11 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
         .take(count as usize)
         .filter_map(|i| {
             let s = i.mksc_shrn_iscd.trim();
-            if s.is_empty() { None } else { Some(s.to_string()) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
         })
         .collect())
 }
@@ -727,7 +737,6 @@ async fn kr_is_holiday(base: &KrMarketBase) -> Result<bool, BotError> {
             bass_dt: today,
             ctx_area_fk: "".to_string(),
             ctx_area_nk: "".to_string(),
-            ..Default::default()
         })
         .await
         .map_err(BotError::from)?;

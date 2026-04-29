@@ -306,7 +306,10 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             strength: Some(trade_signal.strength),
         };
         if order_tx.send(req).await.is_ok() {
-            last_order_sent.lock().unwrap().insert(symbol.clone(), Instant::now());
+            last_order_sent
+                .lock()
+                .unwrap()
+                .insert(symbol.clone(), Instant::now());
         }
     } else {
         tracing::info!(
@@ -603,7 +606,10 @@ mod tests {
             Ok(false)
         }
 
-        fn market_open_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        fn market_open_utc(
+            &self,
+            date: chrono::NaiveDate,
+        ) -> Option<chrono::DateTime<chrono::Utc>> {
             use chrono::TimeZone;
             use chrono_tz::America::New_York;
             let open_time = chrono::NaiveTime::from_hms_opt(9, 30, 0)?;
@@ -613,7 +619,10 @@ mod tests {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
         }
 
-        fn market_close_utc(&self, date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+        fn market_close_utc(
+            &self,
+            date: chrono::NaiveDate,
+        ) -> Option<chrono::DateTime<chrono::Utc>> {
             use chrono::TimeZone;
             use chrono_tz::America::New_York;
             let close_time = chrono::NaiveTime::from_hms_opt(16, 0, 0)?;
@@ -865,16 +874,25 @@ mod tests {
             Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         // 10초 전 주문 기록 → 쿨다운 중이어야 함
-        los.lock().unwrap().insert("AAPL".to_string(), Instant::now() - Duration::from_secs(10));
-        let in_cooldown = los.lock().unwrap()
+        los.lock()
+            .unwrap()
+            .insert("AAPL".to_string(), Instant::now() - Duration::from_secs(10));
+        let in_cooldown = los
+            .lock()
+            .unwrap()
             .get("AAPL")
             .map(|t| t.elapsed() < Duration::from_secs(300))
             .unwrap_or(false);
         assert!(in_cooldown, "10초 경과 → 아직 쿨다운 중이어야 함");
 
         // 400초 전 주문 기록 → 쿨다운 만료여야 함
-        los.lock().unwrap().insert("AAPL".to_string(), Instant::now() - Duration::from_secs(400));
-        let expired = los.lock().unwrap()
+        los.lock().unwrap().insert(
+            "AAPL".to_string(),
+            Instant::now() - Duration::from_secs(400),
+        );
+        let expired = los
+            .lock()
+            .unwrap()
             .get("AAPL")
             .map(|t| t.elapsed() < Duration::from_secs(300))
             .unwrap_or(false);
