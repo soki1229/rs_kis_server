@@ -1473,7 +1473,7 @@ dependencies = [
 [[package]]
 name = "kis_api"
 version = "0.1.0"
-source = "git+https://github.com/soki1229/rs_kis.git?branch=master#29c3824a9981408a84d8e343cd37f9b9061488c1"
+source = "git+https://github.com/soki1229/rs_kis.git?branch=master#28205c04ad6635619785b5f4929088e98ae391b3"
 dependencies = [
  "async-trait",
  "chrono",
