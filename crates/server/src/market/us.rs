@@ -20,8 +20,6 @@ struct UsMarketBase {
     acnt_prdt_cd: String,
     fx_spread_pct: Decimal,
     throttler: Arc<KisThrottler>,
-    /// VTS 모의투자: VTTS3012R이 USD 예수금을 반환하지 않을 때 사용할 fallback 잔고
-    override_cash_usd: Option<Decimal>,
 }
 
 impl UsMarketBase {
@@ -37,7 +35,6 @@ impl UsMarketBase {
             acnt_prdt_cd,
             fx_spread_pct: Decimal::new(5, 3),
             throttler,
-            override_cash_usd: None,
         }
     }
 
@@ -275,19 +272,13 @@ impl UsVtsAdapter {
         let acnt_prdt_cd = std::env::var("KIS_VTS_ACCOUNT_CD")
             .or_else(|_| std::env::var("KIS_ACCOUNT_CD"))
             .unwrap_or_else(|_| "01".to_string());
-        // VTS USD 예수금 fallback: VTTS3012R이 잔고를 반환하지 않을 때 사용
-        let override_cash_usd = std::env::var("KIS_VTS_BALANCE_USD")
-            .ok()
-            .and_then(|v| v.parse::<Decimal>().ok());
-        let mut base = UsMarketBase::new(
-            vts_client,
-            cano.clone(),
-            acnt_prdt_cd.clone(),
-            throttler.clone(),
-        );
-        base.override_cash_usd = override_cash_usd;
         Self {
-            base,
+            base: UsMarketBase::new(
+                vts_client,
+                cano.clone(),
+                acnt_prdt_cd.clone(),
+                throttler.clone(),
+            ),
             data_base: UsMarketBase::new(real_client, cano, acnt_prdt_cd, throttler),
         }
     }
@@ -594,9 +585,10 @@ async fn us_order_history(
 }
 
 async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
+    // ── 1. 포지션 조회 (TTTS3012R / VTTS3012R) ──────────────────────────────
+    // output1: 보유 포지션 목록. output2: P&L 요약만 — 현금 잔고 없음
     base.throttler.wait().await;
-    // TR_CRCY_CD="USD" 필수 — 생략 시 output2 잔고 필드(frcr_dncl_amt_2) 미반환
-    let resp = base
+    let pos_resp = base
         .client
         .overseas()
         .trading()
@@ -609,10 +601,10 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         })
         .await
         .map_err(|e| BotError::ApiError {
-            msg: format!("overseas balance: {}", e),
+            msg: format!("overseas balance (positions): {}", e),
         })?;
 
-    let positions = resp
+    let positions = pos_resp
         .output1
         .iter()
         .map(|item| UnifiedPosition {
@@ -626,36 +618,38 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         })
         .collect();
 
-    // output2[0].frcr_dncl_amt_2 = USD 예수금 (TR_CRCY_CD="USD" 지정 시 반환)
-    // VTS에서는 output2가 단일 Object로 반환되고 frcr_dncl_amt_2가 없어서 항상 $0이 됨
-    let api_cash = resp
-        .output2
-        .first()
-        .and_then(|o| o.frcr_dncl_amt_2.parse::<Decimal>().ok())
-        .filter(|v| !v.is_zero())
-        .or_else(|| {
-            resp.output2
-                .first()
-                .and_then(|o| o.ord_psbl_frcr_amt.parse::<Decimal>().ok())
-                .filter(|v| !v.is_zero())
-        })
+    // ── 2. 가용 현금 조회 (TTTS3007R / VTTS3007R) ───────────────────────────
+    // ord_psbl_frcr_amt: 실전=USD 외화예수금, VTS=원화→달러 환산 시뮬레이션 포함
+    // sentinel 종목/단가는 현금 조회에 영향 없음 (수량 계산에만 사용)
+    base.throttler.wait().await;
+    let cash_resp = base
+        .client
+        .overseas()
+        .trading()
+        .overseas_stock_v1_trading_inquire_psamount(
+            OverseasStockV1TradingInquirePsamountRequest {
+                cano: base.cano.clone(),
+                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+                ovrs_excg_cd: "NASD".to_string(),
+                ovrs_ord_unpr: "1.00".to_string(),
+                item_cd: "INTC".to_string(),
+            },
+        )
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("overseas balance (cash): {}", e),
+        })?;
+
+    let cash = cash_resp
+        .output
+        .map(|o| o.ord_psbl_frcr_amt)
         .unwrap_or(Decimal::ZERO);
 
-    let cash = if api_cash.is_zero() {
-        if let Some(override_val) = base.override_cash_usd {
-            tracing::info!(
-                override_cash = %override_val,
-                "US balance: API returned $0, using KIS_VTS_BALANCE_USD override"
-            );
-            override_val
-        } else {
-            tracing::warn!("US balance: available_cash = $0 — VTTS3012R가 USD 예수금을 반환하지 않습니다. .env에 KIS_VTS_BALANCE_USD=100000 설정 필요");
-            Decimal::ZERO
-        }
+    if cash.is_zero() {
+        tracing::warn!("US balance: available_cash = $0");
     } else {
-        tracing::debug!(available_cash = %api_cash, "US balance fetched");
-        api_cash
-    };
+        tracing::debug!(available_cash = %cash, "US balance fetched");
+    }
 
     Ok(UnifiedBalance {
         total_equity: cash,
