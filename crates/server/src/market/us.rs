@@ -586,6 +586,7 @@ async fn us_order_history(
 
 async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
     base.throttler.wait().await;
+    // TR_CRCY_CD="USD" 필수 — 생략 시 output2 잔고 필드(frcr_dncl_amt_2) 미반환
     let resp = base
         .client
         .overseas()
@@ -594,6 +595,7 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             ovrs_excg_cd: "NASD".to_string(),
+            tr_crcy_cd: "USD".to_string(),
             ..Default::default()
         })
         .await
@@ -615,38 +617,24 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         })
         .collect();
 
-    // inquire-balance/output2 has no deposit field; use inquire-present-balance for cash.
-    base.throttler.wait().await;
-    let pres_resp = base
-        .client
-        .overseas()
-        .trading()
-        .overseas_stock_v1_trading_inquire_present_balance(
-            OverseasStockV1TradingInquirePresentBalanceRequest {
-                cano: base.cano.clone(),
-                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-                wcrc_frcr_dvsn_cd: "01".to_string(),
-                natn_cd: "840".to_string(),
-                tr_mket_cd: "00".to_string(),
-                inqr_dvsn_cd: "00".to_string(),
-            },
-        )
-        .await
-        .map_err(|e| BotError::ApiError {
-            msg: format!("overseas present-balance: {}", e),
-        })?;
-
-    // Real: output2.frcr_dncl_amt_2 / VTS: output3만 지원 (output2 비어있음)
-    let cash = pres_resp
+    // output2[0].frcr_dncl_amt_2 = USD 예수금 (TR_CRCY_CD="USD" 지정 시 반환)
+    let cash = resp
         .output2
         .first()
         .and_then(|o| o.frcr_dncl_amt_2.parse::<Decimal>().ok())
         .filter(|v| !v.is_zero())
-        .or_else(|| pres_resp.output3.first().map(|o| o.frcr_use_psbl_amt))
+        .or_else(|| {
+            resp.output2
+                .first()
+                .and_then(|o| o.ord_psbl_frcr_amt.parse::<Decimal>().ok())
+                .filter(|v| !v.is_zero())
+        })
         .unwrap_or(Decimal::ZERO);
 
     if cash.is_zero() {
-        tracing::warn!("US balance: available_cash = $0 — VTS 계좌에 USD 예수금이 없거나 present-balance 조회 결과가 비어 있습니다. KIS HTS/MTS에서 모의투자 USD 입금이 필요합니다.");
+        tracing::warn!("US balance: available_cash = $0 — TR_CRCY_CD=USD로 조회했으나 output2 잔고가 없습니다. 계좌에 USD 예수금을 확인하세요.");
+    } else {
+        tracing::debug!(available_cash = %cash, "US balance fetched");
     }
 
     Ok(UnifiedBalance {

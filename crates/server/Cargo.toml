@@ -40,10 +40,10 @@ uuid = { version = "1", features = ["v4"] }
 socket2 = "0.6"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
-kis_api = { git = "https://github.com/soki1229/rs_kis.git", branch = "feat/zero-boilerplate" }
+kis_api = { git = "https://github.com/soki1229/rs_kis.git", branch = "master" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
-kis_api = { git = "https://github.com/soki1229/rs_kis.git", branch = "feat/zero-boilerplate" }
+kis_api = { git = "https://github.com/soki1229/rs_kis.git", branch = "master" }
 tempfile = "3"
 axum-test = "19"
