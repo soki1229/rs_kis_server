@@ -255,10 +255,11 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     let qty = sized_qty.to_u64().unwrap_or(0);
     if qty == 0 {
-        tracing::info!(
-            "[{}] ⚠️ {} 수량 산출 0 (잔고 부족 또는 리스크 제한) → skip",
-            market.label(),
-            symbol
+        tracing::warn!(
+            market = %market.label(),
+            symbol = %symbol,
+            balance = %account_balance,
+            "수량 산출 0 — 잔고 부족 또는 리스크 제한으로 주문 skip"
         );
         activity.record_eval(market.label(), &symbol, score, "skip", "qty_zero");
         return;

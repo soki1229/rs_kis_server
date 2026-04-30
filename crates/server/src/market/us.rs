@@ -645,6 +645,10 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         .or_else(|| pres_resp.output3.first().map(|o| o.frcr_use_psbl_amt))
         .unwrap_or(Decimal::ZERO);
 
+    if cash.is_zero() {
+        tracing::warn!("US balance: available_cash = $0 — VTS 계좌에 USD 예수금이 없거나 present-balance 조회 결과가 비어 있습니다. KIS HTS/MTS에서 모의투자 USD 입금이 필요합니다.");
+    }
+
     Ok(UnifiedBalance {
         total_equity: cash,
         available_cash: cash,
