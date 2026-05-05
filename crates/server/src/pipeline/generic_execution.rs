@@ -339,7 +339,7 @@ async fn reconcile_submitted_orders(
         let order_id: String = row.get("id");
         let broker_id: String = row.get("broker_order_id");
         let symbol: String = row.get("symbol");
-        let qty: i64 = row.get("qty");
+        let qty: i64 = row.get::<String, _>("qty").parse().unwrap_or(0);
         let atr: Option<Decimal> = row.try_get::<Option<String>, _>("atr").ok().flatten().and_then(|s| {
             s.parse().map_err(|_| tracing::warn!(order_id = %order_id, "ATR parse failed, defaulting to None")).ok()
         });
