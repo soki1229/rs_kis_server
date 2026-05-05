@@ -220,23 +220,42 @@ pub async fn run_generic_position_task(
                 );
 
                 let now = chrono::Utc::now().to_rfc3339();
-                sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                    .bind(uuid::Uuid::new_v4().to_string())
-                    .bind("api-recovery")
-                    .bind(&api_pos.symbol)
-                    .bind(entry.to_string())
-                    .bind(stop.to_string())
-                    .bind(atr.to_string())
-                    .bind(pt1.to_string())
-                    .bind(pt2.to_string())
-                    .bind("Trending")
-                    .bind(qty.to_string())
-                    .bind(exchange_code)
-                    .bind(&now)
-                    .bind(&now)
-                    .execute(&db_pool)
-                    .await
-                    .ok();
+                let recovery_order_id = uuid::Uuid::new_v4().to_string();
+                let pos_id = uuid::Uuid::new_v4().to_string();
+                let symbol = api_pos.symbol.clone();
+
+                // positions.order_id FK 충족을 위해 단일 트랜잭션으로 orders + positions 동시 삽입
+                let result = async {
+                    let mut tx = db_pool.begin().await?;
+                    sqlx::query("INSERT OR IGNORE INTO orders (id, symbol, side, qty, price, atr, state, updated_at) VALUES (?, ?, 'buy', ?, NULL, NULL, 'Filled', ?)")
+                        .bind(&recovery_order_id)
+                        .bind(&symbol)
+                        .bind(qty.to_string())
+                        .bind(&now)
+                        .execute(&mut *tx)
+                        .await?;
+                    sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        .bind(&pos_id)
+                        .bind(&recovery_order_id)
+                        .bind(&symbol)
+                        .bind(entry.to_string())
+                        .bind(stop.to_string())
+                        .bind(atr.to_string())
+                        .bind(pt1.to_string())
+                        .bind(pt2.to_string())
+                        .bind("Trending")
+                        .bind(qty.to_string())
+                        .bind(exchange_code)
+                        .bind(&now)
+                        .bind(&now)
+                        .execute(&mut *tx)
+                        .await?;
+                    tx.commit().await?;
+                    Ok::<_, sqlx::Error>(())
+                }.await;
+                if let Err(e) = result {
+                    tracing::error!(symbol = %api_pos.symbol, error = %e, "포지션 복구 DB 저장 실패");
+                }
 
                 pos_states.insert(api_pos.symbol, (state, qty));
             }
