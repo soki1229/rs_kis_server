@@ -436,7 +436,7 @@ async fn us_place_order(
         ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
         sll_type,
         ord_svr_dvsn_cd: "0".to_string(), // 인터넷 주문
-        ord_dvsn: "00".to_string(),        // 지정가
+        ord_dvsn: "00".to_string(),       // 지정가
         ..Default::default()
     };
     let trading = base.client.overseas().trading();
@@ -618,15 +618,13 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         .client
         .overseas()
         .trading()
-        .overseas_stock_v1_trading_inquire_psamount(
-            OverseasStockV1TradingInquirePsamountRequest {
-                cano: base.cano.clone(),
-                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-                ovrs_excg_cd: "NASD".to_string(),
-                ovrs_ord_unpr: "1.00".to_string(),
-                item_cd: "INTC".to_string(),
-            },
-        )
+        .overseas_stock_v1_trading_inquire_psamount(OverseasStockV1TradingInquirePsamountRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: "NASD".to_string(),
+            ovrs_ord_unpr: "1.00".to_string(),
+            item_cd: "INTC".to_string(),
+        })
         .await
         .map_err(|e| BotError::ApiError {
             msg: format!("overseas balance (cash): {}", e),

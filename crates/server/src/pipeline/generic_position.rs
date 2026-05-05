@@ -189,7 +189,11 @@ pub async fn run_generic_position_task(
                 };
                 let entry = api_pos.avg_price;
                 // ATR을 진입가의 2%로 추정
-                let atr = if entry > Decimal::ZERO { entry * dec!(0.02) } else { Decimal::ONE };
+                let atr = if entry > Decimal::ZERO {
+                    entry * dec!(0.02)
+                } else {
+                    Decimal::ONE
+                };
                 let stop = entry - pos_cfg.stop_atr_multiplier * atr;
                 let pt1 = entry + pos_cfg.profit_target_1_atr * atr;
                 let pt2 = entry + pos_cfg.profit_target_2_atr * atr;
