@@ -268,6 +268,18 @@ pub async fn run_generic_position_task(
         }
     }
 
+    // 복구된 포지션의 현재가를 API로 조회해 last_prices 초기화
+    for symbol in pos_states.keys() {
+        match adapter.current_price(symbol).await {
+            Ok(price) => {
+                last_prices.insert(symbol.clone(), price);
+            }
+            Err(e) => {
+                tracing::warn!(symbol = %symbol, error = %e, "현재가 조회 실패 — 진입가로 대체");
+            }
+        }
+    }
+
     // 초기 포지션 상태를 live_state_tx에 발행 (상태 조회 명령에서 포지션이 보이도록)
     publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx);
 
