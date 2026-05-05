@@ -642,7 +642,6 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
 
     let cash = cash_resp
         .output
-        .first()
         .map(|o| o.ord_psbl_frcr_amt)
         .unwrap_or(Decimal::ZERO);
 
