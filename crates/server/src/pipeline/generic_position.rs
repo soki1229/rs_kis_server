@@ -5,6 +5,7 @@
 
 use crate::config::PositionConfig;
 use crate::market::MarketAdapter;
+use crate::monitoring::alert::AlertRouter;
 use crate::pipeline::TickData;
 use crate::regime::RegimeReceiver;
 use crate::state::MarketLiveState;
@@ -112,6 +113,7 @@ pub async fn run_generic_position_task(
     token: CancellationToken,
     eod_fallback: chrono::DateTime<chrono::Utc>,
     pos_cfg: PositionConfig,
+    summary_alert: AlertRouter,
 ) {
     let market_id = adapter.market_id();
     let market_name = adapter.name();
@@ -266,6 +268,9 @@ pub async fn run_generic_position_task(
         }
     }
 
+    // 초기 포지션 상태를 live_state_tx에 발행 (상태 조회 명령에서 포지션이 보이도록)
+    publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx);
+
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
@@ -330,9 +335,17 @@ pub async fn run_generic_position_task(
                         .bind(&now)
                         .bind(&now)
                         .execute(&db_pool).await.ok();
+                    summary_alert.info(format!(
+                        "📥 진입 [{market_name}] {} × {}주 @ {}\n스탑: {} | 목표1: {} | 목표2: {}",
+                        fill.symbol, fill.filled_qty, current_price, stop_price, pt1, pt2
+                    ));
                 } else {
                     pos_states.remove(&fill.symbol);
                     sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
+                    summary_alert.info(format!(
+                        "📤 청산 [{market_name}] {} 포지션 종료",
+                        fill.symbol
+                    ));
                 }
             }
             Some(tick) = tick_pos_rx.recv() => {
@@ -363,6 +376,11 @@ pub async fn run_generic_position_task(
                                 }
                                 state.partial_exit_done = true;
                                 sqlx::query("UPDATE positions SET partial_exit_done = 1 WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
+                                let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
+                                summary_alert.info(format!(
+                                    "🎯 1차익절 [{market_name}] {} × {}주 @ {} ({:+.2}%)\n잔여 {}주 보유 중",
+                                    tick.symbol, exit_qty, tick.price, pnl_pct, *qty - exit_qty
+                                ));
                             }
                         }
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
@@ -370,19 +388,40 @@ pub async fn run_generic_position_task(
                                 symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                             }).await;
                             tracing::info!(symbol = %tick.symbol, ?decision, "Exit triggered");
+                            let (icon, label) = match decision {
+                                ExitDecision::StopLoss => ("🔴", "손절"),
+                                ExitDecision::TrailingStop => ("🟠", "트레일링 스탑"),
+                                _ => ("🟢", "목표가 도달"),
+                            };
+                            let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
+                            summary_alert.info(format!(
+                                "{icon} {label} [{market_name}] {} × {}주 @ {}\n진입: {} → 현재: {} ({:+.2}%)",
+                                tick.symbol, *qty, tick.price, state.entry_price, tick.price, pnl_pct
+                            ));
                         }
                     }
                 }
             }
         }
 
-        let mut positions = Vec::new();
-        for (symbol, (state, qty)) in &pos_states {
+        publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx);
+    }
+}
+
+fn publish_live_state(
+    live_state_tx: &watch::Sender<MarketLiveState>,
+    pos_states: &HashMap<String, (PositionState, u64)>,
+    last_prices: &HashMap<String, Decimal>,
+    regime_rx: &RegimeReceiver,
+) {
+    let positions = pos_states
+        .iter()
+        .map(|(symbol, (state, qty))| {
             let current_price = last_prices
                 .get(symbol)
                 .cloned()
                 .unwrap_or(state.entry_price);
-            positions.push(Position {
+            Position {
                 symbol: symbol.clone(),
                 name: None,
                 qty: *qty as i64,
@@ -391,23 +430,24 @@ pub async fn run_generic_position_task(
                 pnl_pct: ((current_price - state.entry_price)
                     / state.entry_price.max(Decimal::ONE))
                 .to_f64()
-                .unwrap_or(0.0),
+                .unwrap_or(0.0)
+                    * 100.0,
                 unrealized_pnl: (current_price - state.entry_price) * Decimal::from(*qty),
                 stop_price: state.stop_price,
                 trailing_stop: state.trailing_stop_price,
                 profit_target_1: state.profit_target_1,
                 profit_target_2: state.profit_target_2,
                 regime: format!("{:?}", state.regime),
-            });
-        }
-        live_state_tx
-            .send(MarketLiveState {
-                positions,
-                daily_pnl_r: 0.0, // Placeholder for actual stats calculation
-                regime: format!("{:?}", *regime_rx.borrow()),
-            })
-            .ok();
-    }
+            }
+        })
+        .collect();
+    live_state_tx
+        .send(MarketLiveState {
+            positions,
+            daily_pnl_r: 0.0,
+            regime: format!("{:?}", *regime_rx.borrow()),
+        })
+        .ok();
 }
 
 #[cfg(test)]

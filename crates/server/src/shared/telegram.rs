@@ -83,90 +83,109 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     use rust_decimal::prelude::ToPrimitive;
     let live = state.live_state_rx.borrow();
     let summary = state.summary.read().unwrap_or_else(|e| e.into_inner());
+
+    let bot_icon = match summary.bot_state {
+        BotState::Active => "🟢 운용 중",
+        BotState::Idle => "⚪️ 대기",
+        BotState::EntryPaused | BotState::EntryPausedLlmOutage => "🔵 청산 모드",
+        BotState::Suspended => "🟡 정지",
+        BotState::HardBlocked => "🔴 긴급 차단",
+    };
+
+    let regime_icon = match live.regime.as_str() {
+        "Trending" => "📈",
+        "Volatile" => "⚡",
+        "Quiet" => "😴",
+        _ => "•",
+    };
+
     let total_unrealized: f64 = live
         .positions
         .iter()
         .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
         .sum();
-
-    let bot_icon = match summary.bot_state {
-        BotState::Active => "🟢 운용 중",
-        BotState::Idle => "⚪️ 대기",
-        BotState::Suspended => "🟡 일시정지",
-        BotState::HardBlocked => "🔴 차단됨 (수동 점검 필요)",
-        _ => "🟠 기타",
-    };
-
-    let pnl_icon = if live.daily_pnl_r >= 0.0 {
-        "📈"
+    let unrealized_icon = if total_unrealized >= 0.0 {
+        "▲"
     } else {
-        "📉"
+        "▼"
     };
 
-    let signals_summary = state.activity.format_signals_for_market(market, 5);
+    let pos_section = if live.positions.is_empty() {
+        "  보유 포지션 없음".to_string()
+    } else {
+        live.positions
+            .iter()
+            .map(format_position_line)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
 
     format!(
-        "📊 *[{market} 시장 상태 보고]*\n\n\
-         • 봇 상태: {}\n\
-         • 보유 종목: {}개\n\
-         • 실현 손익: {:.0}원 {}\n\
-         • 미실현 손익: {:.0}원\n\n\
-         {}",
-        bot_icon,
+        "━━━ {market} | {bot_icon} ━━━\n\
+         레짐: {regime_icon} {} | 미실현: {unrealized_icon} {total_unrealized:.0}\n\n\
+         🗂 보유 {}종목\n{}",
+        live.regime,
         live.positions.len(),
-        live.daily_pnl_r,
-        pnl_icon,
-        total_unrealized,
-        signals_summary
+        pos_section,
+    )
+}
+
+fn format_position_line(p: &crate::types::Position) -> String {
+    let display = match &p.name {
+        Some(n) => format!("{}({})", n, p.symbol),
+        None => p.symbol.clone(),
+    };
+    let pnl_sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
+    let pnl_icon = if p.pnl_pct >= 0.0 { "🔺" } else { "🔻" };
+    let ts_line = p
+        .trailing_stop
+        .map(|t| format!("\n  TS: {}", t))
+        .unwrap_or_default();
+    let live_price = if p.current_price == p.avg_price {
+        format!("{} (미수신)", p.avg_price)
+    } else {
+        format!("{}", p.current_price)
+    };
+    format!(
+        "  📍 {} × {}주\n  평단: {} | 현재: {}\n  스탑: {} | 목표: {} / {}{}\n  손익: {pnl_icon} {pnl_sign}{:.2}%",
+        display,
+        p.qty,
+        p.avg_price,
+        live_price,
+        p.stop_price,
+        p.profit_target_1,
+        p.profit_target_2,
+        ts_line,
+        p.pnl_pct,
     )
 }
 
 /// `/positions` 응답 문자열 생성.
 pub fn format_positions(state: &PipelineState, market: &str) -> String {
+    use rust_decimal::prelude::ToPrimitive;
     let live = state.live_state_rx.borrow();
     if live.positions.is_empty() {
-        return format!("📦 *[{market}]* 보유 중인 포지션이 없습니다.");
+        return format!("📦 [{market}] 보유 중인 포지션이 없습니다.");
     }
 
-    let lines: Vec<String> = live
+    let total_unrealized: f64 = live
         .positions
         .iter()
-        .map(|p| {
-            let pnl_icon = if p.pnl_pct >= 0.0 { "🔺" } else { "🔻" };
-            let pnl_sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
-            let ts_str = p
-                .trailing_stop
-                .map(|t| format!("\n    └ 추적익절가: {}", t))
-                .unwrap_or_default();
+        .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
+        .sum();
+    let unrealized_icon = if total_unrealized >= 0.0 {
+        "▲"
+    } else {
+        "▼"
+    };
 
-            let display_name = match &p.name {
-                Some(n) => format!("{}({})", n, p.symbol),
-                None => p.symbol.clone(),
-            };
+    let lines: Vec<String> = live.positions.iter().map(format_position_line).collect();
 
-            format!(
-                "📍 *{}* ({}주)\n\
-                 평단: {} → 현재: {}\n\
-                 수익: {} {}{:.2}% ({:.0}원)\n\
-                 목표: PT1={} / PT2={}\n\
-                 손절: {}{}",
-                display_name,
-                p.qty,
-                p.avg_price,
-                p.current_price,
-                pnl_icon,
-                pnl_sign,
-                p.pnl_pct,
-                p.unrealized_pnl,
-                p.profit_target_1,
-                p.profit_target_2,
-                p.stop_price,
-                ts_str,
-            )
-        })
-        .collect();
-
-    format!("💰 *[{market} 포지션 현황]*\n\n{}", lines.join("\n\n"))
+    format!(
+        "💰 [{market} 포지션 현황] {}종목 | 미실현 {unrealized_icon} {total_unrealized:.0}\n\n{}",
+        live.positions.len(),
+        lines.join("\n\n")
+    )
 }
 
 use crate::monitoring::alert::AlertMessage;
@@ -261,10 +280,9 @@ async fn run_command_loop(
             let text = msg.text().unwrap_or("");
 
             if text.trim() == "/status" {
-                let pipeline_kr = format_status(&kr_st, "KR");
-                let pipeline_us = format_status(&us_st, "US");
-                let activity_status = act.format_status();
-                let reply = format!("{}\n\n{}\n{}", activity_status, pipeline_kr, pipeline_us);
+                let kr = format_status(&kr_st, "KR");
+                let us = format_status(&us_st, "US");
+                let reply = format!("{}\n\n{}", kr, us);
                 bot.send_message(msg.chat.id, reply).await?;
                 return Ok(());
             }
@@ -317,24 +335,25 @@ async fn run_command_loop(
             }
 
             if text.trim() == "/help" {
-                let help = "\
-                    📖 *사용 가능한 명령*\n\n\
-                    /status — 봇 상태 요약 (phase, watchlist, 틱 수 등)\n\
-                    /log [N] — 최근 활동 로그 (기본 15건)\n\
-                    /positions — 보유 포지션\n\
-                    /kr status — KR 파이프라인 상태\n\
-                    /us status — US 파이프라인 상태\n\
-                    /kr watchlist — KR 워치리스트 종목 목록\n\
-                    /us watchlist — US 워치리스트 종목 목록\n\
-                    /kr signals [N] — KR 최근 시그널 평가 (기본 15건)\n\
-                    /us signals [N] — US 최근 시그널 평가 (기본 15건)\n\
+                let help = "📖 사용 가능한 명령\n\n\
+                    [조회]\n\
+                    /status — KR+US 현황 (레짐, 포지션, 손익)\n\
+                    /positions — 보유 포지션 상세\n\
+                    /kr status — KR 상태\n\
+                    /us status — US 상태\n\
+                    /kr watchlist — KR 감시 종목\n\
+                    /us watchlist — US 감시 종목\n\
+                    /kr signals [N] — KR 최근 시그널 (기본 15건)\n\
+                    /us signals [N] — US 최근 시그널 (기본 15건)\n\
+                    /log [N] — 최근 활동 로그\n\n\
+                    [제어]\n\
                     /kr start|stop|pause — KR 봇 제어\n\
                     /us start|stop|pause — US 봇 제어\n\
                     /stop-all — 전체 중단 + 청산\n\
-                    /kill-hard — 하드 킬스위치\n\
-                    /kill-soft — 소프트 킬스위치\n\
-                    /kill-clear — 킬스위치 해제\n\
-                    /help — 이 도움말";
+                    /kill-hard — 긴급 차단\n\
+                    /kill-soft — 소프트 차단\n\
+                    /kill-clear — 차단 해제\n\
+                    /liquidate-all — 전체 포지션 청산";
                 bot.send_message(msg.chat.id, help).await?;
                 return Ok(());
             }
@@ -545,19 +564,16 @@ mod tests {
     fn format_status_shows_market_label() {
         let state = make_state_empty();
         let result = format_status(&state, "KR");
-        assert!(
-            result.contains("[KR 시장 상태 보고]"),
-            "should contain market label"
-        );
+        assert!(result.contains("KR"), "should contain market label");
     }
 
     #[test]
-    fn format_status_shows_pnl() {
+    fn format_status_shows_regime() {
         let state = make_state_with_position("NVDA", 1, dec!(130.00));
         let result = format_status(&state, "US");
         assert!(
-            result.contains("실현 손익:"),
-            "should show realized P&L: got {result}"
+            result.contains("Trending"),
+            "should show regime: got {result}"
         );
     }
 

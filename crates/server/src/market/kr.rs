@@ -713,7 +713,7 @@ async fn kr_volume_ranking(base: &KrMarketBase, count: u32) -> Result<Vec<String
             fid_trgt_exls_cls_code: "0".to_string(),
             fid_input_price_1: "".to_string(),
             fid_input_price_2: "".to_string(),
-            fid_vol_cnt: "".to_string()
+            fid_vol_cnt: "".to_string(),
         })
         .await
         .map_err(BotError::from)?;
