@@ -178,6 +178,71 @@ pub async fn run_generic_position_task(
         }
     }
 
+    // DB가 비어 있으면 balance() API로 실제 포지션 동기화 (재시작 후 복구)
+    if pos_states.is_empty() {
+        if let Ok(balance) = adapter.balance().await {
+            for api_pos in balance.positions {
+                use rust_decimal_macros::dec;
+                let qty = match api_pos.qty.to_u64() {
+                    Some(q) if q > 0 => q,
+                    _ => continue,
+                };
+                let entry = api_pos.avg_price;
+                // ATR을 진입가의 2%로 추정
+                let atr = if entry > Decimal::ZERO { entry * dec!(0.02) } else { Decimal::ONE };
+                let stop = entry - pos_cfg.stop_atr_multiplier * atr;
+                let pt1 = entry + pos_cfg.profit_target_1_atr * atr;
+                let pt2 = entry + pos_cfg.profit_target_2_atr * atr;
+                let exchange_code = Some("NASD".to_string());
+
+                let state = PositionState {
+                    entry_price: entry,
+                    stop_price: stop,
+                    atr_at_entry: atr,
+                    profit_target_1: pt1,
+                    profit_target_2: pt2,
+                    trailing_stop_price: None,
+                    partial_exit_done: false,
+                    regime: MarketRegime::Trending,
+                    profit_target_1_atr: pos_cfg.profit_target_1_atr,
+                    profit_target_2_atr: pos_cfg.profit_target_2_atr,
+                    trailing_atr_trending: pos_cfg.trailing_atr_trending,
+                    trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
+                    exchange_code: exchange_code.clone(),
+                };
+
+                tracing::info!(
+                    market = %market_name,
+                    symbol = %api_pos.symbol,
+                    qty,
+                    entry = %entry,
+                    "잔고 API로 포지션 복구 (DB 없음)"
+                );
+
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    .bind(uuid::Uuid::new_v4().to_string())
+                    .bind("api-recovery")
+                    .bind(&api_pos.symbol)
+                    .bind(entry.to_string())
+                    .bind(stop.to_string())
+                    .bind(atr.to_string())
+                    .bind(pt1.to_string())
+                    .bind(pt2.to_string())
+                    .bind("Trending")
+                    .bind(qty.to_string())
+                    .bind(exchange_code)
+                    .bind(&now)
+                    .bind(&now)
+                    .execute(&db_pool)
+                    .await
+                    .ok();
+
+                pos_states.insert(api_pos.symbol, (state, qty));
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
