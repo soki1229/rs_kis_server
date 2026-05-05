@@ -445,6 +445,8 @@ async fn us_place_order(
         ord_qty: req.qty.to_string(),
         ovrs_ord_unpr: adjusted_price.unwrap_or(Decimal::ZERO).to_string(),
         sll_type,
+        ord_svr_dvsn_cd: "0".to_string(), // 인터넷 주문
+        ord_dvsn: "00".to_string(),        // 지정가
         ..Default::default()
     };
     let trading = base.client.overseas().trading();
