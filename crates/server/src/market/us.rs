@@ -746,8 +746,7 @@ async fn us_volume_ranking(base: &UsMarketBase, count: u32) -> Result<Vec<String
         .collect())
 }
 
-async fn us_is_holiday(base: &UsMarketBase) -> Result<bool, BotError> {
-    base.throttler.wait().await;
+async fn us_is_holiday(_base: &UsMarketBase) -> Result<bool, BotError> {
     let today = Utc::now().with_timezone(&New_York).date_naive();
     Ok(is_nyse_holiday(today))
 }

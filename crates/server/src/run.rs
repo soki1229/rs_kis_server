@@ -128,7 +128,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     let us_real_client = real_client.clone();
 
     let real_throttler = Arc::new(shared::throttler::KisThrottler::new(500)); // 2 TPS for Real
-    let vts_throttler = Arc::new(shared::throttler::KisThrottler::new(1000)); // 1 TPS for VTS
+    let vts_throttler = Arc::new(shared::throttler::KisThrottler::new(1200)); // VTS 1 TPS + 200ms margin
 
     let adapters_factory = crate::run_generic::MarketAdapters::new(
         kr_real_client.clone(),
