@@ -201,6 +201,7 @@ async fn process_single_order(
             // 3. Poll for status
             let start = Duration::from_secs(1);
             let mut interval = start;
+            let mut last_reported_qty: u64 = 0;
             for attempt in 1..=30 {
                 tokio::time::sleep(interval).await;
                 interval = (interval + Duration::from_secs(1)).min(Duration::from_secs(5));
@@ -256,17 +257,20 @@ async fn process_single_order(
                                     tracing::info!(symbol = %req.symbol, qty = filled_qty, price = %filled_price, "Order filled (market order)");
                                 }
 
-                                fill_tx
-                                    .send(FillInfo {
-                                        order_id: order_id.clone(),
-                                        symbol: req.symbol.clone(),
-                                        filled_qty,
-                                        filled_price,
-                                        exchange_code: req.exchange_code.clone(),
-                                        atr: req.atr,
-                                    })
-                                    .await
-                                    .ok();
+                                let delta = filled_qty.saturating_sub(last_reported_qty);
+                                if delta > 0 {
+                                    fill_tx
+                                        .send(FillInfo {
+                                            order_id: order_id.clone(),
+                                            symbol: req.symbol.clone(),
+                                            filled_qty: delta,
+                                            filled_price,
+                                            exchange_code: req.exchange_code.clone(),
+                                            atr: req.atr,
+                                        })
+                                        .await
+                                        .ok();
+                                }
                                 return;
                             }
                             PollOutcome::PartialFilled {
@@ -276,6 +280,19 @@ async fn process_single_order(
                                 tracing::info!(symbol = %req.symbol, qty = filled_qty, "Order partially filled, continuing poll...");
                                 sqlx::query("UPDATE orders SET filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
                                     .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await.ok();
+                                // delta 전송: 새로 체결된 수량만 포지션 태스크로 전달
+                                let delta = filled_qty.saturating_sub(last_reported_qty);
+                                if delta > 0 {
+                                    fill_tx.send(FillInfo {
+                                        order_id: order_id.clone(),
+                                        symbol: req.symbol.clone(),
+                                        filled_qty: delta,
+                                        filled_price,
+                                        exchange_code: req.exchange_code.clone(),
+                                        atr: req.atr,
+                                    }).await.ok();
+                                    last_reported_qty = filled_qty;
+                                }
                             }
                             PollOutcome::Cancelled => {
                                 sqlx::query("UPDATE orders SET state = 'Cancelled', updated_at = ? WHERE id = ?")

@@ -37,6 +37,8 @@ pub struct PositionState {
     pub exchange_code: Option<String>,
     /// exit 주문 전송 후 true → 다음 tick에 중복 청산 주문 방지
     pub exit_pending: bool,
+    /// exit_pending 설정 시각 — 90초 초과 시 자동 리셋 (Cancelled 감지 대체)
+    pub exit_pending_since: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +199,7 @@ pub async fn run_generic_position_task(
                 trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
                 exchange_code,
                 exit_pending: false,
+                exit_pending_since: None,
             };
             pos_states.insert(symbol, (state, qty.parse().unwrap_or(0)));
         }
@@ -250,6 +253,7 @@ pub async fn run_generic_position_task(
                     trailing_stop_price: None,
                     partial_exit_done: false,
                     exit_pending: false,
+                    exit_pending_since: None,
                     regime: MarketRegime::Trending,
                     profit_target_1_atr: pos_cfg.profit_target_1_atr,
                     profit_target_2_atr: pos_cfg.profit_target_2_atr,
@@ -417,6 +421,7 @@ pub async fn run_generic_position_task(
                         trailing_stop_price: None,
                         partial_exit_done: false,
                         exit_pending: false,
+                        exit_pending_since: None,
                         regime: regime.clone(),
                         profit_target_1_atr: pos_cfg.profit_target_1_atr,
                         profit_target_2_atr: pos_cfg.profit_target_2_atr,
@@ -487,6 +492,15 @@ pub async fn run_generic_position_task(
             Some(tick) = tick_pos_rx.recv() => {
                 if let Some((state, qty)) = pos_states.get_mut(&tick.symbol) {
                     last_prices.insert(tick.symbol.clone(), tick.price);
+                    if state.exit_pending {
+                        if let Some(since) = state.exit_pending_since {
+                            if since.elapsed() > std::time::Duration::from_secs(90) {
+                                state.exit_pending = false;
+                                state.exit_pending_since = None;
+                                tracing::warn!(symbol = %tick.symbol, "exit_pending 90초 타임아웃 → 리셋");
+                            }
+                        }
+                    }
                     let decision = evaluate_exit(state, tick.price);
                     match decision {
                         ExitDecision::Hold => {
@@ -511,7 +525,8 @@ pub async fn run_generic_position_task(
                                     let _ = force_order_tx.send(OrderRequest {
                                         symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                                     }).await;
-                                    state.exit_pending = true; // fill 올 때까지 중복 방지
+                                    state.exit_pending = true;
+                                    state.exit_pending_since = Some(std::time::Instant::now());
                                 }
                                 let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
                                 let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
@@ -524,6 +539,7 @@ pub async fn run_generic_position_task(
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
                             if !state.exit_pending {
                                 state.exit_pending = true;
+                                state.exit_pending_since = Some(std::time::Instant::now());
                                 let _ = force_order_tx.send(OrderRequest {
                                     symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                                 }).await;
@@ -626,6 +642,7 @@ mod tests {
             trailing_atr_volatile: dec!(1.0),
             exchange_code: None,
             exit_pending: false,
+            exit_pending_since: None,
         }
     }
 
