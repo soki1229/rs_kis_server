@@ -260,7 +260,7 @@ pub async fn run_generic_position_task(
                     partial_exit_done: false,
                     exit_pending: false,
                     exit_pending_since: None,
-                exit_timeout_count: 0,
+                    exit_timeout_count: 0,
                     regime: MarketRegime::Trending,
                     profit_target_1_atr: pos_cfg.profit_target_1_atr,
                     profit_target_2_atr: pos_cfg.profit_target_2_atr,
@@ -673,7 +673,7 @@ mod tests {
             exchange_code: None,
             exit_pending: false,
             exit_pending_since: None,
-                exit_timeout_count: 0,
+            exit_timeout_count: 0,
         }
     }
 

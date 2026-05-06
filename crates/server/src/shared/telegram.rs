@@ -169,7 +169,10 @@ fn fmt_usd(d: rust_decimal::Decimal) -> String {
 pub fn format_status(state: &PipelineState, market: &str) -> String {
     use rust_decimal::prelude::ToPrimitive;
     let live = state.live_state_rx.borrow();
-    let summary = state.summary.read().unwrap_or_else(|e| e.into_inner());
+    let summary = state
+        .summary
+        .read()
+        .expect("RwLock poisoned, cannot read MarketSummary");
 
     let (bot_icon, bot_label) = match summary.bot_state {
         BotState::Active => ("🟢", "운용 중"),
@@ -218,7 +221,6 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     };
     let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
     let (total_amt, total_unit, cash_str) = if market == "US" {
-        use rust_decimal::prelude::ToPrimitive;
         let amt = format!("{total_sign}{:.2}", total_unrealized);
         let cash = match live.available_cash {
             Some(c) => format!("<code>{}</code>", fmt_usd(c)),
@@ -226,7 +228,6 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
         };
         (amt, "$", cash)
     } else {
-        use rust_decimal::prelude::ToPrimitive;
         let amt = format!("{total_sign}{}", fmt_num(total_unrealized as i64));
         let cash = match live.available_cash {
             Some(c) => format!("<code>{}</code>", fmt_num(c.to_i64().unwrap_or(0))),
@@ -321,11 +322,17 @@ fn format_position_line(p: &crate::types::Position, market: &str) -> String {
         format!("✂ <code>{stop_val}</code> ({stop_dist_pct:+.1}%)")
     };
 
-    let qty_unit = if is_us { "주" } else { "주" };
+    let qty_unit = "주";
     let header = if name.is_empty() {
-        format!("{pnl_icon} <b><code>{symbol}</code></b>  {qty}{qty_unit}", qty = p.qty)
+        format!(
+            "{pnl_icon} <b><code>{symbol}</code></b>  {qty}{qty_unit}",
+            qty = p.qty
+        )
     } else {
-        format!("{pnl_icon} <b>{name}</b>  <code>{symbol}</code>  {qty}{qty_unit}", qty = p.qty)
+        format!(
+            "{pnl_icon} <b>{name}</b>  <code>{symbol}</code>  {qty}{qty_unit}",
+            qty = p.qty
+        )
     };
 
     format!(
@@ -380,10 +387,17 @@ pub fn format_positions(state: &PipelineState, market: &str) -> String {
     let (total_amt_str, currency_unit) = if market == "US" {
         (format!("{total_sign}{:.2}", total_unrealized), "$")
     } else {
-        (format!("{total_sign}{}", fmt_num(total_unrealized as i64)), "원")
+        (
+            format!("{total_sign}{}", fmt_num(total_unrealized as i64)),
+            "원",
+        )
     };
 
-    let lines: Vec<String> = live.positions.iter().map(|p| format_position_line(p, market)).collect();
+    let lines: Vec<String> = live
+        .positions
+        .iter()
+        .map(|p| format_position_line(p, market))
+        .collect();
     let count = live.positions.len();
 
     format!(
