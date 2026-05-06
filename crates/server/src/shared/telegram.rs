@@ -152,6 +152,19 @@ fn fmt_num(n: i64) -> String {
     }
 }
 
+/// US 달러 가격 포맷: $1,234.56 또는 $0.123 (소수점 자릿수 자동 조정)
+fn fmt_usd(d: rust_decimal::Decimal) -> String {
+    use rust_decimal::prelude::ToPrimitive;
+    let f = d.to_f64().unwrap_or(0.0);
+    let decimals = if f.abs() >= 1.0 { 2 } else { 4 };
+    let int_part = f.abs() as i64;
+    let frac = f.abs() - int_part as f64;
+    let int_str = fmt_num(if f < 0.0 { -(int_part) } else { int_part });
+    let frac_str = format!("{:.prec$}", frac, prec = decimals);
+    let frac_digits = &frac_str[1..]; // ".xx" 부분
+    format!("${}{}", int_str, frac_digits)
+}
+
 /// `/kr status` 또는 `/us status` 응답 문자열 생성. HTML parse mode.
 pub fn format_status(state: &PipelineState, market: &str) -> String {
     use rust_decimal::prelude::ToPrimitive;
@@ -204,14 +217,22 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
         "🔽"
     };
     let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
-    let total_amt = fmt_num(total_unrealized as i64);
-
-    let cash_str = match live.available_cash {
-        Some(c) => {
-            use rust_decimal::prelude::ToPrimitive;
-            format!("<code>{}</code>", fmt_num(c.to_i64().unwrap_or(0)))
-        }
-        None => "<i>미조회</i>".to_string(),
+    let (total_amt, total_unit, cash_str) = if market == "US" {
+        use rust_decimal::prelude::ToPrimitive;
+        let amt = format!("{total_sign}{:.2}", total_unrealized);
+        let cash = match live.available_cash {
+            Some(c) => format!("<code>{}</code>", fmt_usd(c)),
+            None => "<i>미조회</i>".to_string(),
+        };
+        (amt, "$", cash)
+    } else {
+        use rust_decimal::prelude::ToPrimitive;
+        let amt = format!("{total_sign}{}", fmt_num(total_unrealized as i64));
+        let cash = match live.available_cash {
+            Some(c) => format!("<code>{}</code>", fmt_num(c.to_i64().unwrap_or(0))),
+            None => "<i>미조회</i>".to_string(),
+        };
+        (amt, "원", cash)
     };
 
     let pos_count = live.positions.len();
@@ -220,7 +241,7 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     } else {
         live.positions
             .iter()
-            .map(format_position_line)
+            .map(|p| format_position_line(p, market))
             .collect::<Vec<_>>()
             .join("\n\n")
     };
@@ -228,7 +249,7 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     format!(
         "{market_flag} <b>{market}</b>  {bot_icon} {bot_label}\n\
          {market_hours}\n\
-         {regime_icon} {regime_label}  │  {total_icon} <b>{total_sign}{total_amt}원</b>\n\
+         {regime_icon} {regime_label}  │  {total_icon} <b>{total_amt}{total_unit}</b>\n\
          💵 가용 예수금: {cash_str}\n\
          🕐 <i>갱신 {updated_str}</i>\n\
          ━━━━━━━━━━━━━━━━━━\n\
@@ -237,24 +258,53 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     )
 }
 
-fn format_position_line(p: &crate::types::Position) -> String {
+fn format_position_line(p: &crate::types::Position, market: &str) -> String {
     use rust_decimal::prelude::ToPrimitive;
+    let is_us = market == "US";
     let symbol = he(&p.symbol);
     let name = he(p.name.as_deref().unwrap_or(""));
 
     let pnl_icon = if p.pnl_pct >= 0.0 { "🔺" } else { "🔽" };
     let pnl_sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
-    let pnl_amt = p.unrealized_pnl.to_i64().unwrap_or(0);
-    let pnl_amt_str = fmt_num(pnl_amt);
-    let pnl_amt_sign = if pnl_amt >= 0 { "+" } else { "" };
 
-    let avg = fmt_num(p.avg_price.to_i64().unwrap_or(0));
-    let live_price_val = p.current_price.to_i64().unwrap_or(0);
-    let price_stale = p.current_price == p.avg_price;
-    let live_str = if price_stale {
-        format!("<code>{}</code><i>?</i>", fmt_num(live_price_val))
+    let (avg, live_price_str, stop_val, pt1_val, pt2_val, pnl_amt_str, pnl_unit) = if is_us {
+        let price_stale = p.current_price == p.avg_price;
+        let live = if price_stale {
+            format!("<code>{}</code><i>?</i>", fmt_usd(p.current_price))
+        } else {
+            format!("<code>{}</code>", fmt_usd(p.current_price))
+        };
+        let pnl_f = p.unrealized_pnl.to_f64().unwrap_or(0.0);
+        let pnl_sign_ch = if pnl_f >= 0.0 { "+" } else { "" };
+        let pnl_str = format!("{pnl_sign_ch}{:.2}", pnl_f);
+        (
+            fmt_usd(p.avg_price),
+            live,
+            fmt_usd(p.stop_price),
+            fmt_usd(p.profit_target_1),
+            fmt_usd(p.profit_target_2),
+            pnl_str,
+            "$",
+        )
     } else {
-        format!("<code>{}</code>", fmt_num(live_price_val))
+        let pnl_amt = p.unrealized_pnl.to_i64().unwrap_or(0);
+        let pnl_sign_ch = if pnl_amt >= 0 { "+" } else { "" };
+        let price_stale = p.current_price == p.avg_price;
+        let live_v = p.current_price.to_i64().unwrap_or(0);
+        let live = if price_stale {
+            format!("<code>{}</code><i>?</i>", fmt_num(live_v))
+        } else {
+            format!("<code>{}</code>", fmt_num(live_v))
+        };
+        (
+            fmt_num(p.avg_price.to_i64().unwrap_or(0)),
+            live,
+            fmt_num(p.stop_price.to_i64().unwrap_or(0)),
+            fmt_num(p.profit_target_1.to_i64().unwrap_or(0)),
+            fmt_num(p.profit_target_2.to_i64().unwrap_or(0)),
+            format!("{}{}", pnl_sign_ch, fmt_num(pnl_amt)),
+            "원",
+        )
     };
 
     let stop_dist_pct = if p.current_price > rust_decimal::Decimal::ZERO {
@@ -264,9 +314,6 @@ fn format_position_line(p: &crate::types::Position) -> String {
     } else {
         0.0
     };
-    let stop_val = fmt_num(p.stop_price.to_i64().unwrap_or(0));
-    let pt1_val = fmt_num(p.profit_target_1.to_i64().unwrap_or(0));
-    let pt2_val = fmt_num(p.profit_target_2.to_i64().unwrap_or(0));
 
     let stop_label = if p.trailing_stop.is_some() {
         format!("TS <code>{stop_val}</code> ({stop_dist_pct:+.1}%)")
@@ -274,25 +321,17 @@ fn format_position_line(p: &crate::types::Position) -> String {
         format!("✂ <code>{stop_val}</code> ({stop_dist_pct:+.1}%)")
     };
 
-    // 첫 줄: 종목명 + 코드 + 수량
-    // 둘째 줄: 매입가 → 현재가, 손익%/원
-    // 셋째 줄: 손절가, 목표가
+    let qty_unit = if is_us { "주" } else { "주" };
     let header = if name.is_empty() {
-        format!(
-            "{pnl_icon} <b><code>{symbol}</code></b>  {qty}주",
-            qty = p.qty
-        )
+        format!("{pnl_icon} <b><code>{symbol}</code></b>  {qty}{qty_unit}", qty = p.qty)
     } else {
-        format!(
-            "{pnl_icon} <b>{name}</b>  <code>{symbol}</code>  {qty}주",
-            qty = p.qty
-        )
+        format!("{pnl_icon} <b>{name}</b>  <code>{symbol}</code>  {qty}{qty_unit}", qty = p.qty)
     };
 
     format!(
         "{header}\n\
-         ├ 매입 <code>{avg}</code>  →  현재 {live_str}\n\
-         ├ 손익 <b>{pnl_sign}{pnl_pct:.2}%</b>  /  <b>{pnl_amt_sign}{pnl_amt_str}원</b>\n\
+         ├ 매입 <code>{avg}</code>  →  현재 {live_price_str}\n\
+         ├ 손익 <b>{pnl_sign}{pnl_pct:.2}%</b>  /  <b>{pnl_amt_str}{pnl_unit}</b>\n\
          └ {stop_label}  🎯 <code>{pt1_val}</code> / <code>{pt2_val}</code>",
         pnl_pct = p.pnl_pct,
     )
@@ -338,14 +377,18 @@ pub fn format_positions(state: &PipelineState, market: &str) -> String {
         "🔽"
     };
     let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
-    let total_amt = fmt_num(total_unrealized as i64);
+    let (total_amt_str, currency_unit) = if market == "US" {
+        (format!("{total_sign}{:.2}", total_unrealized), "$")
+    } else {
+        (format!("{total_sign}{}", fmt_num(total_unrealized as i64)), "원")
+    };
 
-    let lines: Vec<String> = live.positions.iter().map(format_position_line).collect();
+    let lines: Vec<String> = live.positions.iter().map(|p| format_position_line(p, market)).collect();
     let count = live.positions.len();
 
     format!(
         "{market_flag} <b>{market} 포지션</b>  {count}종목\n\
-         {total_icon} 평가손익 합계: <b>{total_sign}{total_amt}원</b>\n\
+         {total_icon} 평가손익 합계: <b>{total_amt_str}{currency_unit}</b>\n\
          🕐 <i>갱신 {updated_str}</i>\n\
          ━━━━━━━━━━━━━━━━━━\n\n\
          {}",
@@ -762,12 +805,17 @@ fn build_pnl_report(kr_state: &PipelineState, us_state: &PipelineState) -> Optio
             .sum();
         let total_icon = if total >= 0.0 { "🔺" } else { "🔽" };
         let total_sign = if total >= 0.0 { "+" } else { "" };
-        let total_amt = fmt_num(total as i64);
+        let (total_str, currency) = if market == "US" {
+            (format!("{total_sign}{:.2}", total), "$")
+        } else {
+            (format!("{total_sign}{}", fmt_num(total as i64)), "원")
+        };
         lines.push(format!(
-            "\n{flag} <b>{market}</b>  {total_icon} <b>{total_sign}{total_amt}원</b>"
+            "\n{flag} <b>{market}</b>  {total_icon} <b>{total_str}{currency}</b>"
         ));
 
         for p in positions {
+            use rust_decimal::prelude::ToPrimitive;
             let icon = if p.pnl_pct >= 0.0 { "🔺" } else { "🔽" };
             let sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
             let name = he(p.name.as_deref().unwrap_or(&p.symbol));
@@ -777,11 +825,17 @@ fn build_pnl_report(kr_state: &PipelineState, us_state: &PipelineState) -> Optio
             } else {
                 format!("<code>{symbol}</code>")
             };
-            let amt = p.unrealized_pnl.to_i64().unwrap_or(0);
-            let amt_sign = if amt >= 0 { "+" } else { "" };
-            let amt_str = fmt_num(amt);
+            let (amt_str, amt_unit) = if market == "US" {
+                let f = p.unrealized_pnl.to_f64().unwrap_or(0.0);
+                let s = if f >= 0.0 { "+" } else { "" };
+                (format!("{s}{:.2}", f), "$")
+            } else {
+                let amt = p.unrealized_pnl.to_i64().unwrap_or(0);
+                let s = if amt >= 0 { "+" } else { "" };
+                (format!("{}{}", s, fmt_num(amt)), "원")
+            };
             lines.push(format!(
-                "  {icon} {display}  {qty}주\n      <b>{sign}{pct:.2}%</b>  /  {amt_sign}{amt_str}원",
+                "  {icon} {display}  {qty}주\n      <b>{sign}{pct:.2}%</b>  /  {amt_str}{amt_unit}",
                 qty = p.qty,
                 pct = p.pnl_pct,
             ));
