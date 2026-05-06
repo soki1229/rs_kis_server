@@ -134,6 +134,7 @@ pub async fn run_generic_position_task(
     let mut pos_states: HashMap<String, (PositionState, u64)> = HashMap::new();
     let mut last_prices: HashMap<String, Decimal> = HashMap::new();
     let mut symbol_names: HashMap<String, String> = HashMap::new();
+    let mut available_cash: Option<Decimal> = None;
     let mut eod_fallback_fired = false;
 
     // daily_ohlc 테이블에서 종목명 로드
@@ -148,6 +149,10 @@ pub async fn run_generic_position_task(
             symbol_names.insert(sym, name);
         }
     }
+
+    // 5분마다 잔고 API 동기화 타이머
+    let mut balance_sync_interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+    balance_sync_interval.tick().await; // 첫 틱 즉시 발생 — 건너뜀
     let fallback_instant = tokio::time::Instant::now()
         + std::time::Duration::from_secs(
             (eod_fallback - chrono::Utc::now()).num_seconds().max(0) as u64
@@ -200,6 +205,17 @@ pub async fn run_generic_position_task(
     // DB가 비어 있으면 balance() API로 실제 포지션 동기화 (재시작 후 복구)
     if pos_states.is_empty() {
         if let Ok(balance) = adapter.balance().await {
+            available_cash = Some(balance.available_cash);
+            // balance API에서 종목명 보강 (US 등 daily_ohlc에 없는 경우)
+            for api_pos in &balance.positions {
+                if let Some(name) = &api_pos.name {
+                    if !name.is_empty() {
+                        symbol_names
+                            .entry(api_pos.symbol.clone())
+                            .or_insert_with(|| name.clone());
+                    }
+                }
+            }
             for api_pos in balance.positions {
                 use rust_decimal_macros::dec;
                 let qty = match api_pos.qty.to_u64() {
@@ -312,11 +328,57 @@ pub async fn run_generic_position_task(
         &last_prices,
         &regime_rx,
         &symbol_names,
+        available_cash,
     );
 
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
+
+            // 5분마다 잔고 API 동기화: qty 불일치 수정, available_cash 갱신, 종목명 보강
+            _ = balance_sync_interval.tick() => {
+                match adapter.balance().await {
+                    Ok(balance) => {
+                        available_cash = Some(balance.available_cash);
+                        // 종목명 보강 (balance API에서 name 제공되는 경우)
+                        for api_pos in &balance.positions {
+                            if let Some(name) = &api_pos.name {
+                                if !name.is_empty() {
+                                    symbol_names.entry(api_pos.symbol.clone()).or_insert_with(|| name.clone());
+                                }
+                            }
+                        }
+                        // 실제 잔고와 내부 pos_states qty 비교 → 불일치 수정
+                        let api_qty_map: HashMap<String, u64> = balance.positions
+                            .iter()
+                            .filter_map(|p| p.qty.to_u64().filter(|&q| q > 0).map(|q| (p.symbol.clone(), q)))
+                            .collect();
+                        // API에 없는 종목은 청산된 것으로 처리
+                        let stale_symbols: Vec<String> = pos_states.keys()
+                            .filter(|s| !api_qty_map.contains_key(*s))
+                            .cloned()
+                            .collect();
+                        for sym in stale_symbols {
+                            tracing::warn!(symbol = %sym, "balance sync: API에 없음 → 포지션 삭제");
+                            pos_states.remove(&sym);
+                            sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&sym).execute(&db_pool).await.ok();
+                        }
+                        // qty 불일치 수정
+                        for (sym, api_qty) in &api_qty_map {
+                            if let Some((_, pos_qty)) = pos_states.get_mut(sym) {
+                                if *pos_qty != *api_qty {
+                                    tracing::warn!(symbol = %sym, pos_qty = %pos_qty, api_qty = %api_qty, "balance sync: qty 불일치 → API 기준으로 수정");
+                                    *pos_qty = *api_qty;
+                                    sqlx::query("UPDATE positions SET qty = ? WHERE symbol = ?").bind(api_qty.to_string()).bind(sym).execute(&db_pool).await.ok();
+                                }
+                            }
+                        }
+                        publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx, &symbol_names, available_cash);
+                    }
+                    Err(e) => tracing::warn!(market = %market_name, error = %e, "balance sync 실패"),
+                }
+            }
+
             _ = tokio::time::sleep_until(fallback_instant), if !eod_fallback_fired => {
                 tracing::warn!(market = %market_name, "EOD fallback fired — forcing exit for all positions");
                 eod_fallback_fired = true;
@@ -394,12 +456,32 @@ pub async fn run_generic_position_task(
                         fill.symbol, fill.filled_qty, current_price, stop_price, pt1, pt2
                     ));
                 } else {
-                    pos_states.remove(&fill.symbol);
-                    sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
-                    summary_alert.info(format!(
-                        "📤 청산 [{market_name}] {} 포지션 종료",
-                        fill.symbol
-                    ));
+                    // sell fill: partial vs full 구분
+                    let pos_qty = pos_states.get(&fill.symbol).map(|(_, q)| *q).unwrap_or(0);
+                    if fill.filled_qty >= pos_qty {
+                        // 전체 청산
+                        let sym_label = symbol_names.get(&fill.symbol).map(|n| format!("{n} ({})", fill.symbol)).unwrap_or_else(|| fill.symbol.clone());
+                        pos_states.remove(&fill.symbol);
+                        sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
+                        summary_alert.info(format!("📤 청산 [{market_name}] {sym_label} 포지션 종료"));
+                    } else {
+                        // 부분 체결 (1차 익절)
+                        if let Some((state, qty)) = pos_states.get_mut(&fill.symbol) {
+                            let remaining = qty.saturating_sub(fill.filled_qty);
+                            *qty = remaining;
+                            state.partial_exit_done = true; // fill 체결 시점에 설정
+                            state.exit_pending = false; // 다음 주문 가능하게 리셋
+                            let now = chrono::Utc::now().to_rfc3339();
+                            sqlx::query("UPDATE positions SET qty = ?, partial_exit_done = 1, updated_at = ? WHERE symbol = ?")
+                                .bind(remaining.to_string()).bind(&now).bind(&fill.symbol).execute(&db_pool).await.ok();
+                            let sym_label = symbol_names.get(&fill.symbol).map(|n| format!("{n} ({})", fill.symbol)).unwrap_or_else(|| fill.symbol.clone());
+                            let pnl_pct = ((fill.filled_price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
+                            summary_alert.info(format!(
+                                "🎯 1차익절 체결 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%)\n잔여 {}주 보유 중",
+                                fill.filled_qty, fill.filled_price, pnl_pct, remaining
+                            ));
+                        }
+                    }
                 }
             }
             Some(tick) = tick_pos_rx.recv() => {
@@ -421,19 +503,21 @@ pub async fn run_generic_position_task(
                             }
                         }
                         ExitDecision::PartialExit { .. } => {
-                            if !state.partial_exit_done {
+                            // partial_exit_done: 주문 발송이 아닌 fill 수신 시 세움
+                            // exit_pending으로 중복 주문 방지 (취소 시 다음 틱에서 재발주됨)
+                            if !state.partial_exit_done && !state.exit_pending {
                                 let exit_qty = *qty / 2;
                                 if exit_qty > 0 {
                                     let _ = force_order_tx.send(OrderRequest {
                                         symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                                     }).await;
+                                    state.exit_pending = true; // fill 올 때까지 중복 방지
                                 }
-                                state.partial_exit_done = true;
-                                sqlx::query("UPDATE positions SET partial_exit_done = 1 WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
+                                let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
                                 let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
                                 summary_alert.info(format!(
-                                    "🎯 1차익절 [{market_name}] {} × {}주 @ {} ({:+.2}%)\n잔여 {}주 보유 중",
-                                    tick.symbol, exit_qty, tick.price, pnl_pct, *qty - exit_qty
+                                    "🎯 1차익절 주문 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%)",
+                                    exit_qty, tick.price, pnl_pct
                                 ));
                             }
                         }
@@ -467,6 +551,7 @@ pub async fn run_generic_position_task(
             &last_prices,
             &regime_rx,
             &symbol_names,
+            available_cash,
         );
     }
 }
@@ -477,6 +562,7 @@ fn publish_live_state(
     last_prices: &HashMap<String, Decimal>,
     regime_rx: &RegimeReceiver,
     symbol_names: &HashMap<String, String>,
+    available_cash: Option<Decimal>,
 ) {
     let positions = pos_states
         .iter()
@@ -511,7 +597,7 @@ fn publish_live_state(
             daily_pnl_r: 0.0,
             regime: format!("{:?}", *regime_rx.borrow()),
             last_updated: Some(chrono::Utc::now()),
-            available_cash: None,
+            available_cash,
         })
         .ok();
 }

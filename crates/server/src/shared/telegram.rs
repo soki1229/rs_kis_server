@@ -206,15 +206,12 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
     let total_amt = fmt_num(total_unrealized as i64);
 
-    let cash_line = match live.available_cash {
+    let cash_str = match live.available_cash {
         Some(c) => {
             use rust_decimal::prelude::ToPrimitive;
-            format!(
-                "\n💵 가용 자금: <code>{}</code>",
-                fmt_num(c.to_i64().unwrap_or(0))
-            )
+            format!("<code>{}</code>", fmt_num(c.to_i64().unwrap_or(0)))
         }
-        None => String::new(),
+        None => "<i>미조회</i>".to_string(),
     };
 
     let pos_count = live.positions.len();
@@ -231,7 +228,8 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     format!(
         "{market_flag} <b>{market}</b>  {bot_icon} {bot_label}\n\
          {market_hours}\n\
-         {regime_icon} {regime_label}  │  {total_icon} <b>{total_sign}{total_amt}원</b>{cash_line}\n\
+         {regime_icon} {regime_label}  │  {total_icon} <b>{total_sign}{total_amt}원</b>\n\
+         💵 가용 예수금: {cash_str}\n\
          🕐 <i>갱신 {updated_str}</i>\n\
          ━━━━━━━━━━━━━━━━━━\n\
          📦 <b>{pos_count}종목 보유</b>\n\n\
