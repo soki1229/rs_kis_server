@@ -381,17 +381,19 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             kr_db_pool.clone(),
             t,
             {
+                // EOD fallback: 장 종료 5분 전 — throttler+TWAP 처리 시간 확보
                 let now = chrono::Utc::now();
                 let close = kr_adapter
                     .market_close_utc(kr_adapter.local_today())
-                    .unwrap();
+                    .unwrap()
+                    - chrono::Duration::minutes(5);
                 if close > now {
                     close
                 } else {
-                    // Already closed today, set for tomorrow
                     kr_adapter
                         .market_close_utc(kr_adapter.local_today() + chrono::Duration::days(1))
                         .unwrap()
+                        - chrono::Duration::minutes(5)
                 }
             },
             cfg.position.clone(),
@@ -515,16 +517,19 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             us_db_pool.clone(),
             t,
             {
+                // EOD fallback: 장 종료 5분 전 — throttler+TWAP 처리 시간 확보
                 let now = chrono::Utc::now();
                 let close = us_adapter
                     .market_close_utc(us_adapter.local_today())
-                    .unwrap();
+                    .unwrap()
+                    - chrono::Duration::minutes(5);
                 if close > now {
                     close
                 } else {
                     us_adapter
                         .market_close_utc(us_adapter.local_today() + chrono::Duration::days(1))
                         .unwrap()
+                        - chrono::Duration::minutes(5)
                 }
             },
             cfg.position.clone(),
