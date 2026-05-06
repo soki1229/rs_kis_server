@@ -567,8 +567,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     )));
 
     kr_pipeline.summary_alert.info(format!(
-        "✅ 모든 태스크 준비 완료 [{}] — 장 시작 대기 중",
-        mode
+        "✅ 준비완료 [{mode}] KR {kr_market_label} | US {us_market_label}",
     ));
 
     let bot_start_detail = format!("mode={mode}");
@@ -617,9 +616,13 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         },
     );
 
+    let stop_time = chrono::Utc::now()
+        .with_timezone(&chrono_tz::Asia::Seoul)
+        .format("%m/%d %H:%M")
+        .to_string();
     kr_pipeline
         .summary_alert
-        .info("🛑 봇 종료 신호 수신 — Graceful Shutdown 진행 중...".to_string());
+        .info(format!("⛔ 봇 종료 [{stop_time} KST] — Graceful Shutdown"));
     kr_pipeline
         .alert
         .critical("Bot Process Termination Initiated".to_string());

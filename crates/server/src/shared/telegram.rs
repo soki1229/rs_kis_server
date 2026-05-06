@@ -154,7 +154,11 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
         .iter()
         .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
         .sum();
-    let unrealized_icon = if total_unrealized >= 0.0 { "▲" } else { "▼" };
+    let unrealized_icon = if total_unrealized >= 0.0 {
+        "▲"
+    } else {
+        "▼"
+    };
 
     let updated_str = match live.last_updated {
         Some(t) => {
@@ -179,56 +183,87 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
         live.regime.clone()
     };
 
+    let pos_count = live.positions.len();
     let pos_section = if live.positions.is_empty() {
-        "  보유 포지션 없음".to_string()
+        "  포지션 없음".to_string()
     } else {
         live.positions
             .iter()
             .map(format_position_line)
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join("\n")
     };
 
     let market_hours = market_hours_str(market);
 
+    // 총 손익 색상
+    let total_icon = if total_unrealized >= 0.0 {
+        "🔵"
+    } else {
+        "🔴"
+    };
+    let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
+
     format!(
-        "━━━ {market} | {bot_icon} ━━━\n\
-         {market_hours}\n\
-         레짐: {regime_icon} {regime_str} | 미실현: {unrealized_icon} {total_unrealized:.0}{cash_str}\n\
-         갱신: {updated_str}\n\n\
-         🗂 보유 {}종목\n{}",
-        live.positions.len(),
-        pos_section,
+        "┌─ {market} | {bot_icon}\n\
+         │ {market_hours}\n\
+         │ {regime_icon} {regime_str} | {total_icon} {total_sign}{total_unrealized:.0}원{cash_str}\n\
+         │ 🕐 {updated_str}\n\
+         └─ 📦 {pos_count}종목\n\
+         {pos_section}"
     )
 }
 
 fn format_position_line(p: &crate::types::Position) -> String {
+    use rust_decimal::prelude::ToPrimitive;
     let display = match &p.name {
         Some(n) => format!("{}({})", n, p.symbol),
         None => p.symbol.clone(),
     };
+
+    // 손익 색상: 🟢 +2%↑, 🔵 +0~2%, ⚪ 보합, 🔴 손실
+    let pnl_icon = if p.pnl_pct >= 2.0 {
+        "🟢"
+    } else if p.pnl_pct >= 0.0 {
+        "🔵"
+    } else {
+        "🔴"
+    };
     let pnl_sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
-    let pnl_icon = if p.pnl_pct >= 0.0 { "🔺" } else { "🔻" };
-    let ts_line = p
-        .trailing_stop
-        .map(|t| format!("\n  TS: {}", t))
-        .unwrap_or_default();
+    let pnl_amt = p.unrealized_pnl.to_i64().unwrap_or(0);
+    let pnl_amt_sign = if pnl_amt >= 0 { "+" } else { "" };
+
     let live_price = if p.current_price == p.avg_price {
         format!("{} (미수신)", p.avg_price)
     } else {
         format!("{}", p.current_price)
     };
+
+    // 스탑까지 거리 (%)
+    let stop_dist_pct = if p.current_price > rust_decimal::Decimal::ZERO {
+        ((p.stop_price - p.current_price) / p.current_price * rust_decimal::Decimal::from(100))
+            .to_f64()
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    // TrailingStop 또는 고정스탑
+    let stop_label = if let Some(ts) = p.trailing_stop {
+        format!("TS {ts} ({stop_dist_pct:.1}%)")
+    } else {
+        format!("✂ {} ({stop_dist_pct:.1}%)", p.stop_price)
+    };
+
     format!(
-        "  📍 {} × {}주\n  평단: {} | 현재: {}\n  스탑: {} | 목표: {} / {}{}\n  손익: {pnl_icon} {pnl_sign}{:.2}%",
-        display,
-        p.qty,
-        p.avg_price,
-        live_price,
-        p.stop_price,
-        p.profit_target_1,
-        p.profit_target_2,
-        ts_line,
-        p.pnl_pct,
+        "{pnl_icon} {display} {qty}주\n  {avg} → {live}  {pnl_sign}{pnl_pct:.2}% / {pnl_amt_sign}{pnl_amt:+}원\n  {stop} | 🎯 {pt1} / {pt2}",
+        qty = p.qty,
+        avg = p.avg_price,
+        live = live_price,
+        pnl_pct = p.pnl_pct,
+        pt1 = p.profit_target_1,
+        pt2 = p.profit_target_2,
+        stop = stop_label,
     )
 }
 
@@ -250,9 +285,7 @@ pub fn format_positions(state: &PipelineState, market: &str) -> String {
     };
 
     if live.positions.is_empty() {
-        return format!(
-            "📦 [{market}] 보유 중인 포지션이 없습니다.\n갱신: {updated_str}"
-        );
+        return format!("📦 [{market}] 보유 중인 포지션이 없습니다.\n갱신: {updated_str}");
     }
 
     let total_unrealized: f64 = live
@@ -260,7 +293,11 @@ pub fn format_positions(state: &PipelineState, market: &str) -> String {
         .iter()
         .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
         .sum();
-    let unrealized_icon = if total_unrealized >= 0.0 { "▲" } else { "▼" };
+    let unrealized_icon = if total_unrealized >= 0.0 {
+        "▲"
+    } else {
+        "▼"
+    };
 
     let lines: Vec<String> = live.positions.iter().map(format_position_line).collect();
 
@@ -567,6 +604,20 @@ pub async fn run_monitor_task(
         Err(_) => tracing::warn!("MonitorTask: deleteWebhook timed out (10s), proceeding"),
     }
 
+    // 봇 시작 알림
+    let start_time = chrono::Utc::now()
+        .with_timezone(&chrono_tz::Asia::Seoul)
+        .format("%m/%d %H:%M")
+        .to_string();
+    let start_msg = format!("🚀 봇 시작됨 [{start_time} KST]\n/help 로 명령어 확인");
+    let _ = bot.send_message(chat_id, &start_msg).await;
+
+    let pnl_bot = bot.clone();
+    let pnl_chat = chat_id;
+    let pnl_kr = kr_state.clone();
+    let pnl_us = us_state.clone();
+    let pnl_token = token.clone();
+
     tokio::select! {
         _ = token.cancelled() => {
             tracing::info!("MonitorTask: shutting down");
@@ -593,7 +644,88 @@ pub async fn run_monitor_task(
         ) => {
             tracing::warn!("MonitorTask: command loop exited unexpectedly");
         }
+        _ = run_pnl_report_loop(pnl_bot, pnl_chat, pnl_kr, pnl_us, pnl_token) => {
+            tracing::warn!("MonitorTask: PnL report loop exited unexpectedly");
+        }
     }
+}
+
+/// 30분마다 장 중 포지션이 있을 때 수익 현황 자동 발송.
+async fn run_pnl_report_loop(
+    bot: Bot,
+    chat_id: ChatId,
+    kr_state: PipelineState,
+    us_state: PipelineState,
+    token: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+    interval.tick().await; // 첫 틱은 즉시 발생 — 건너뜀
+
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => break,
+            _ = interval.tick() => {
+                let report = build_pnl_report(&kr_state, &us_state);
+                if let Some(text) = report {
+                    let _ = bot.send_message(chat_id, text).await;
+                }
+            }
+        }
+    }
+}
+
+fn build_pnl_report(kr_state: &PipelineState, us_state: &PipelineState) -> Option<String> {
+    use rust_decimal::prelude::ToPrimitive;
+
+    let kr_live = kr_state.live_state_rx.borrow();
+    let us_live = us_state.live_state_rx.borrow();
+
+    let kr_positions = &kr_live.positions;
+    let us_positions = &us_live.positions;
+
+    if kr_positions.is_empty() && us_positions.is_empty() {
+        return None;
+    }
+
+    let now = chrono::Utc::now()
+        .with_timezone(&chrono_tz::Asia::Seoul)
+        .format("%H:%M")
+        .to_string();
+
+    let mut lines = vec![format!("📊 수익 현황 ({now} KST)")];
+
+    for (positions, market) in [(kr_positions, "KR"), (us_positions, "US")] {
+        if positions.is_empty() {
+            continue;
+        }
+        let total: f64 = positions
+            .iter()
+            .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
+            .sum();
+        let total_icon = if total >= 0.0 { "🔵" } else { "🔴" };
+        let total_sign = if total >= 0.0 { "+" } else { "" };
+        lines.push(format!("─ {market}: {total_icon} {total_sign}{total:.0}원"));
+        for p in positions {
+            let icon = if p.pnl_pct >= 2.0 {
+                "🟢"
+            } else if p.pnl_pct >= 0.0 {
+                "🔵"
+            } else {
+                "🔴"
+            };
+            let sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
+            let name = p.name.as_deref().unwrap_or(&p.symbol);
+            let amt = p.unrealized_pnl.to_i64().unwrap_or(0);
+            let amt_sign = if amt >= 0 { "+" } else { "" };
+            lines.push(format!(
+                "  {icon} {name} {qty}주  {sign}{pct:.2}% / {amt_sign}{amt}원",
+                qty = p.qty,
+                pct = p.pnl_pct
+            ));
+        }
+    }
+
+    Some(lines.join("\n"))
 }
 
 /// AlertTask + MonitorTask stub — 테스트 전용, 취소 신호만 대기.
