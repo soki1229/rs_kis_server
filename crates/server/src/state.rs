@@ -19,6 +19,10 @@ pub struct MarketLiveState {
     pub positions: Vec<Position>,
     pub daily_pnl_r: f64,
     pub regime: String, // crate::MarketRegime의 Display 문자열
+    /// position task가 마지막으로 publish한 시각 (None = 초기값 그대로)
+    pub last_updated: Option<chrono::DateTime<chrono::Utc>>,
+    /// 사용 가능 잔고 (KR: 원화, US: USD). None = 미조회
+    pub available_cash: Option<rust_decimal::Decimal>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

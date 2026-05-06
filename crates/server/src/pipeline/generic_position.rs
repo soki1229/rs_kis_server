@@ -465,6 +465,8 @@ fn publish_live_state(
             positions,
             daily_pnl_r: 0.0,
             regime: format!("{:?}", *regime_rx.borrow()),
+            last_updated: Some(chrono::Utc::now()),
+            available_cash: None,
         })
         .ok();
 }

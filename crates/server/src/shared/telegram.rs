@@ -78,6 +78,56 @@ pub fn should_send_to_monitor(severity: &AlertSeverity) -> bool {
     matches!(severity, AlertSeverity::Info)
 }
 
+/// 장 상태 (open/closed + 남은/경과 시간) 문자열 반환.
+fn market_hours_str(market: &str) -> String {
+    use chrono::{Datelike, Timelike, Weekday};
+    use chrono_tz::{America::New_York, Asia::Seoul};
+    let now = chrono::Utc::now();
+
+    match market {
+        "KR" => {
+            let local = now.with_timezone(&Seoul);
+            let dow = local.weekday();
+            let mins = local.hour() * 60 + local.minute();
+            let open = 9 * 60;
+            let close = 15 * 60 + 30;
+            if matches!(dow, Weekday::Sat | Weekday::Sun) {
+                return "📴 주말 휴장".to_string();
+            }
+            if mins >= open && mins < close {
+                let left = close - mins;
+                format!("🟢 장중 ({}h {}m 남음)", left / 60, left % 60)
+            } else if mins < open {
+                let until = open - mins;
+                format!("⏰ 개장까지 {}h {}m", until / 60, until % 60)
+            } else {
+                "🔴 장마감".to_string()
+            }
+        }
+        "US" => {
+            let local = now.with_timezone(&New_York);
+            let dow = local.weekday();
+            let mins = local.hour() * 60 + local.minute();
+            let open = 9 * 60 + 30;
+            let close = 16 * 60;
+            if matches!(dow, Weekday::Sat | Weekday::Sun) {
+                return "📴 주말 휴장".to_string();
+            }
+            if mins >= open && mins < close {
+                let left = close - mins;
+                format!("🟢 장중 ({}h {}m 남음)", left / 60, left % 60)
+            } else if mins < open {
+                let until = open - mins;
+                format!("⏰ 개장까지 {}h {}m", until / 60, until % 60)
+            } else {
+                let until = (24 * 60 - mins) + open;
+                format!("🔴 장마감 (내일 개장까지 {}h {}m)", until / 60, until % 60)
+            }
+        }
+        _ => "알 수 없음".to_string(),
+    }
+}
+
 /// `/kr status` 또는 `/us status` 응답 문자열 생성.
 pub fn format_status(state: &PipelineState, market: &str) -> String {
     use rust_decimal::prelude::ToPrimitive;
@@ -104,10 +154,29 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
         .iter()
         .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
         .sum();
-    let unrealized_icon = if total_unrealized >= 0.0 {
-        "▲"
+    let unrealized_icon = if total_unrealized >= 0.0 { "▲" } else { "▼" };
+
+    let updated_str = match live.last_updated {
+        Some(t) => {
+            let ago = (chrono::Utc::now() - t).num_seconds().max(0);
+            if ago < 60 {
+                format!("{}초 전", ago)
+            } else {
+                format!("{}분 전", ago / 60)
+            }
+        }
+        None => "미발행".to_string(),
+    };
+
+    let cash_str = match live.available_cash {
+        Some(c) => format!(" | 가용: {:.0}", c),
+        None => String::new(),
+    };
+
+    let regime_str = if live.regime.is_empty() {
+        "미분류".to_string()
     } else {
-        "▼"
+        live.regime.clone()
     };
 
     let pos_section = if live.positions.is_empty() {
@@ -120,11 +189,14 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
             .join("\n\n")
     };
 
+    let market_hours = market_hours_str(market);
+
     format!(
         "━━━ {market} | {bot_icon} ━━━\n\
-         레짐: {regime_icon} {} | 미실현: {unrealized_icon} {total_unrealized:.0}\n\n\
+         {market_hours}\n\
+         레짐: {regime_icon} {regime_str} | 미실현: {unrealized_icon} {total_unrealized:.0}{cash_str}\n\
+         갱신: {updated_str}\n\n\
          🗂 보유 {}종목\n{}",
-        live.regime,
         live.positions.len(),
         pos_section,
     )
@@ -164,8 +236,23 @@ fn format_position_line(p: &crate::types::Position) -> String {
 pub fn format_positions(state: &PipelineState, market: &str) -> String {
     use rust_decimal::prelude::ToPrimitive;
     let live = state.live_state_rx.borrow();
+
+    let updated_str = match live.last_updated {
+        Some(t) => {
+            let ago = (chrono::Utc::now() - t).num_seconds().max(0);
+            if ago < 60 {
+                format!("{}초 전", ago)
+            } else {
+                format!("{}분 전", ago / 60)
+            }
+        }
+        None => "미발행".to_string(),
+    };
+
     if live.positions.is_empty() {
-        return format!("📦 [{market}] 보유 중인 포지션이 없습니다.");
+        return format!(
+            "📦 [{market}] 보유 중인 포지션이 없습니다.\n갱신: {updated_str}"
+        );
     }
 
     let total_unrealized: f64 = live
@@ -173,16 +260,12 @@ pub fn format_positions(state: &PipelineState, market: &str) -> String {
         .iter()
         .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
         .sum();
-    let unrealized_icon = if total_unrealized >= 0.0 {
-        "▲"
-    } else {
-        "▼"
-    };
+    let unrealized_icon = if total_unrealized >= 0.0 { "▲" } else { "▼" };
 
     let lines: Vec<String> = live.positions.iter().map(format_position_line).collect();
 
     format!(
-        "💰 [{market} 포지션 현황] {}종목 | 미실현 {unrealized_icon} {total_unrealized:.0}\n\n{}",
+        "💰 [{market} 포지션 현황] {}종목 | 미실현 {unrealized_icon} {total_unrealized:.0} | 갱신: {updated_str}\n\n{}",
         live.positions.len(),
         lines.join("\n\n")
     )
@@ -287,6 +370,12 @@ async fn run_command_loop(
                 return Ok(());
             }
 
+            if text.trim() == "/botstat" {
+                let reply = act.format_status();
+                bot.send_message(msg.chat.id, reply).await?;
+                return Ok(());
+            }
+
             if text.trim() == "/log" || text.trim().starts_with("/log ") {
                 let count: usize = text
                     .trim()
@@ -337,7 +426,7 @@ async fn run_command_loop(
             if text.trim() == "/help" {
                 let help = "📖 사용 가능한 명령\n\n\
                     [조회]\n\
-                    /status — KR+US 현황 (레짐, 포지션, 손익)\n\
+                    /status — KR+US 현황 (장상태, 레짐, 포지션, 손익)\n\
                     /positions — 보유 포지션 상세\n\
                     /kr status — KR 상태\n\
                     /us status — US 상태\n\
@@ -345,7 +434,8 @@ async fn run_command_loop(
                     /us watchlist — US 감시 종목\n\
                     /kr signals [N] — KR 최근 시그널 (기본 15건)\n\
                     /us signals [N] — US 최근 시그널 (기본 15건)\n\
-                    /log [N] — 최근 활동 로그\n\n\
+                    /log [N] — 최근 활동 로그\n\
+                    /botstat — 봇 통계 (uptime, tick수, 주문수)\n\n\
                     [제어]\n\
                     /kr start|stop|pause — KR 봇 제어\n\
                     /us start|stop|pause — US 봇 제어\n\
@@ -551,6 +641,8 @@ mod tests {
                 }],
                 daily_pnl_r: 1.5,
                 regime: "Trending".into(),
+                last_updated: Some(chrono::Utc::now()),
+                available_cash: None,
             })
             .unwrap();
         ps
