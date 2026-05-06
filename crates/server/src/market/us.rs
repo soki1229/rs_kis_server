@@ -8,6 +8,7 @@ use chrono::{Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::America::New_York;
 use kis_api::models::*;
 use kis_api::KisClient;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 use crate::shared::throttler::KisThrottler;
@@ -255,6 +256,14 @@ impl MarketAdapter for UsRealAdapter {
         };
         format!("D{}{}", exchange, symbol)
     }
+
+    async fn check_buy_orderable(&self, symbol: &str, price: Decimal, qty: u64) -> u64 {
+        us_check_buy_orderable(&self.base, symbol, price, qty).await
+    }
+
+    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
+        us_check_sell_orderable(&self.base, symbol, qty).await
+    }
 }
 
 /// US VTS Market Adapter.
@@ -401,11 +410,85 @@ impl MarketAdapter for UsVtsAdapter {
         };
         format!("D{}{}", exchange, symbol)
     }
+
+    async fn check_buy_orderable(&self, symbol: &str, price: Decimal, qty: u64) -> u64 {
+        us_check_buy_orderable(&self.base, symbol, price, qty).await
+    }
+
+    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
+        us_check_sell_orderable(&self.base, symbol, qty).await
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared Internal Functions
 // ─────────────────────────────────────────────────────────────────────────────
+
+async fn us_check_buy_orderable(base: &UsMarketBase, symbol: &str, price: Decimal, qty: u64) -> u64 {
+    let exchange = UsMarketBase::exchange_from_hint(None, symbol);
+    base.throttler.wait().await;
+    match base
+        .client
+        .overseas()
+        .trading()
+        .overseas_stock_v1_trading_inquire_psamount(OverseasStockV1TradingInquirePsamountRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: exchange,
+            ovrs_ord_unpr: price.to_string(),
+            item_cd: symbol.to_string(),
+        })
+        .await
+    {
+        Ok(resp) => {
+            let orderable = resp.output.map(|o| o.ord_psbl_qty).unwrap_or(Decimal::ZERO);
+            let orderable_u64 = orderable.to_u64().unwrap_or(0);
+            if orderable_u64 < qty {
+                tracing::warn!(symbol = %symbol, requested = qty, orderable = orderable_u64, "US 매수가능수량 부족 — 수량 조정");
+            }
+            qty.min(orderable_u64)
+        }
+        Err(e) => {
+            tracing::warn!(symbol = %symbol, "US check_buy_orderable: inquire_psamount 실패 — 원래 수량으로 진행: {e}");
+            qty
+        }
+    }
+}
+
+async fn us_check_sell_orderable(base: &UsMarketBase, symbol: &str, qty: u64) -> u64 {
+    base.throttler.wait().await;
+    match base
+        .client
+        .overseas()
+        .trading()
+        .overseas_stock_v1_trading_inquire_balance(OverseasStockV1TradingInquireBalanceRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: "%".to_string(),
+            tr_crcy_cd: "USD".to_string(),
+            ctx_area_fk200: String::new(),
+            ctx_area_nk200: String::new(),
+        })
+        .await
+    {
+        Ok(r) => {
+            let held = r
+                .output1
+                .iter()
+                .find(|p| p.ovrs_pdno == symbol)
+                .map(|p| p.ord_psbl_qty.to_u64().unwrap_or(0))
+                .unwrap_or(0);
+            if held < qty {
+                tracing::warn!(symbol = %symbol, requested = qty, held, "US 매도가능수량 부족 — 수량 조정");
+            }
+            qty.min(held)
+        }
+        Err(e) => {
+            tracing::warn!(symbol = %symbol, "US check_sell_orderable: balance 조회 실패 — 원래 수량으로 진행: {e}");
+            qty
+        }
+    }
+}
 
 async fn us_place_order(
     base: &UsMarketBase,

@@ -114,6 +114,18 @@ pub trait MarketAdapter: Send + Sync + 'static {
         symbol.to_string()
     }
 
+    /// Pre-flight: 매수 가능 수량 확인 (API 기반).
+    /// qty=0 반환 시 주문 불가. API 실패 시 원래 qty 반환 (soft check).
+    async fn check_buy_orderable(&self, _symbol: &str, _price: Decimal, qty: u64) -> u64 {
+        qty
+    }
+
+    /// Pre-flight: 매도 보유 수량 확인 (잔고 API 기반).
+    /// qty=0 반환 시 포지션 없음. API 실패 시 원래 qty 반환 (soft check).
+    async fn check_sell_orderable(&self, _symbol: &str, qty: u64) -> u64 {
+        qty
+    }
+
     /// Apply aggressive limit pricing adjustment to a base price.
     /// Default: +0.2% for strength >= 0.85 on buy orders.
     fn adjust_aggressive_price(
@@ -224,6 +236,14 @@ impl MarketAdapter for Arc<dyn MarketAdapter> {
 
     fn get_ws_key(&self, symbol: &str) -> String {
         (**self).get_ws_key(symbol)
+    }
+
+    async fn check_buy_orderable(&self, symbol: &str, price: Decimal, qty: u64) -> u64 {
+        (**self).check_buy_orderable(symbol, price, qty).await
+    }
+
+    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
+        (**self).check_sell_orderable(symbol, qty).await
     }
 
     fn adjust_aggressive_price(
@@ -344,5 +364,13 @@ impl MarketAdapter for ReadOnlyAdapter {
 
     fn get_ws_key(&self, symbol: &str) -> String {
         self.inner.get_ws_key(symbol)
+    }
+
+    async fn check_buy_orderable(&self, symbol: &str, price: Decimal, qty: u64) -> u64 {
+        self.inner.check_buy_orderable(symbol, price, qty).await
+    }
+
+    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
+        self.inner.check_sell_orderable(symbol, qty).await
     }
 }

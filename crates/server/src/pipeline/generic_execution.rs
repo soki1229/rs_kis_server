@@ -165,6 +165,41 @@ async fn process_single_order(
     alert: &AlertRouter,
     poll_sem: &Arc<Semaphore>,
 ) {
+    // 0. Pre-flight: 주문 가능 수량 확인 (API 기반, soft check — API 실패 시 원래 수량으로 진행)
+    let preflight_price = req.price.unwrap_or(Decimal::ZERO);
+    let checked_qty = match req.side {
+        Side::Buy => adapter.check_buy_orderable(&req.symbol, preflight_price, req.qty).await,
+        Side::Sell => adapter.check_sell_orderable(&req.symbol, req.qty).await,
+    };
+    if checked_qty == 0 {
+        tracing::warn!(symbol = %req.symbol, side = %req.side, "주문가능수량 0 — 주문 스킵");
+        if req.side == Side::Sell {
+            let _ = fill_tx
+                .send(FillInfo {
+                    order_id: Uuid::new_v4().to_string(),
+                    symbol: req.symbol.clone(),
+                    filled_qty: 0,
+                    filled_price: Decimal::ZERO,
+                    exchange_code: req.exchange_code.clone(),
+                    atr: req.atr,
+                })
+                .await;
+        }
+        return;
+    }
+    let req = if checked_qty < req.qty {
+        tracing::info!(
+            symbol = %req.symbol,
+            side = %req.side,
+            requested = req.qty,
+            orderable = checked_qty,
+            "주문수량 조정 (가용 한도 내)"
+        );
+        OrderRequest { qty: checked_qty, ..req }
+    } else {
+        req
+    };
+
     let order_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 

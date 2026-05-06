@@ -8,6 +8,7 @@ use chrono::{Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::Asia::Seoul;
 use kis_api::models::*;
 use kis_api::KisClient;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 use crate::shared::throttler::KisThrottler;
@@ -205,6 +206,14 @@ impl MarketAdapter for KrRealAdapter {
     fn local_today(&self) -> chrono::NaiveDate {
         Utc::now().with_timezone(&Seoul).date_naive()
     }
+
+    async fn check_buy_orderable(&self, symbol: &str, price: Decimal, qty: u64) -> u64 {
+        kr_check_buy_orderable(&self.base, symbol, price, qty).await
+    }
+
+    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
+        kr_check_sell_orderable(&self.base, symbol, qty).await
+    }
 }
 
 /// Korean VTS Market Adapter.
@@ -335,6 +344,14 @@ impl MarketAdapter for KrVtsAdapter {
 
     fn local_today(&self) -> chrono::NaiveDate {
         Utc::now().with_timezone(&Seoul).date_naive()
+    }
+
+    async fn check_buy_orderable(&self, symbol: &str, price: Decimal, qty: u64) -> u64 {
+        kr_check_buy_orderable(&self.base, symbol, price, qty).await
+    }
+
+    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
+        kr_check_sell_orderable(&self.base, symbol, qty).await
     }
 }
 
@@ -559,6 +576,81 @@ async fn kr_order_history(
             status: h.cncl_yn.clone(),
         })
         .collect())
+}
+
+async fn kr_check_buy_orderable(base: &KrMarketBase, symbol: &str, price: Decimal, qty: u64) -> u64 {
+    base.throttler.wait().await;
+    let (ord_dvsn, ord_unpr) = if price.is_zero() {
+        ("01".to_string(), "0".to_string())
+    } else {
+        ("00".to_string(), price.to_string())
+    };
+    match base
+        .client
+        .stock()
+        .trading()
+        .domestic_stock_v1_trading_inquire_psbl_order(
+            DomesticStockV1TradingInquirePsblOrderRequest {
+                cano: base.cano.clone(),
+                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+                pdno: symbol.to_string(),
+                ord_unpr,
+                ord_dvsn,
+                cma_evlu_amt_icld_yn: "N".to_string(),
+                ovrs_icld_yn: "N".to_string(),
+            },
+        )
+        .await
+    {
+        Ok(resp) => {
+            let max_qty = resp
+                .output
+                .map(|o| o.max_buy_qty)
+                .unwrap_or(Decimal::ZERO)
+                .to_u64()
+                .unwrap_or(0);
+            if max_qty < qty {
+                tracing::warn!(symbol = %symbol, requested = qty, max_qty, "KR 매수가능수량 부족 — 수량 조정");
+            }
+            qty.min(max_qty)
+        }
+        Err(e) => {
+            tracing::warn!(symbol = %symbol, "KR check_buy_orderable: inquire_psbl_order 실패 — 원래 수량으로 진행: {e}");
+            qty
+        }
+    }
+}
+
+async fn kr_check_sell_orderable(base: &KrMarketBase, symbol: &str, qty: u64) -> u64 {
+    base.throttler.wait().await;
+    match base
+        .client
+        .stock()
+        .trading()
+        .domestic_stock_v1_trading_inquire_balance(DomesticStockV1TradingInquireBalanceRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(r) => {
+            let held = r
+                .output1
+                .iter()
+                .find(|p| p.pdno == symbol)
+                .map(|p| p.ord_psbl_qty.to_u64().unwrap_or(0))
+                .unwrap_or(0);
+            if held < qty {
+                tracing::warn!(symbol = %symbol, requested = qty, held, "KR 매도가능수량 부족 — 수량 조정");
+            }
+            qty.min(held)
+        }
+        Err(e) => {
+            tracing::warn!(symbol = %symbol, "KR check_sell_orderable: balance 조회 실패 — 원래 수량으로 진행: {e}");
+            qty
+        }
+    }
 }
 
 async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
