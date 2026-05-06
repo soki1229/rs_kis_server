@@ -60,8 +60,13 @@ impl KrMarketBase {
                             filled_price: h.filled_price,
                         };
                     }
+                    // cncl_yn="Y" → 실제 취소; 아직 체결 전이면 StillOpen
+                    if h.status == "Y" {
+                        return PollOutcome::Cancelled;
+                    }
                 }
-                PollOutcome::Cancelled
+                // 히스토리에 없거나 미체결 → 아직 처리 중
+                PollOutcome::StillOpen
             }
             Err(e) => {
                 tracing::warn!(

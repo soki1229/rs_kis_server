@@ -93,8 +93,13 @@ impl UsMarketBase {
                             filled_price: h.filled_price,
                         };
                     }
+                    // rvse_cncl_dvsn="02" → 취소; 아직 체결 전이면 StillOpen
+                    if h.status == "02" {
+                        return PollOutcome::Cancelled;
+                    }
                 }
-                PollOutcome::Cancelled
+                // 히스토리에 없거나 미체결 → 아직 처리 중
+                PollOutcome::StillOpen
             }
             Err(e) => {
                 tracing::warn!(
