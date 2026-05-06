@@ -35,6 +35,8 @@ pub struct PositionState {
     pub trailing_atr_volatile: Decimal,
     /// KIS 시장분류코드: "J"=KOSPI, "Q"=KOSDAQ. US는 None.
     pub exchange_code: Option<String>,
+    /// exit 주문 전송 후 true → 다음 tick에 중복 청산 주문 방지
+    pub exit_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +177,7 @@ pub async fn run_generic_position_task(
                 trailing_atr_trending: pos_cfg.trailing_atr_trending,
                 trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
                 exchange_code,
+                exit_pending: false,
             };
             pos_states.insert(symbol, (state, qty.parse().unwrap_or(0)));
         }
@@ -216,6 +219,7 @@ pub async fn run_generic_position_task(
                     profit_target_2: pt2,
                     trailing_stop_price: None,
                     partial_exit_done: false,
+                    exit_pending: false,
                     regime: MarketRegime::Trending,
                     profit_target_1_atr: pos_cfg.profit_target_1_atr,
                     profit_target_2_atr: pos_cfg.profit_target_2_atr,
@@ -330,6 +334,7 @@ pub async fn run_generic_position_task(
                         profit_target_2: pt2,
                         trailing_stop_price: None,
                         partial_exit_done: false,
+                        exit_pending: false,
                         regime: regime.clone(),
                         profit_target_1_atr: pos_cfg.profit_target_1_atr,
                         profit_target_2_atr: pos_cfg.profit_target_2_atr,
@@ -403,20 +408,23 @@ pub async fn run_generic_position_task(
                             }
                         }
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
-                            let _ = force_order_tx.send(OrderRequest {
-                                symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
-                            }).await;
-                            tracing::info!(symbol = %tick.symbol, ?decision, "Exit triggered");
-                            let (icon, label) = match decision {
-                                ExitDecision::StopLoss => ("🔴", "손절"),
-                                ExitDecision::TrailingStop => ("🟠", "트레일링 스탑"),
-                                _ => ("🟢", "목표가 도달"),
-                            };
-                            let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
-                            summary_alert.info(format!(
-                                "{icon} {label} [{market_name}] {} × {}주 @ {}\n진입: {} → 현재: {} ({:+.2}%)",
-                                tick.symbol, *qty, tick.price, state.entry_price, tick.price, pnl_pct
-                            ));
+                            if !state.exit_pending {
+                                state.exit_pending = true;
+                                let _ = force_order_tx.send(OrderRequest {
+                                    symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                                }).await;
+                                tracing::info!(symbol = %tick.symbol, ?decision, "Exit triggered");
+                                let (icon, label) = match decision {
+                                    ExitDecision::StopLoss => ("🔴", "손절"),
+                                    ExitDecision::TrailingStop => ("🟠", "트레일링 스탑"),
+                                    _ => ("🟢", "목표가 도달"),
+                                };
+                                let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
+                                summary_alert.info(format!(
+                                    "{icon} {label} [{market_name}] {} × {}주 @ {}\n진입: {} → 현재: {} ({:+.2}%)",
+                                    tick.symbol, *qty, tick.price, state.entry_price, tick.price, pnl_pct
+                                ));
+                            }
                         }
                     }
                 }
@@ -494,6 +502,7 @@ mod tests {
             trailing_atr_trending: dec!(2.0),
             trailing_atr_volatile: dec!(1.0),
             exchange_code: None,
+            exit_pending: false,
         }
     }
 
