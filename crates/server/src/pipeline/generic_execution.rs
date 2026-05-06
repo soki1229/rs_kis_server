@@ -195,8 +195,10 @@ async fn process_single_order(
     // 2. Place Order
     match adapter.place_order(unified_req).await {
         Ok(res) => {
-            sqlx::query("UPDATE orders SET broker_order_id = ?, state = 'Submitted', submitted_at = ?, updated_at = ? WHERE id = ?")
-                .bind(&res.broker_id).bind(&now).bind(&now).bind(&order_id).execute(db_pool).await.ok();
+            if let Err(e) = sqlx::query("UPDATE orders SET broker_order_id = ?, state = 'Submitted', submitted_at = ?, updated_at = ? WHERE id = ?")
+                .bind(&res.broker_id).bind(&now).bind(&now).bind(&order_id).execute(db_pool).await {
+                tracing::error!(order_id = %order_id, broker_id = %res.broker_id, "Submitted 상태 DB 업데이트 실패: {e}");
+            }
 
             // 3. Poll for status
             let start = Duration::from_secs(1);
@@ -206,7 +208,7 @@ async fn process_single_order(
                 tokio::time::sleep(interval).await;
                 interval = (interval + Duration::from_secs(1)).min(Duration::from_secs(5));
 
-                let _permit = poll_sem.acquire().await.unwrap();
+                let _permit = poll_sem.acquire().await.expect("poll semaphore closed");
                 match adapter
                     .poll_order_status(&res.broker_id, &req.symbol, req.qty)
                     .await
@@ -259,7 +261,7 @@ async fn process_single_order(
 
                                 let delta = filled_qty.saturating_sub(last_reported_qty);
                                 if delta > 0 {
-                                    fill_tx
+                                    if let Err(e) = fill_tx
                                         .send(FillInfo {
                                             order_id: order_id.clone(),
                                             symbol: req.symbol.clone(),
@@ -269,7 +271,9 @@ async fn process_single_order(
                                             atr: req.atr,
                                         })
                                         .await
-                                        .ok();
+                                    {
+                                        tracing::error!(symbol = %req.symbol, "Filled: fill_tx 전송 실패 — 포지션 태스크 종료?: {e}");
+                                    }
                                 }
                                 return;
                             }
@@ -278,20 +282,25 @@ async fn process_single_order(
                                 filled_price,
                             } => {
                                 tracing::info!(symbol = %req.symbol, qty = filled_qty, "Order partially filled, continuing poll...");
-                                sqlx::query("UPDATE orders SET filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
-                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await.ok();
+                                if let Err(e) = sqlx::query("UPDATE orders SET filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
+                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await {
+                                    tracing::warn!(order_id = %order_id, "PartialFilled DB 업데이트 실패: {e}");
+                                }
                                 // delta 전송: 새로 체결된 수량만 포지션 태스크로 전달
                                 let delta = filled_qty.saturating_sub(last_reported_qty);
                                 if delta > 0 {
-                                    fill_tx.send(FillInfo {
+                                    if let Err(e) = fill_tx.send(FillInfo {
                                         order_id: order_id.clone(),
                                         symbol: req.symbol.clone(),
                                         filled_qty: delta,
                                         filled_price,
                                         exchange_code: req.exchange_code.clone(),
                                         atr: req.atr,
-                                    }).await.ok();
-                                    last_reported_qty = filled_qty;
+                                    }).await {
+                                        tracing::error!(symbol = %req.symbol, "PartialFilled: fill_tx 전송 실패: {e}");
+                                    } else {
+                                        last_reported_qty = filled_qty;
+                                    }
                                 }
                             }
                             PollOutcome::Cancelled => {
@@ -349,8 +358,14 @@ async fn reconcile_submitted_orders(
     _alert: &AlertRouter,
     poll_sem: &Arc<Semaphore>,
 ) {
-    let rows = sqlx::query("SELECT id, broker_order_id, symbol, qty, atr, exchange_code FROM orders WHERE state = 'Submitted'")
-        .fetch_all(db_pool).await.unwrap_or_default();
+    let rows = match sqlx::query("SELECT id, broker_order_id, symbol, qty, atr, exchange_code FROM orders WHERE state = 'Submitted'")
+        .fetch_all(db_pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("reconcile: Submitted 주문 조회 실패 — 복구 건너뜀: {e}");
+            return;
+        }
+    };
 
     for row in rows {
         let order_id: String = row.get("id");
@@ -362,7 +377,7 @@ async fn reconcile_submitted_orders(
         });
         let ex_code: Option<String> = row.get("exchange_code");
 
-        let _permit = poll_sem.acquire().await.unwrap();
+        let _permit = poll_sem.acquire().await.expect("poll semaphore closed");
         match adapter
             .poll_order_status(&broker_id, &symbol, qty as u64)
             .await
@@ -372,8 +387,10 @@ async fn reconcile_submitted_orders(
                     filled_qty,
                     filled_price,
                 } => {
-                    sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ? WHERE id = ?")
-                            .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&order_id).execute(db_pool).await.ok();
+                    if let Err(e) = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ? WHERE id = ?")
+                            .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&order_id).execute(db_pool).await {
+                        tracing::error!(order_id = %order_id, "reconcile: Filled 상태 DB 업데이트 실패: {e}");
+                    }
                     // 이미 포지션이 DB에 존재하면 fill을 보내지 않음 (balance 복구와 중복 방지)
                     let pos_exists = sqlx::query_scalar::<_, i64>(
                         "SELECT COUNT(*) FROM positions WHERE symbol = ?",
@@ -384,17 +401,18 @@ async fn reconcile_submitted_orders(
                     .unwrap_or(0)
                         > 0;
                     if !pos_exists {
-                        fill_tx
+                        if let Err(e) = fill_tx
                             .send(FillInfo {
-                                order_id,
-                                symbol,
+                                order_id: order_id.clone(),
+                                symbol: symbol.clone(),
                                 filled_qty,
                                 filled_price,
                                 atr,
                                 exchange_code: ex_code,
                             })
-                            .await
-                            .ok();
+                            .await {
+                            tracing::error!(symbol = %symbol, "reconcile: fill_tx 전송 실패: {e}");
+                        }
                     }
                 }
                 PollOutcome::Cancelled | PollOutcome::Failed { .. } => {

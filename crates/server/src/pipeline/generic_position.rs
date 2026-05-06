@@ -207,7 +207,10 @@ pub async fn run_generic_position_task(
 
     // DB가 비어 있으면 balance() API로 실제 포지션 동기화 (재시작 후 복구)
     if pos_states.is_empty() {
-        if let Ok(balance) = adapter.balance().await {
+        if let Ok(balance) = adapter.balance().await.map_err(|e| {
+            tracing::error!(market = %market_name, "초기 balance API 실패 — 포지션 복구 불가: {e}");
+            e
+        }) {
             available_cash = Some(balance.available_cash);
             // balance API에서 종목명 보강 (US 등 daily_ohlc에 없는 경우)
             for api_pos in &balance.positions {
@@ -387,9 +390,11 @@ pub async fn run_generic_position_task(
                 tracing::warn!(market = %market_name, "EOD fallback fired — forcing exit for all positions");
                 eod_fallback_fired = true;
                 for (symbol, (state, qty)) in &pos_states {
-                    let _ = force_order_tx.send(OrderRequest {
+                    if let Err(e) = force_order_tx.send(OrderRequest {
                         symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
-                    }).await;
+                    }).await {
+                        tracing::error!(symbol = %symbol, error = %e, "EOD fallback: Failed to send force order for full exit");
+                    }
                 }
             }
             Some(_) = eod_rx.recv() => {
@@ -522,11 +527,14 @@ pub async fn run_generic_position_task(
                             if !state.partial_exit_done && !state.exit_pending {
                                 let exit_qty = *qty / 2;
                                 if exit_qty > 0 {
-                                    let _ = force_order_tx.send(OrderRequest {
+                                    if force_order_tx.send(OrderRequest {
                                         symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
-                                    }).await;
-                                    state.exit_pending = true;
-                                    state.exit_pending_since = Some(std::time::Instant::now());
+                                    }).await.is_ok() {
+                                        state.exit_pending = true;
+                                        state.exit_pending_since = Some(std::time::Instant::now());
+                                    } else {
+                                        tracing::error!(symbol = %tick.symbol, qty = exit_qty, "PartialExit 주문 전송 실패 — 채널 닫힘");
+                                    }
                                 }
                                 let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
                                 let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
@@ -538,11 +546,14 @@ pub async fn run_generic_position_task(
                         }
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
                             if !state.exit_pending {
-                                state.exit_pending = true;
-                                state.exit_pending_since = Some(std::time::Instant::now());
-                                let _ = force_order_tx.send(OrderRequest {
+                                if force_order_tx.send(OrderRequest {
                                     symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
-                                }).await;
+                                }).await.is_ok() {
+                                    state.exit_pending = true;
+                                    state.exit_pending_since = Some(std::time::Instant::now());
+                                } else {
+                                    tracing::error!(symbol = %tick.symbol, ?decision, "Exit 주문 전송 실패 — 채널 닫힘");
+                                }
                                 tracing::info!(symbol = %tick.symbol, ?decision, "Exit triggered");
                                 let (icon, label) = match decision {
                                     ExitDecision::StopLoss => ("🔴", "손절"),
