@@ -39,6 +39,8 @@ pub struct PositionState {
     pub exit_pending: bool,
     /// exit_pending 설정 시각 — 90초 초과 시 자동 리셋 (Cancelled 감지 대체)
     pub exit_pending_since: Option<std::time::Instant>,
+    /// exit 90초 타임아웃 횟수 — 5회 이상이면 포지션 강제 제거 (잔고없음 무한루프 방지)
+    pub exit_timeout_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,6 +202,7 @@ pub async fn run_generic_position_task(
                 exchange_code,
                 exit_pending: false,
                 exit_pending_since: None,
+                exit_timeout_count: 0,
             };
             pos_states.insert(symbol, (state, qty.parse().unwrap_or(0)));
         }
@@ -257,6 +260,7 @@ pub async fn run_generic_position_task(
                     partial_exit_done: false,
                     exit_pending: false,
                     exit_pending_since: None,
+                exit_timeout_count: 0,
                     regime: MarketRegime::Trending,
                     profit_target_1_atr: pos_cfg.profit_target_1_atr,
                     profit_target_2_atr: pos_cfg.profit_target_2_atr,
@@ -400,9 +404,11 @@ pub async fn run_generic_position_task(
             Some(_) = eod_rx.recv() => {
                 tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
                 for (symbol, (state, qty)) in &pos_states {
-                    let _ = force_order_tx.send(OrderRequest {
+                    if let Err(e) = force_order_tx.send(OrderRequest {
                         symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
-                    }).await;
+                    }).await {
+                        tracing::error!(symbol = %symbol, error = %e, "EOD trigger: Failed to send force order for full exit");
+                    }
                 }
             }
             Some(fill) = fill_rx.recv() => {
@@ -427,6 +433,7 @@ pub async fn run_generic_position_task(
                         partial_exit_done: false,
                         exit_pending: false,
                         exit_pending_since: None,
+                exit_timeout_count: 0,
                         regime: regime.clone(),
                         profit_target_1_atr: pos_cfg.profit_target_1_atr,
                         profit_target_2_atr: pos_cfg.profit_target_2_atr,
@@ -495,17 +502,29 @@ pub async fn run_generic_position_task(
                 }
             }
             Some(tick) = tick_pos_rx.recv() => {
-                if let Some((state, qty)) = pos_states.get_mut(&tick.symbol) {
-                    last_prices.insert(tick.symbol.clone(), tick.price);
+                // exit_pending 타임아웃 체크: 5회 초과 시 VTS 잔고없음 등으로 매도 불가 → 포지션 강제 제거
+                let force_remove = if let Some((state, _)) = pos_states.get_mut(&tick.symbol) {
                     if state.exit_pending {
                         if let Some(since) = state.exit_pending_since {
                             if since.elapsed() > std::time::Duration::from_secs(90) {
+                                state.exit_timeout_count += 1;
                                 state.exit_pending = false;
                                 state.exit_pending_since = None;
-                                tracing::warn!(symbol = %tick.symbol, "exit_pending 90초 타임아웃 → 리셋");
-                            }
-                        }
-                    }
+                                tracing::warn!(symbol = %tick.symbol, count = state.exit_timeout_count, "exit_pending 90초 타임아웃 → 리셋");
+                                state.exit_timeout_count >= 5
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                } else { false };
+
+                if force_remove {
+                    let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
+                    tracing::error!(symbol = %tick.symbol, "exit 5회 타임아웃 — 매도 불가 포지션 강제 제거");
+                    summary_alert.info(format!("⚠️ [{market_name}] {sym_label} exit 5회 실패 → 포지션 강제 제거 (VTS 잔고 불일치 추정)"));
+                    pos_states.remove(&tick.symbol);
+                    sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
+                } else if let Some((state, qty)) = pos_states.get_mut(&tick.symbol) {
+                    last_prices.insert(tick.symbol.clone(), tick.price);
                     let decision = evaluate_exit(state, tick.price);
                     match decision {
                         ExitDecision::Hold => {
@@ -654,6 +673,7 @@ mod tests {
             exchange_code: None,
             exit_pending: false,
             exit_pending_since: None,
+                exit_timeout_count: 0,
         }
     }
 
