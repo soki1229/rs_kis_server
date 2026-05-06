@@ -253,7 +253,8 @@ impl MarketAdapter for KrVtsAdapter {
     }
 
     async fn unfilled_orders(&self) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-        kr_unfilled_orders(&self.base).await
+        // VTS: inquire_psbl_rvsecncl 미지원 → 빈 목록 반환
+        Ok(vec![])
     }
 
     async fn order_history(
@@ -270,22 +271,11 @@ impl MarketAdapter for KrVtsAdapter {
         _symbol: &str,
         expected_qty: u64,
     ) -> Result<PollOutcome, BotError> {
-        match kr_unfilled_orders(&self.base).await {
-            Ok(orders) => {
-                let still_open = orders.iter().any(|o| o.order_no == broker_order_no);
-                if still_open {
-                    Ok(PollOutcome::StillOpen)
-                } else {
-                    Ok(self
-                        .base
-                        .confirm_fill_from_history(broker_order_no, expected_qty)
-                        .await)
-                }
-            }
-            Err(e) => Err(BotError::ApiError {
-                msg: format!("unfilled_orders failed: {}", e),
-            }),
-        }
+        // VTS: inquire_psbl_rvsecncl 미지원 → 체결내역으로 직접 확인
+        Ok(self
+            .base
+            .confirm_fill_from_history(broker_order_no, expected_qty)
+            .await)
     }
 
     async fn balance(&self) -> Result<UnifiedBalance, BotError> {

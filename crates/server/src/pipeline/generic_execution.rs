@@ -357,17 +357,28 @@ async fn reconcile_submitted_orders(
                 } => {
                     sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ? WHERE id = ?")
                             .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&order_id).execute(db_pool).await.ok();
-                    fill_tx
-                        .send(FillInfo {
-                            order_id,
-                            symbol,
-                            filled_qty,
-                            filled_price,
-                            atr,
-                            exchange_code: ex_code,
-                        })
-                        .await
-                        .ok();
+                    // 이미 포지션이 DB에 존재하면 fill을 보내지 않음 (balance 복구와 중복 방지)
+                    let pos_exists = sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM positions WHERE symbol = ?",
+                    )
+                    .bind(&symbol)
+                    .fetch_one(db_pool)
+                    .await
+                    .unwrap_or(0)
+                        > 0;
+                    if !pos_exists {
+                        fill_tx
+                            .send(FillInfo {
+                                order_id,
+                                symbol,
+                                filled_qty,
+                                filled_price,
+                                atr,
+                                exchange_code: ex_code,
+                            })
+                            .await
+                            .ok();
+                    }
                 }
                 PollOutcome::Cancelled => {
                     sqlx::query("UPDATE orders SET state = 'Cancelled' WHERE id = ?")

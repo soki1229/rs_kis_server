@@ -199,7 +199,14 @@ pub async fn run_generic_position_task(
                 let stop = entry - pos_cfg.stop_atr_multiplier * atr;
                 let pt1 = entry + pos_cfg.profit_target_1_atr * atr;
                 let pt2 = entry + pos_cfg.profit_target_2_atr * atr;
-                let exchange_code = Some("NASD".to_string());
+                let exchange_code = if matches!(
+                    market_id,
+                    crate::market::MarketId::Kr | crate::market::MarketId::KrVts
+                ) {
+                    None
+                } else {
+                    Some("NASD".to_string())
+                };
 
                 let state = PositionState {
                     entry_price: entry,
