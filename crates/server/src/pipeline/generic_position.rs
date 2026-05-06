@@ -133,7 +133,21 @@ pub async fn run_generic_position_task(
 
     let mut pos_states: HashMap<String, (PositionState, u64)> = HashMap::new();
     let mut last_prices: HashMap<String, Decimal> = HashMap::new();
+    let mut symbol_names: HashMap<String, String> = HashMap::new();
     let mut eod_fallback_fired = false;
+
+    // daily_ohlc 테이블에서 종목명 로드
+    if let Ok(rows) =
+        sqlx::query("SELECT symbol, name FROM daily_ohlc WHERE name IS NOT NULL GROUP BY symbol")
+            .fetch_all(&db_pool)
+            .await
+    {
+        for row in rows {
+            let sym: String = row.get("symbol");
+            let name: String = row.get("name");
+            symbol_names.insert(sym, name);
+        }
+    }
     let fallback_instant = tokio::time::Instant::now()
         + std::time::Duration::from_secs(
             (eod_fallback - chrono::Utc::now()).num_seconds().max(0) as u64
@@ -292,7 +306,13 @@ pub async fn run_generic_position_task(
     }
 
     // 초기 포지션 상태를 live_state_tx에 발행 (상태 조회 명령에서 포지션이 보이도록)
-    publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx);
+    publish_live_state(
+        &live_state_tx,
+        &pos_states,
+        &last_prices,
+        &regime_rx,
+        &symbol_names,
+    );
 
     loop {
         tokio::select! {
@@ -343,6 +363,16 @@ pub async fn run_generic_position_task(
                         exchange_code: fill.exchange_code.clone(),
                     };
                     pos_states.insert(fill.symbol.clone(), (state, fill.filled_qty));
+                    // 종목명 갱신 (daily_ohlc에 있으면 사용)
+                    if let Ok(row) = sqlx::query("SELECT name FROM daily_ohlc WHERE symbol = ? AND name IS NOT NULL ORDER BY date DESC LIMIT 1")
+                        .bind(&fill.symbol)
+                        .fetch_one(&db_pool)
+                        .await
+                    {
+                        if let Ok(name) = row.try_get::<String, _>("name") {
+                            symbol_names.insert(fill.symbol.clone(), name);
+                        }
+                    }
                     let now = chrono::Utc::now().to_rfc3339();
                     sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .bind(uuid::Uuid::new_v4().to_string())
@@ -431,7 +461,13 @@ pub async fn run_generic_position_task(
             }
         }
 
-        publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx);
+        publish_live_state(
+            &live_state_tx,
+            &pos_states,
+            &last_prices,
+            &regime_rx,
+            &symbol_names,
+        );
     }
 }
 
@@ -440,6 +476,7 @@ fn publish_live_state(
     pos_states: &HashMap<String, (PositionState, u64)>,
     last_prices: &HashMap<String, Decimal>,
     regime_rx: &RegimeReceiver,
+    symbol_names: &HashMap<String, String>,
 ) {
     let positions = pos_states
         .iter()
@@ -450,7 +487,7 @@ fn publish_live_state(
                 .unwrap_or(state.entry_price);
             Position {
                 symbol: symbol.clone(),
-                name: None,
+                name: symbol_names.get(symbol).cloned(),
                 qty: *qty as i64,
                 avg_price: state.entry_price,
                 current_price,

@@ -134,25 +134,43 @@ fn he(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// 정수를 천 단위 쉼표로 포맷 (예: 1234567 → "1,234,567")
+fn fmt_num(n: i64) -> String {
+    let s = n.unsigned_abs().to_string();
+    let with_commas = s
+        .as_bytes()
+        .rchunks(3)
+        .rev()
+        .map(std::str::from_utf8)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default()
+        .join(",");
+    if n < 0 {
+        format!("-{}", with_commas)
+    } else {
+        with_commas
+    }
+}
+
 /// `/kr status` 또는 `/us status` 응답 문자열 생성. HTML parse mode.
 pub fn format_status(state: &PipelineState, market: &str) -> String {
     use rust_decimal::prelude::ToPrimitive;
     let live = state.live_state_rx.borrow();
     let summary = state.summary.read().unwrap_or_else(|e| e.into_inner());
 
-    let bot_icon = match summary.bot_state {
-        BotState::Active => "🟢 운용 중",
-        BotState::Idle => "⚪️ 대기",
-        BotState::EntryPaused | BotState::EntryPausedLlmOutage => "🔵 청산 모드",
-        BotState::Suspended => "🟡 정지",
-        BotState::HardBlocked => "🔴 긴급 차단",
+    let (bot_icon, bot_label) = match summary.bot_state {
+        BotState::Active => ("🟢", "운용 중"),
+        BotState::Idle => ("⚪️", "대기"),
+        BotState::EntryPaused | BotState::EntryPausedLlmOutage => ("🔵", "청산 모드"),
+        BotState::Suspended => ("🟡", "일시 정지"),
+        BotState::HardBlocked => ("🔴", "긴급 차단"),
     };
 
-    let regime_icon = match live.regime.as_str() {
-        "Trending" => "📈",
-        "Volatile" => "⚡",
-        "Quiet" => "😴",
-        _ => "•",
+    let (regime_icon, regime_label) = match live.regime.as_str() {
+        "Trending" => ("📈", "추세장"),
+        "Volatile" => ("⚡", "변동장"),
+        "Quiet" => ("😴", "횡보장"),
+        _ => ("•", "미분류"),
     };
 
     let total_unrealized: f64 = live
@@ -160,6 +178,7 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
         .iter()
         .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
         .sum();
+
     let updated_str = match live.last_updated {
         Some(t) => {
             let ago = (chrono::Utc::now() - t).num_seconds().max(0);
@@ -169,23 +188,38 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
                 format!("{}분 전", ago / 60)
             }
         }
-        None => "미발행".to_string(),
+        None => "미갱신".to_string(),
     };
 
-    let cash_str = match live.available_cash {
-        Some(c) => format!(" │ 가용 <code>{:.0}</code>", c),
-        None => String::new(),
-    };
-
-    let regime_str = if live.regime.is_empty() {
-        "미분류".to_string()
+    let market_flag = if market == "KR" {
+        "🇰🇷"
     } else {
-        live.regime.clone()
+        "🇺🇸"
+    };
+    let market_hours = market_hours_str(market);
+
+    let total_icon = if total_unrealized >= 0.0 {
+        "🔺"
+    } else {
+        "🔽"
+    };
+    let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
+    let total_amt = fmt_num(total_unrealized as i64);
+
+    let cash_line = match live.available_cash {
+        Some(c) => {
+            use rust_decimal::prelude::ToPrimitive;
+            format!(
+                "\n💵 가용 자금: <code>{}</code>",
+                fmt_num(c.to_i64().unwrap_or(0))
+            )
+        }
+        None => String::new(),
     };
 
     let pos_count = live.positions.len();
     let pos_section = if live.positions.is_empty() {
-        "  포지션 없음".to_string()
+        "  <i>보유 포지션 없음</i>".to_string()
     } else {
         live.positions
             .iter()
@@ -194,44 +228,35 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
             .join("\n\n")
     };
 
-    let market_hours = market_hours_str(market);
-    let total_icon = if total_unrealized >= 0.0 {
-        "🔺"
-    } else {
-        "🔽"
-    };
-    let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
-
     format!(
-        "<b>{market}</b> {bot_icon}\n\
+        "{market_flag} <b>{market}</b>  {bot_icon} {bot_label}\n\
          {market_hours}\n\
-         {regime_icon} {regime_str} │ {total_icon} <b>{total_sign}{total_unrealized:.0}원</b>{cash_str}\n\
-         🕐 <i>{updated_str}</i>\n\
-         ─────────────────\n\
-         📦 <b>{pos_count}종목</b>\n\
+         {regime_icon} {regime_label}  │  {total_icon} <b>{total_sign}{total_amt}원</b>{cash_line}\n\
+         🕐 <i>갱신 {updated_str}</i>\n\
+         ━━━━━━━━━━━━━━━━━━\n\
+         📦 <b>{pos_count}종목 보유</b>\n\n\
          {pos_section}"
     )
 }
 
 fn format_position_line(p: &crate::types::Position) -> String {
     use rust_decimal::prelude::ToPrimitive;
-    let name = he(p.name.as_deref().unwrap_or(&p.symbol));
     let symbol = he(&p.symbol);
-    let display = if p.name.is_some() {
-        format!("{name} <code>{symbol}</code>")
-    } else {
-        format!("<code>{symbol}</code>")
-    };
+    let name = he(p.name.as_deref().unwrap_or(""));
 
     let pnl_icon = if p.pnl_pct >= 0.0 { "🔺" } else { "🔽" };
     let pnl_sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
     let pnl_amt = p.unrealized_pnl.to_i64().unwrap_or(0);
+    let pnl_amt_str = fmt_num(pnl_amt);
     let pnl_amt_sign = if pnl_amt >= 0 { "+" } else { "" };
 
-    let live_price = if p.current_price == p.avg_price {
-        format!("<code>{}</code> <i>(미수신)</i>", p.avg_price)
+    let avg = fmt_num(p.avg_price.to_i64().unwrap_or(0));
+    let live_price_val = p.current_price.to_i64().unwrap_or(0);
+    let price_stale = p.current_price == p.avg_price;
+    let live_str = if price_stale {
+        format!("<code>{}</code><i>?</i>", fmt_num(live_price_val))
     } else {
-        format!("<code>{}</code>", p.current_price)
+        format!("<code>{}</code>", fmt_num(live_price_val))
     };
 
     let stop_dist_pct = if p.current_price > rust_decimal::Decimal::ZERO {
@@ -241,24 +266,37 @@ fn format_position_line(p: &crate::types::Position) -> String {
     } else {
         0.0
     };
+    let stop_val = fmt_num(p.stop_price.to_i64().unwrap_or(0));
+    let pt1_val = fmt_num(p.profit_target_1.to_i64().unwrap_or(0));
+    let pt2_val = fmt_num(p.profit_target_2.to_i64().unwrap_or(0));
 
-    let stop_label = if let Some(ts) = p.trailing_stop {
-        format!("TS <code>{ts}</code> ({stop_dist_pct:.1}%)")
+    let stop_label = if p.trailing_stop.is_some() {
+        format!("TS <code>{stop_val}</code> ({stop_dist_pct:+.1}%)")
     } else {
-        format!("✂ <code>{}</code> ({stop_dist_pct:.1}%)", p.stop_price)
+        format!("✂ <code>{stop_val}</code> ({stop_dist_pct:+.1}%)")
+    };
+
+    // 첫 줄: 종목명 + 코드 + 수량
+    // 둘째 줄: 매입가 → 현재가, 손익%/원
+    // 셋째 줄: 손절가, 목표가
+    let header = if name.is_empty() {
+        format!(
+            "{pnl_icon} <b><code>{symbol}</code></b>  {qty}주",
+            qty = p.qty
+        )
+    } else {
+        format!(
+            "{pnl_icon} <b>{name}</b>  <code>{symbol}</code>  {qty}주",
+            qty = p.qty
+        )
     };
 
     format!(
-        "{pnl_icon} <b>{display}</b> {qty}주\n  \
-         <code>{avg}</code> → {live}  <b>{pnl_sign}{pnl_pct:.2}%</b> / {pnl_amt_sign}{pnl_amt}원\n  \
-         {stop} │ 🎯 <code>{pt1}</code> / <code>{pt2}</code>",
-        qty = p.qty,
-        avg = p.avg_price,
-        live = live_price,
+        "{header}\n\
+         ├ 매입 <code>{avg}</code>  →  현재 {live_str}\n\
+         ├ 손익 <b>{pnl_sign}{pnl_pct:.2}%</b>  /  <b>{pnl_amt_sign}{pnl_amt_str}원</b>\n\
+         └ {stop_label}  🎯 <code>{pt1_val}</code> / <code>{pt2_val}</code>",
         pnl_pct = p.pnl_pct,
-        pt1 = p.profit_target_1,
-        pt2 = p.profit_target_2,
-        stop = stop_label,
     )
 }
 
@@ -276,11 +314,19 @@ pub fn format_positions(state: &PipelineState, market: &str) -> String {
                 format!("{}분 전", ago / 60)
             }
         }
-        None => "미발행".to_string(),
+        None => "미갱신".to_string(),
+    };
+
+    let market_flag = if market == "KR" {
+        "🇰🇷"
+    } else {
+        "🇺🇸"
     };
 
     if live.positions.is_empty() {
-        return format!("📦 [{market}] 보유 중인 포지션이 없습니다.\n갱신: {updated_str}");
+        return format!(
+            "{market_flag} <b>{market} 포지션</b>\n<i>보유 중인 포지션이 없습니다.</i>\n🕐 <i>갱신 {updated_str}</i>"
+        );
     }
 
     let total_unrealized: f64 = live
@@ -288,18 +334,23 @@ pub fn format_positions(state: &PipelineState, market: &str) -> String {
         .iter()
         .map(|p| p.unrealized_pnl.to_f64().unwrap_or(0.0))
         .sum();
-    let unrealized_icon = if total_unrealized >= 0.0 {
+    let total_icon = if total_unrealized >= 0.0 {
         "🔺"
     } else {
         "🔽"
     };
+    let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
+    let total_amt = fmt_num(total_unrealized as i64);
 
     let lines: Vec<String> = live.positions.iter().map(format_position_line).collect();
-    let sign = if total_unrealized >= 0.0 { "+" } else { "" };
+    let count = live.positions.len();
 
     format!(
-        "💰 <b>{market} 포지션</b> {}종목 │ {unrealized_icon} <b>{sign}{total_unrealized:.0}원</b> │ <i>{updated_str}</i>\n\n{}",
-        live.positions.len(),
+        "{market_flag} <b>{market} 포지션</b>  {count}종목\n\
+         {total_icon} 평가손익 합계: <b>{total_sign}{total_amt}원</b>\n\
+         🕐 <i>갱신 {updated_str}</i>\n\
+         ━━━━━━━━━━━━━━━━━━\n\n\
+         {}",
         lines.join("\n\n")
     )
 }
@@ -398,7 +449,7 @@ async fn run_command_loop(
             if text.trim() == "/status" {
                 let kr = format_status(&kr_st, "KR");
                 let us = format_status(&us_st, "US");
-                let reply = format!("{}\n\n{}", kr, us);
+                let reply = format!("{}\n\n━━━━━━━━━━━━━━━━━━\n\n{}", kr, us);
                 bot.send_message(msg.chat.id, reply)
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .await?;
@@ -460,27 +511,29 @@ async fn run_command_loop(
             }
 
             if text.trim() == "/help" {
-                let help = "📖 사용 가능한 명령\n\n\
-                    [조회]\n\
-                    /status — KR+US 현황 (장상태, 레짐, 포지션, 손익)\n\
+                let help = "📖 <b>사용 가능한 명령</b>\n\n\
+                    <b>조회</b>\n\
+                    /status — KR+US 전체 현황\n\
                     /positions — 보유 포지션 상세\n\
-                    /kr status — KR 상태\n\
-                    /us status — US 상태\n\
+                    /kr status — 🇰🇷 KR 상태\n\
+                    /us status — 🇺🇸 US 상태\n\
                     /kr watchlist — KR 감시 종목\n\
                     /us watchlist — US 감시 종목\n\
-                    /kr signals [N] — KR 최근 시그널 (기본 15건)\n\
-                    /us signals [N] — US 최근 시그널 (기본 15건)\n\
+                    /kr signals [N] — KR 최근 시그널\n\
+                    /us signals [N] — US 최근 시그널\n\
                     /log [N] — 최근 활동 로그\n\
-                    /botstat — 봇 통계 (uptime, tick수, 주문수)\n\n\
-                    [제어]\n\
+                    /botstat — 봇 통계\n\n\
+                    <b>제어</b>\n\
                     /kr start|stop|pause — KR 봇 제어\n\
                     /us start|stop|pause — US 봇 제어\n\
                     /stop-all — 전체 중단 + 청산\n\
                     /kill-hard — 긴급 차단\n\
                     /kill-soft — 소프트 차단\n\
                     /kill-clear — 차단 해제\n\
-                    /liquidate-all — 전체 포지션 청산";
-                bot.send_message(msg.chat.id, help).await?;
+                    /liquidate-all — 전체 청산";
+                bot.send_message(msg.chat.id, help)
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
                 return Ok(());
             }
 
@@ -698,9 +751,10 @@ fn build_pnl_report(kr_state: &PipelineState, us_state: &PipelineState) -> Optio
         .format("%H:%M")
         .to_string();
 
-    let mut lines = vec![format!("📊 <b>수익 현황</b> <i>({now} KST)</i>")];
+    let mut lines = vec![format!("📊 <b>수익 현황</b>  <i>{now} KST</i>")];
 
-    for (positions, market) in [(kr_positions, "KR"), (us_positions, "US")] {
+    for (positions, market, flag) in [(kr_positions, "KR", "🇰🇷"), (us_positions, "US", "🇺🇸")]
+    {
         if positions.is_empty() {
             continue;
         }
@@ -710,19 +764,28 @@ fn build_pnl_report(kr_state: &PipelineState, us_state: &PipelineState) -> Optio
             .sum();
         let total_icon = if total >= 0.0 { "🔺" } else { "🔽" };
         let total_sign = if total >= 0.0 { "+" } else { "" };
+        let total_amt = fmt_num(total as i64);
         lines.push(format!(
-            "─ <b>{market}</b>: {total_icon} <b>{total_sign}{total:.0}원</b>"
+            "\n{flag} <b>{market}</b>  {total_icon} <b>{total_sign}{total_amt}원</b>"
         ));
+
         for p in positions {
             let icon = if p.pnl_pct >= 0.0 { "🔺" } else { "🔽" };
             let sign = if p.pnl_pct >= 0.0 { "+" } else { "" };
             let name = he(p.name.as_deref().unwrap_or(&p.symbol));
+            let symbol = he(&p.symbol);
+            let display = if p.name.is_some() {
+                format!("{name} <code>{symbol}</code>")
+            } else {
+                format!("<code>{symbol}</code>")
+            };
             let amt = p.unrealized_pnl.to_i64().unwrap_or(0);
             let amt_sign = if amt >= 0 { "+" } else { "" };
+            let amt_str = fmt_num(amt);
             lines.push(format!(
-                "  {icon} {name} {qty}주  <b>{sign}{pct:.2}%</b> / {amt_sign}{amt}원",
+                "  {icon} {display}  {qty}주\n      <b>{sign}{pct:.2}%</b>  /  {amt_sign}{amt_str}원",
                 qty = p.qty,
-                pct = p.pnl_pct
+                pct = p.pnl_pct,
             ));
         }
     }
@@ -798,8 +861,8 @@ mod tests {
         let state = make_state_with_position("NVDA", 1, dec!(130.00));
         let result = format_status(&state, "US");
         assert!(
-            result.contains("Trending"),
-            "should show regime: got {result}"
+            result.contains("추세장"),
+            "should show regime label: got {result}"
         );
     }
 
@@ -819,7 +882,8 @@ mod tests {
         let result = format_positions(&state, "US");
         assert!(result.contains("NVDA"), "should contain symbol");
         assert!(result.contains("5"), "should contain qty");
-        assert!(result.contains("134.20"), "should contain price");
+        // fmt_num truncates to integer
+        assert!(result.contains("134"), "should contain price: got {result}");
     }
 
     #[test]
