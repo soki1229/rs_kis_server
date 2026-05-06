@@ -487,10 +487,10 @@ async fn us_cancel_order(
         .overseas_stock_v1_trading_order_rvsecncl(OverseasStockV1TradingOrderRvsecnclRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ovrs_excg_cd: order
-                .exchange_code
-                .clone()
-                .unwrap_or_else(|| "NASD".to_string()),
+            ovrs_excg_cd: UsMarketBase::exchange_from_hint(
+                order.exchange_code.as_deref(),
+                &order.symbol,
+            ),
             pdno: order.symbol.clone(),
             orgn_odno: order.order_no.clone(),
             rvse_cncl_dvsn_cd: "02".to_string(),
@@ -601,7 +601,7 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
             msg: format!("overseas balance (positions): {}", e),
         })?;
 
-    let positions = pos_resp
+    let positions: Vec<UnifiedPosition> = pos_resp
         .output1
         .iter()
         .map(|item| UnifiedPosition {
@@ -646,8 +646,13 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         tracing::debug!(available_cash = %cash, "US balance fetched");
     }
 
+    let total_evaluation: Decimal = positions
+        .iter()
+        .map(|p| p.current_price * Decimal::from(p.qty))
+        .sum();
+
     Ok(UnifiedBalance {
-        total_equity: cash,
+        total_equity: cash + total_evaluation,
         available_cash: cash,
         positions,
     })

@@ -117,7 +117,7 @@ async fn process_order(
     twap_cfg: crate::config::TwapConfig,
     poll_sem: &Arc<Semaphore>,
 ) {
-    if req.qty >= twap_cfg.threshold_qty && twap_cfg.slice_count > 1 {
+    if req.side == Side::Buy && req.qty >= twap_cfg.threshold_qty && twap_cfg.slice_count > 1 {
         let slice_count = twap_cfg.slice_count;
         let base_qty = req.qty / slice_count as u64;
         let mut remaining_qty = req.qty % slice_count as u64;
@@ -328,6 +328,16 @@ async fn process_single_order(
                                     tracing::error!(order_id = %order_id, "Failed: 'Failed' 상태 DB 업데이트 실패: {e}");
                                 }
                                 alert.warn(format!("Order {} failed: {}", req.symbol, reason));
+                                let _ = fill_tx
+                                    .send(FillInfo {
+                                        order_id: order_id.clone(),
+                                        symbol: req.symbol.clone(),
+                                        filled_qty: 0,
+                                        filled_price: rust_decimal::Decimal::ZERO,
+                                        exchange_code: req.exchange_code.clone(),
+                                        atr: req.atr,
+                                    })
+                                    .await;
                                 return;
                             }
                             PollOutcome::StillOpen => {
@@ -341,9 +351,19 @@ async fn process_single_order(
                                             Side::Sell => UnifiedSide::Sell,
                                         },
                                         qty: req.qty,
-                                        remaining_qty: req.qty,
+                                        remaining_qty: req.qty.saturating_sub(last_reported_qty),
                                         price: req.price.unwrap_or(Decimal::ZERO),
                                         exchange_code: req.exchange_code.clone(),
+                                    };
+                                    let send_zero_fill = |fill_tx: &mpsc::Sender<FillInfo>| {
+                                        let _ = fill_tx.try_send(FillInfo {
+                                            order_id: order_id.clone(),
+                                            symbol: req.symbol.clone(),
+                                            filled_qty: 0,
+                                            filled_price: Decimal::ZERO,
+                                            exchange_code: req.exchange_code.clone(),
+                                            atr: req.atr,
+                                        });
                                     };
                                     match adapter.cancel_order(&cancel_order).await {
                                         Ok(true) => {
@@ -356,19 +376,75 @@ async fn process_single_order(
                                                 adapter.name(),
                                                 req.symbol
                                             ));
+                                            send_zero_fill(fill_tx);
                                         }
                                         Ok(false) => {
-                                            tracing::warn!(symbol = %req.symbol, "StillOpen 취소 시도했지만 취소 실패 (already filled?)");
-                                            if let Err(e) = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
-                                                .bind(&now).bind(&order_id).execute(db_pool).await {
-                                                tracing::error!(order_id = %order_id, "StillOpen 취소실패 후 DB Failed 업데이트 실패: {e}");
+                                            // 취소 거부 = 이미 체결됐을 가능성 → 체결 내역 재확인
+                                            tracing::warn!(symbol = %req.symbol, "StillOpen 취소 거부 — 체결 여부 재확인");
+                                            let recheck = adapter
+                                                .poll_order_status(
+                                                    &res.broker_id,
+                                                    &req.symbol,
+                                                    req.qty,
+                                                )
+                                                .await;
+                                            if let Ok(PollOutcome::Filled {
+                                                filled_qty,
+                                                filled_price,
+                                            }) = recheck
+                                            {
+                                                tracing::info!(symbol = %req.symbol, qty = filled_qty, "취소 거부 후 체결 확인 — 정상 처리");
+                                                let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
+                                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await;
+                                                let _ = fill_tx
+                                                    .send(FillInfo {
+                                                        order_id: order_id.clone(),
+                                                        symbol: req.symbol.clone(),
+                                                        filled_qty,
+                                                        filled_price,
+                                                        exchange_code: req.exchange_code.clone(),
+                                                        atr: req.atr,
+                                                    })
+                                                    .await;
+                                            } else {
+                                                let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
+                                                    .bind(&now).bind(&order_id).execute(db_pool).await;
+                                                send_zero_fill(fill_tx);
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::error!(symbol = %req.symbol, "StillOpen 취소 API 오류: {e}");
-                                            if let Err(db_e) = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
-                                                .bind(&now).bind(&order_id).execute(db_pool).await {
-                                                tracing::error!(order_id = %order_id, "StillOpen 취소오류 후 DB Failed 업데이트 실패: {db_e}");
+                                            // 취소 API 오류(IGW00014 등) = VTS에서 이미 체결됐을 가능성 → 체결 내역 재확인
+                                            tracing::warn!(symbol = %req.symbol, "StillOpen 취소 API 오류({e}) — 체결 여부 재확인");
+                                            let recheck = adapter
+                                                .poll_order_status(
+                                                    &res.broker_id,
+                                                    &req.symbol,
+                                                    req.qty,
+                                                )
+                                                .await;
+                                            if let Ok(PollOutcome::Filled {
+                                                filled_qty,
+                                                filled_price,
+                                            }) = recheck
+                                            {
+                                                tracing::info!(symbol = %req.symbol, qty = filled_qty, "취소 오류 후 체결 확인 — 정상 처리");
+                                                let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
+                                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await;
+                                                let _ = fill_tx
+                                                    .send(FillInfo {
+                                                        order_id: order_id.clone(),
+                                                        symbol: req.symbol.clone(),
+                                                        filled_qty,
+                                                        filled_price,
+                                                        exchange_code: req.exchange_code.clone(),
+                                                        atr: req.atr,
+                                                    })
+                                                    .await;
+                                            } else {
+                                                tracing::error!(symbol = %req.symbol, "취소 오류 + 체결 미확인 — Failed 처리");
+                                                let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
+                                                    .bind(&now).bind(&order_id).execute(db_pool).await;
+                                                send_zero_fill(fill_tx);
                                             }
                                         }
                                     }

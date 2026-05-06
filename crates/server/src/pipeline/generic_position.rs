@@ -412,6 +412,14 @@ pub async fn run_generic_position_task(
                 }
             }
             Some(fill) = fill_rx.recv() => {
+                if fill.filled_qty == 0 {
+                    if let Some((state, _)) = pos_states.get_mut(&fill.symbol) {
+                        state.exit_pending = false;
+                        state.exit_pending_since = None;
+                        tracing::info!(symbol = %fill.symbol, "Order failure/cancel received, resetting exit_pending");
+                    }
+                    continue;
+                }
                 if !pos_states.contains_key(&fill.symbol) {
                     let regime = regime_rx.borrow().clone();
                     let current_price = fill.filled_price;
@@ -506,7 +514,7 @@ pub async fn run_generic_position_task(
                 let force_remove = if let Some((state, _)) = pos_states.get_mut(&tick.symbol) {
                     if state.exit_pending {
                         if let Some(since) = state.exit_pending_since {
-                            if since.elapsed() > std::time::Duration::from_secs(90) {
+                            if since.elapsed() > std::time::Duration::from_secs(30) {
                                 state.exit_timeout_count += 1;
                                 state.exit_pending = false;
                                 state.exit_pending_since = None;
