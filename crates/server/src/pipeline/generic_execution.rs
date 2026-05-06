@@ -380,7 +380,7 @@ async fn reconcile_submitted_orders(
                             .ok();
                     }
                 }
-                PollOutcome::Cancelled => {
+                PollOutcome::Cancelled | PollOutcome::Failed { .. } => {
                     sqlx::query("UPDATE orders SET state = 'Cancelled' WHERE id = ?")
                         .bind(&order_id)
                         .execute(db_pool)
