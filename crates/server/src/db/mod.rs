@@ -31,6 +31,10 @@ pub async fn connect(db_path: &str) -> Result<SqlitePool, BotError> {
                 sqlx::query("PRAGMA wal_autocheckpoint=1000")
                     .execute(&mut *conn)
                     .await?;
+                // FK 제약 강제 — SQLite 기본값은 OFF
+                sqlx::query("PRAGMA foreign_keys=ON")
+                    .execute(&mut *conn)
+                    .await?;
                 Ok(())
             })
         })

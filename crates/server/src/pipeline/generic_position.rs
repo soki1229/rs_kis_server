@@ -364,10 +364,10 @@ pub async fn run_generic_position_task(
                             .iter()
                             .filter_map(|p| p.qty.to_u64().filter(|&q| q > 0).map(|q| (p.symbol.clone(), q)))
                             .collect();
-                        // API에 없는 종목은 청산된 것으로 처리
-                        let stale_symbols: Vec<String> = pos_states.keys()
-                            .filter(|s| !api_qty_map.contains_key(*s))
-                            .cloned()
+                        // API에 없는 종목은 청산된 것으로 처리 (단, exit_pending 중인 포지션은 보호)
+                        let stale_symbols: Vec<String> = pos_states.iter()
+                            .filter(|(s, (state, _))| !api_qty_map.contains_key(*s) && !state.exit_pending)
+                            .map(|(s, _)| s.clone())
                             .collect();
                         for sym in stale_symbols {
                             tracing::warn!(symbol = %sym, "balance sync: API에 없음 → 포지션 삭제");
@@ -461,7 +461,7 @@ pub async fn run_generic_position_task(
                         }
                     }
                     let now = chrono::Utc::now().to_rfc3339();
-                    sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    if let Err(e) = sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .bind(uuid::Uuid::new_v4().to_string())
                         .bind(&fill.order_id)
                         .bind(&fill.symbol)
@@ -475,7 +475,10 @@ pub async fn run_generic_position_task(
                         .bind(&fill.exchange_code)
                         .bind(&now)
                         .bind(&now)
-                        .execute(&db_pool).await.ok();
+                        .execute(&db_pool).await {
+                        tracing::error!(symbol = %fill.symbol, "포지션 DB 저장 실패 — 재시작 후 복구 불가: {e}");
+                        summary_alert.warn(format!("⚠️ [{market_name}] {} 포지션 DB 저장 실패 — 수동 확인 필요", fill.symbol));
+                    }
                     summary_alert.info(format!(
                         "📥 진입 [{market_name}] {} × {}주 @ {}\n스탑: {} | 목표1: {} | 목표2: {}",
                         fill.symbol, fill.filled_qty, current_price, stop_price, pt1, pt2
