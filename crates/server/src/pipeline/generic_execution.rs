@@ -198,18 +198,25 @@ async fn process_single_order(
     // 2. Place Order
     match adapter.place_order(unified_req).await {
         Ok(res) => {
+            let submitted_at = chrono::Utc::now().to_rfc3339();
             if let Err(e) = sqlx::query("UPDATE orders SET broker_order_id = ?, state = 'Submitted', submitted_at = ?, updated_at = ? WHERE id = ?")
-                .bind(&res.broker_id).bind(&now).bind(&now).bind(&order_id).execute(db_pool).await {
+                .bind(&res.broker_id).bind(&submitted_at).bind(&submitted_at).bind(&order_id).execute(db_pool).await {
                 tracing::error!(order_id = %order_id, broker_id = %res.broker_id, "Submitted 상태 DB 업데이트 실패: {e}");
+                alert.warn(format!("[{}] {} broker_id DB 저장 실패 — 재시작 후 reconcile 불가", adapter.name(), req.symbol));
+            }
+            if res.broker_id.is_empty() {
+                tracing::error!(order_id = %order_id, symbol = %req.symbol, "broker_id 공백 — 주문 추적 불가, 폴링 중단");
+                return;
             }
 
-            // 3. Poll for status
+            // 3. Poll for status — 각 이터레이션마다 신선한 타임스탬프 사용
             let start = Duration::from_secs(1);
             let mut interval = start;
             let mut last_reported_qty: u64 = 0;
             for attempt in 1..=30 {
                 tokio::time::sleep(interval).await;
                 interval = (interval + Duration::from_secs(1)).min(Duration::from_secs(5));
+                let ts = chrono::Utc::now().to_rfc3339();
 
                 let _permit = poll_sem.acquire().await.expect("poll semaphore closed");
                 match adapter
@@ -223,11 +230,10 @@ async fn process_single_order(
                                 filled_price,
                             } => {
                                 if let Err(e) = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
-                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await {
+                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&ts).bind(&order_id).execute(db_pool).await {
                                     tracing::error!(order_id = %order_id, "Filled: 'Filled' 상태 DB 업데이트 실패: {e}");
                                 }
 
-                                // Slippage measurement: compare fill vs. order price.
                                 if let Some(order_price) = req.price {
                                     if !order_price.is_zero() {
                                         let slippage_pct = ((filled_price - order_price).abs()
@@ -252,7 +258,7 @@ async fn process_single_order(
                                                 "order={} fill={} slippage={:.3}%",
                                                 order_price, filled_price, slippage_pct
                                             ))
-                                            .bind(chrono::Utc::now().to_rfc3339())
+                                            .bind(&ts)
                                             .execute(db_pool)
                                             .await
                                             .unwrap_or_else(|e| {
@@ -291,10 +297,9 @@ async fn process_single_order(
                             } => {
                                 tracing::info!(symbol = %req.symbol, qty = filled_qty, "Order partially filled, continuing poll...");
                                 if let Err(e) = sqlx::query("UPDATE orders SET filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
-                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await {
+                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&ts).bind(&order_id).execute(db_pool).await {
                                     tracing::warn!(order_id = %order_id, "PartialFilled DB 업데이트 실패: {e}");
                                 }
-                                // delta 전송: 새로 체결된 수량만 포지션 태스크로 전달
                                 let delta = filled_qty.saturating_sub(last_reported_qty);
                                 if delta > 0 {
                                     if let Err(e) = fill_tx
@@ -316,7 +321,7 @@ async fn process_single_order(
                             }
                             PollOutcome::Cancelled => {
                                 if let Err(e) = sqlx::query("UPDATE orders SET state = 'Cancelled', updated_at = ? WHERE id = ?")
-                                    .bind(&now).bind(&order_id).execute(db_pool).await {
+                                    .bind(&ts).bind(&order_id).execute(db_pool).await {
                                     tracing::error!(order_id = %order_id, "Cancelled: 'Cancelled' 상태 DB 업데이트 실패: {e}");
                                 }
                                 alert.warn(format!("Order {} cancelled by broker", req.symbol));
@@ -324,7 +329,7 @@ async fn process_single_order(
                             }
                             PollOutcome::Failed { reason } => {
                                 if let Err(e) = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
-                                    .bind(&now).bind(&order_id).execute(db_pool).await {
+                                    .bind(&ts).bind(&order_id).execute(db_pool).await {
                                     tracing::error!(order_id = %order_id, "Failed: 'Failed' 상태 DB 업데이트 실패: {e}");
                                 }
                                 alert.warn(format!("Order {} failed: {}", req.symbol, reason));
@@ -333,7 +338,7 @@ async fn process_single_order(
                                         order_id: order_id.clone(),
                                         symbol: req.symbol.clone(),
                                         filled_qty: 0,
-                                        filled_price: rust_decimal::Decimal::ZERO,
+                                        filled_price: Decimal::ZERO,
                                         exchange_code: req.exchange_code.clone(),
                                         atr: req.atr,
                                     })
@@ -355,20 +360,27 @@ async fn process_single_order(
                                         price: req.price.unwrap_or(Decimal::ZERO),
                                         exchange_code: req.exchange_code.clone(),
                                     };
-                                    let send_zero_fill = |fill_tx: &mpsc::Sender<FillInfo>| {
-                                        let _ = fill_tx.try_send(FillInfo {
-                                            order_id: order_id.clone(),
-                                            symbol: req.symbol.clone(),
-                                            filled_qty: 0,
-                                            filled_price: Decimal::ZERO,
-                                            exchange_code: req.exchange_code.clone(),
-                                            atr: req.atr,
-                                        });
-                                    };
+
+                                    // 취소/재확인 후 체결 내역 처리 공통 헬퍼
+                                    let handle_recheck =
+                                        |outcome: Result<PollOutcome, _>| -> Option<(u64, Decimal)> {
+                                            match outcome {
+                                                Ok(PollOutcome::Filled { filled_qty, filled_price }) => {
+                                                    Some((filled_qty, filled_price))
+                                                }
+                                                Ok(PollOutcome::PartialFilled { filled_qty, filled_price }) => {
+                                                    // 부분 체결이라도 알려진 수량을 포지션으로 등록
+                                                    tracing::warn!(filled_qty, "재확인: 부분 체결 상태 — 체결된 수량만 처리");
+                                                    Some((filled_qty, filled_price))
+                                                }
+                                                _ => None,
+                                            }
+                                        };
+
                                     match adapter.cancel_order(&cancel_order).await {
                                         Ok(true) => {
                                             if let Err(e) = sqlx::query("UPDATE orders SET state = 'Cancelled', updated_at = ? WHERE id = ?")
-                                                .bind(&now).bind(&order_id).execute(db_pool).await {
+                                                .bind(&ts).bind(&order_id).execute(db_pool).await {
                                                 tracing::error!(order_id = %order_id, "StillOpen 취소 후 DB 업데이트 실패: {e}");
                                             }
                                             alert.warn(format!(
@@ -376,10 +388,16 @@ async fn process_single_order(
                                                 adapter.name(),
                                                 req.symbol
                                             ));
-                                            send_zero_fill(fill_tx);
+                                            let _ = fill_tx.try_send(FillInfo {
+                                                order_id: order_id.clone(),
+                                                symbol: req.symbol.clone(),
+                                                filled_qty: 0,
+                                                filled_price: Decimal::ZERO,
+                                                exchange_code: req.exchange_code.clone(),
+                                                atr: req.atr,
+                                            });
                                         }
                                         Ok(false) => {
-                                            // 취소 거부 = 이미 체결됐을 가능성 → 체결 내역 재확인
                                             tracing::warn!(symbol = %req.symbol, "StillOpen 취소 거부 — 체결 여부 재확인");
                                             let recheck = adapter
                                                 .poll_order_status(
@@ -388,32 +406,33 @@ async fn process_single_order(
                                                     req.qty,
                                                 )
                                                 .await;
-                                            if let Ok(PollOutcome::Filled {
-                                                filled_qty,
-                                                filled_price,
-                                            }) = recheck
-                                            {
-                                                tracing::info!(symbol = %req.symbol, qty = filled_qty, "취소 거부 후 체결 확인 — 정상 처리");
+                                            if let Some((fq, fp)) = handle_recheck(recheck) {
+                                                tracing::info!(symbol = %req.symbol, qty = fq, "취소 거부 후 체결 확인 — 정상 처리");
                                                 let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
-                                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await;
+                                                    .bind(fq as i64).bind(fp.to_string()).bind(&ts).bind(&order_id).execute(db_pool).await;
                                                 let _ = fill_tx
                                                     .send(FillInfo {
                                                         order_id: order_id.clone(),
                                                         symbol: req.symbol.clone(),
-                                                        filled_qty,
-                                                        filled_price,
+                                                        filled_qty: fq,
+                                                        filled_price: fp,
                                                         exchange_code: req.exchange_code.clone(),
                                                         atr: req.atr,
                                                     })
                                                     .await;
                                             } else {
-                                                let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
-                                                    .bind(&now).bind(&order_id).execute(db_pool).await;
-                                                send_zero_fill(fill_tx);
+                                                let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?").bind(&ts).bind(&order_id).execute(db_pool).await;
+                                                let _ = fill_tx.try_send(FillInfo {
+                                                    order_id: order_id.clone(),
+                                                    symbol: req.symbol.clone(),
+                                                    filled_qty: 0,
+                                                    filled_price: Decimal::ZERO,
+                                                    exchange_code: req.exchange_code.clone(),
+                                                    atr: req.atr,
+                                                });
                                             }
                                         }
                                         Err(e) => {
-                                            // 취소 API 오류(IGW00014 등) = VTS에서 이미 체결됐을 가능성 → 체결 내역 재확인
                                             tracing::warn!(symbol = %req.symbol, "StillOpen 취소 API 오류({e}) — 체결 여부 재확인");
                                             let recheck = adapter
                                                 .poll_order_status(
@@ -422,29 +441,31 @@ async fn process_single_order(
                                                     req.qty,
                                                 )
                                                 .await;
-                                            if let Ok(PollOutcome::Filled {
-                                                filled_qty,
-                                                filled_price,
-                                            }) = recheck
-                                            {
-                                                tracing::info!(symbol = %req.symbol, qty = filled_qty, "취소 오류 후 체결 확인 — 정상 처리");
+                                            if let Some((fq, fp)) = handle_recheck(recheck) {
+                                                tracing::info!(symbol = %req.symbol, qty = fq, "취소 오류 후 체결 확인 — 정상 처리");
                                                 let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
-                                                    .bind(filled_qty as i64).bind(filled_price.to_string()).bind(&now).bind(&order_id).execute(db_pool).await;
+                                                    .bind(fq as i64).bind(fp.to_string()).bind(&ts).bind(&order_id).execute(db_pool).await;
                                                 let _ = fill_tx
                                                     .send(FillInfo {
                                                         order_id: order_id.clone(),
                                                         symbol: req.symbol.clone(),
-                                                        filled_qty,
-                                                        filled_price,
+                                                        filled_qty: fq,
+                                                        filled_price: fp,
                                                         exchange_code: req.exchange_code.clone(),
                                                         atr: req.atr,
                                                     })
                                                     .await;
                                             } else {
                                                 tracing::error!(symbol = %req.symbol, "취소 오류 + 체결 미확인 — Failed 처리");
-                                                let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
-                                                    .bind(&now).bind(&order_id).execute(db_pool).await;
-                                                send_zero_fill(fill_tx);
+                                                let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?").bind(&ts).bind(&order_id).execute(db_pool).await;
+                                                let _ = fill_tx.try_send(FillInfo {
+                                                    order_id: order_id.clone(),
+                                                    symbol: req.symbol.clone(),
+                                                    filled_qty: 0,
+                                                    filled_price: Decimal::ZERO,
+                                                    exchange_code: req.exchange_code.clone(),
+                                                    atr: req.atr,
+                                                });
                                             }
                                         }
                                     }
@@ -460,9 +481,10 @@ async fn process_single_order(
         }
         Err(e) => {
             let market_label = adapter.market_id().label();
+            let ts = chrono::Utc::now().to_rfc3339();
             if let Err(db_err) =
                 sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
-                    .bind(&now)
+                    .bind(&ts)
                     .bind(&order_id)
                     .execute(db_pool)
                     .await
@@ -475,7 +497,7 @@ async fn process_single_order(
             .bind(market_label)
             .bind(&req.symbol)
             .bind(format!("place_order error: {e}"))
-            .bind(&now)
+            .bind(&ts)
             .execute(db_pool)
             .await
             .unwrap_or_else(|e| {
@@ -507,6 +529,16 @@ async fn reconcile_submitted_orders(
         let order_id: String = row.get("id");
         let broker_id: String = row.get("broker_order_id");
         let symbol: String = row.get("symbol");
+        // broker_id 공백 = DB 저장 실패한 주문 → 추적 불가, Failed 처리
+        if broker_id.is_empty() {
+            tracing::warn!(order_id = %order_id, symbol = %symbol, "reconcile: broker_id 공백 — Failed 처리 후 스킵");
+            let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
+                .bind(chrono::Utc::now().to_rfc3339())
+                .bind(&order_id)
+                .execute(db_pool)
+                .await;
+            continue;
+        }
         let qty: i64 = row.get::<String, _>("qty").parse().unwrap_or(0);
         let atr: Option<Decimal> = row.try_get::<Option<String>, _>("atr").ok().flatten().and_then(|s| {
             s.parse().map_err(|_| tracing::warn!(order_id = %order_id, "ATR parse failed, defaulting to None")).ok()
