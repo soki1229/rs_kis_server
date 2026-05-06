@@ -411,6 +411,6 @@ async fn cancel_unfilled_on_shutdown(adapter: &dyn MarketAdapter, alert: &AlertR
                 }
             }
         }
-        Err(e) => tracing::error!("Failed to fetch unfilled orders on shutdown: {}", e),
+        Err(e) => tracing::warn!("Failed to fetch unfilled orders on shutdown: {}", e),
     }
 }

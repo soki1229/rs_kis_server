@@ -253,8 +253,10 @@ impl MarketAdapter for KrVtsAdapter {
     }
 
     async fn unfilled_orders(&self) -> Result<Vec<UnifiedUnfilledOrder>, BotError> {
-        // VTS: inquire_psbl_rvsecncl 미지원 → 빈 목록 반환
-        Ok(vec![])
+        // VTS: inquire_psbl_rvsecncl 미지원 → 호출 불가 신호 (Err 반환으로 orphaned 체크 스킵)
+        Err(BotError::ApiError {
+            msg: "inquire_psbl_rvsecncl: VTS 미지원".to_string(),
+        })
     }
 
     async fn order_history(
