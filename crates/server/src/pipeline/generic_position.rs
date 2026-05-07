@@ -225,7 +225,7 @@ pub async fn run_generic_position_task(
             }
         }
         {
-        for api_pos in balance.positions {
+            for api_pos in balance.positions {
                 // DB에 이미 있는 포지션은 스킵 (balance sync가 qty 동기화)
                 if pos_states.contains_key(&api_pos.symbol) {
                     continue;

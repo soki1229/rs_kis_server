@@ -168,7 +168,11 @@ async fn process_single_order(
     // 0. Pre-flight: 주문 가능 수량 확인 (API 기반, soft check — API 실패 시 원래 수량으로 진행)
     let preflight_price = req.price.unwrap_or(Decimal::ZERO);
     let checked_qty = match req.side {
-        Side::Buy => adapter.check_buy_orderable(&req.symbol, preflight_price, req.qty).await,
+        Side::Buy => {
+            adapter
+                .check_buy_orderable(&req.symbol, preflight_price, req.qty)
+                .await
+        }
         Side::Sell => adapter.check_sell_orderable(&req.symbol, req.qty).await,
     };
     if checked_qty == 0 {
@@ -185,7 +189,10 @@ async fn process_single_order(
             orderable = checked_qty,
             "주문수량 조정 (가용 한도 내)"
         );
-        OrderRequest { qty: checked_qty, ..req }
+        OrderRequest {
+            qty: checked_qty,
+            ..req
+        }
     } else {
         req
     };

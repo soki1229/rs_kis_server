@@ -68,7 +68,11 @@ impl KrMarketBase {
             }
             Ok(None) => PollOutcome::StillOpen,
             Err(e) => {
-                tracing::warn!("KrMarketBase: order_status error for {}: {}", broker_order_no, e);
+                tracing::warn!(
+                    "KrMarketBase: order_status error for {}: {}",
+                    broker_order_no,
+                    e
+                );
                 PollOutcome::Failed {
                     reason: format!("order_status error: {}", e),
                 }
@@ -481,10 +485,10 @@ async fn kr_cancel_order(
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             orgn_odno: order.order_no.clone(),
-            ord_dvsn: "00".to_string(),       // 지정가 (취소 시 원주문과 동일해야 함)
+            ord_dvsn: "00".to_string(), // 지정가 (취소 시 원주문과 동일해야 함)
             rvse_cncl_dvsn_cd: "02".to_string(), // 취소
-            qty_all_ord_yn: "Y".to_string(),  // 잔량 전부 취소
-            ord_qty: "0".to_string(),         // qty_all_ord_yn=Y 시 0
+            qty_all_ord_yn: "Y".to_string(), // 잔량 전부 취소
+            ord_qty: "0".to_string(),   // qty_all_ord_yn=Y 시 0
             ord_unpr: "0".to_string(),
             ..Default::default()
         })
@@ -621,7 +625,12 @@ async fn kr_order_history(
         .collect())
 }
 
-async fn kr_check_buy_orderable(base: &KrMarketBase, symbol: &str, price: Decimal, qty: u64) -> u64 {
+async fn kr_check_buy_orderable(
+    base: &KrMarketBase,
+    symbol: &str,
+    price: Decimal,
+    qty: u64,
+) -> u64 {
     base.throttler.wait().await;
     let (ord_dvsn, ord_unpr) = if price.is_zero() {
         ("01".to_string(), "0".to_string())

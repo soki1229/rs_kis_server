@@ -424,7 +424,12 @@ impl MarketAdapter for UsVtsAdapter {
 // Shared Internal Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn us_check_buy_orderable(base: &UsMarketBase, symbol: &str, price: Decimal, qty: u64) -> u64 {
+async fn us_check_buy_orderable(
+    base: &UsMarketBase,
+    symbol: &str,
+    price: Decimal,
+    qty: u64,
+) -> u64 {
     let exchange = UsMarketBase::exchange_from_hint(None, symbol);
     base.throttler.wait().await;
     match base
@@ -729,10 +734,7 @@ async fn us_balance(base: &UsMarketBase) -> Result<UnifiedBalance, BotError> {
         tracing::debug!(available_cash = %cash, "US balance fetched");
     }
 
-    let total_evaluation: Decimal = positions
-        .iter()
-        .map(|p| p.current_price * Decimal::from(p.qty))
-        .sum();
+    let total_evaluation: Decimal = positions.iter().map(|p| p.current_price * p.qty).sum();
 
     Ok(UnifiedBalance {
         total_equity: cash + total_evaluation,
