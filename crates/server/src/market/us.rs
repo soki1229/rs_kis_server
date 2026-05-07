@@ -469,7 +469,7 @@ async fn us_check_sell_orderable(base: &UsMarketBase, symbol: &str, qty: u64) ->
         .overseas_stock_v1_trading_inquire_balance(OverseasStockV1TradingInquireBalanceRequest {
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
-            ovrs_excg_cd: "%".to_string(),
+            ovrs_excg_cd: "NASD".to_string(), // balance()와 동일 — % 사용 시 빈 리스트 반환됨
             tr_crcy_cd: "USD".to_string(),
             ctx_area_fk200: String::new(),
             ctx_area_nk200: String::new(),
