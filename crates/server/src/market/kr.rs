@@ -46,37 +46,31 @@ impl KrMarketBase {
             .with_timezone(&Seoul)
             .format("%Y%m%d")
             .to_string();
-        match kr_order_history(self, &today, &today).await {
-            Ok(history) => {
-                if let Some(h) = history.iter().find(|h| h.order_no == broker_order_no) {
-                    let filled_qty = h.filled_qty as u64;
-                    if filled_qty >= submitted_qty {
-                        return PollOutcome::Filled {
-                            filled_qty,
-                            filled_price: h.filled_price,
-                        };
-                    } else if filled_qty > 0 {
-                        return PollOutcome::PartialFilled {
-                            filled_qty,
-                            filled_price: h.filled_price,
-                        };
-                    }
-                    // cncl_yn="Y" → 실제 취소; 아직 체결 전이면 StillOpen
-                    if h.status == "Y" {
-                        return PollOutcome::Cancelled;
-                    }
+        match kr_order_status(self, &today, broker_order_no).await {
+            Ok(Some(h)) => {
+                let filled_qty = h.filled_qty as u64;
+                if filled_qty >= submitted_qty {
+                    return PollOutcome::Filled {
+                        filled_qty,
+                        filled_price: h.filled_price,
+                    };
+                } else if filled_qty > 0 {
+                    return PollOutcome::PartialFilled {
+                        filled_qty,
+                        filled_price: h.filled_price,
+                    };
                 }
-                // 히스토리에 없거나 미체결 → 아직 처리 중
+                // cncl_yn="Y" → 실제 취소
+                if h.status == "Y" {
+                    return PollOutcome::Cancelled;
+                }
                 PollOutcome::StillOpen
             }
+            Ok(None) => PollOutcome::StillOpen,
             Err(e) => {
-                tracing::warn!(
-                    "KrMarketBase: order_history error for {}: {}",
-                    broker_order_no,
-                    e
-                );
+                tracing::warn!("KrMarketBase: order_status error for {}: {}", broker_order_no, e);
                 PollOutcome::Failed {
-                    reason: format!("order_history error: {}", e),
+                    reason: format!("order_status error: {}", e),
                 }
             }
         }
@@ -537,6 +531,50 @@ async fn kr_unfilled_orders(base: &KrMarketBase) -> Result<Vec<UnifiedUnfilledOr
         .collect())
 }
 
+/// 특정 주문번호의 상태를 단건 조회한다 (odno 필터 사용 → 페이지 누락 없음).
+async fn kr_order_status(
+    base: &KrMarketBase,
+    date: &str,
+    order_no: &str,
+) -> Result<Option<UnifiedOrderHistoryItem>, BotError> {
+    base.throttler.wait().await;
+    let resp = base
+        .client
+        .stock()
+        .trading()
+        .domestic_stock_v1_trading_inquire_daily_ccld_recent(
+            DomesticStockV1TradingInquireDailyCcldRequest {
+                cano: base.cano.clone(),
+                acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+                inqr_strt_dt: date.to_string(),
+                inqr_end_dt: date.to_string(),
+                sll_buy_dvsn_cd: "00".to_string(),
+                ccld_dvsn: "00".to_string(),
+                inqr_dvsn: "00".to_string(),
+                odno: order_no.to_string(), // 특정 주문만 조회
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| BotError::ApiError {
+            msg: format!("inquire_daily_ccld(odno): {}", e),
+        })?;
+
+    Ok(resp.output1.first().map(|h| UnifiedOrderHistoryItem {
+        order_no: h.odno.clone(),
+        symbol: h.pdno.clone(),
+        side: match h.sll_buy_dvsn_cd.as_str() {
+            "02" => UnifiedSide::Buy,
+            _ => UnifiedSide::Sell,
+        },
+        qty: h.ord_qty.to_string().parse().unwrap_or(0),
+        filled_qty: h.tot_ccld_qty.to_string().parse().unwrap_or(0),
+        filled_price: h.avg_prvs.parse().unwrap_or(Decimal::ZERO),
+        price: h.ord_unpr,
+        status: h.cncl_yn.clone(),
+    }))
+}
+
 async fn kr_order_history(
     base: &KrMarketBase,
     start_date: &str,
@@ -553,9 +591,9 @@ async fn kr_order_history(
                 acnt_prdt_cd: base.acnt_prdt_cd.clone(),
                 inqr_strt_dt: start_date.to_string(),
                 inqr_end_dt: end_date.to_string(),
-                sll_buy_dvsn_cd: "00".to_string(), // 전체 (매도+매수)
-                ccld_dvsn: "00".to_string(),        // 전체 (체결+미체결)
-                inqr_dvsn: "00".to_string(),        // 역순 (최신 먼저)
+                sll_buy_dvsn_cd: "00".to_string(),
+                ccld_dvsn: "00".to_string(),
+                inqr_dvsn: "00".to_string(),
                 ..Default::default()
             },
         )
