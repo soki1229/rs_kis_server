@@ -208,24 +208,28 @@ pub async fn run_generic_position_task(
         }
     }
 
-    // DB가 비어 있으면 balance() API로 실제 포지션 동기화 (재시작 후 복구)
-    if pos_states.is_empty() {
-        if let Ok(balance) = adapter.balance().await.map_err(|e| {
-            tracing::error!(market = %market_name, "초기 balance API 실패 — 포지션 복구 불가: {e}");
-            e
-        }) {
-            available_cash = Some(balance.available_cash);
-            // balance API에서 종목명 보강 (US 등 daily_ohlc에 없는 경우)
-            for api_pos in &balance.positions {
-                if let Some(name) = &api_pos.name {
-                    if !name.is_empty() {
-                        symbol_names
-                            .entry(api_pos.symbol.clone())
-                            .or_insert_with(|| name.clone());
-                    }
+    // balance() API로 실제 포지션 동기화: DB에 없는 orphaned 포지션도 복구
+    if let Ok(balance) = adapter.balance().await.map_err(|e| {
+        tracing::error!(market = %market_name, "초기 balance API 실패 — 포지션 복구 불가: {e}");
+        e
+    }) {
+        available_cash = Some(balance.available_cash);
+        // balance API에서 종목명 보강 (US 등 daily_ohlc에 없는 경우)
+        for api_pos in &balance.positions {
+            if let Some(name) = &api_pos.name {
+                if !name.is_empty() {
+                    symbol_names
+                        .entry(api_pos.symbol.clone())
+                        .or_insert_with(|| name.clone());
                 }
             }
-            for api_pos in balance.positions {
+        }
+        {
+        for api_pos in balance.positions {
+                // DB에 이미 있는 포지션은 스킵 (balance sync가 qty 동기화)
+                if pos_states.contains_key(&api_pos.symbol) {
+                    continue;
+                }
                 use rust_decimal_macros::dec;
                 let qty = match api_pos.qty.to_u64() {
                     Some(q) if q > 0 => q,
@@ -274,7 +278,7 @@ pub async fn run_generic_position_task(
                     symbol = %api_pos.symbol,
                     qty,
                     entry = %entry,
-                    "잔고 API로 포지션 복구 (DB 없음)"
+                    "잔고 API로 포지션 복구 (orphaned)"
                 );
 
                 let now = chrono::Utc::now().to_rfc3339();
