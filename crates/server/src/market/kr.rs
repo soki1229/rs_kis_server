@@ -487,9 +487,11 @@ async fn kr_cancel_order(
             cano: base.cano.clone(),
             acnt_prdt_cd: base.acnt_prdt_cd.clone(),
             orgn_odno: order.order_no.clone(),
+            ord_dvsn: "00".to_string(),       // 지정가 (취소 시 원주문과 동일해야 함)
             rvse_cncl_dvsn_cd: "02".to_string(), // 취소
-            ord_qty: order.remaining_qty.to_string(),
-            ord_unpr: Decimal::ZERO.to_string(),
+            qty_all_ord_yn: "Y".to_string(),  // 잔량 전부 취소
+            ord_qty: "0".to_string(),         // qty_all_ord_yn=Y 시 0
+            ord_unpr: "0".to_string(),
             ..Default::default()
         })
         .await
@@ -551,6 +553,9 @@ async fn kr_order_history(
                 acnt_prdt_cd: base.acnt_prdt_cd.clone(),
                 inqr_strt_dt: start_date.to_string(),
                 inqr_end_dt: end_date.to_string(),
+                sll_buy_dvsn_cd: "00".to_string(), // 전체 (매도+매수)
+                ccld_dvsn: "00".to_string(),        // 전체 (체결+미체결)
+                inqr_dvsn: "00".to_string(),        // 역순 (최신 먼저)
                 ..Default::default()
             },
         )
