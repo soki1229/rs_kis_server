@@ -530,10 +530,25 @@ pub async fn run_generic_position_task(
 
                 if force_remove {
                     let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
+                    // T+1 등 실제 보유 중인 포지션은 강제 제거하지 않음: balance API 최종 확인
+                    let still_held = match adapter.balance().await {
+                        Ok(bal) => bal.positions.iter().any(|p| {
+                            p.symbol == tick.symbol && p.qty.to_u64().unwrap_or(0) > 0
+                        }),
+                        Err(_) => false,
+                    };
+                    if still_held {
+                        tracing::warn!(symbol = %tick.symbol, "exit_timeout: balance에 실제 보유 — 강제 제거 스킵 (T+1 추정)");
+                        if let Some((state, _)) = pos_states.get_mut(&tick.symbol) {
+                            state.exit_pending = false;
+                            state.exit_pending_since = None;
+                        }
+                    } else {
                     tracing::error!(symbol = %tick.symbol, "exit 5회 타임아웃 — 매도 불가 포지션 강제 제거");
                     summary_alert.info(format!("⚠️ [{market_name}] {sym_label} exit 5회 실패 → 포지션 강제 제거 (VTS 잔고 불일치 추정)"));
                     pos_states.remove(&tick.symbol);
                     sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
+                    }
                 } else if let Some((state, qty)) = pos_states.get_mut(&tick.symbol) {
                     last_prices.insert(tick.symbol.clone(), tick.price);
                     let decision = evaluate_exit(state, tick.price);
