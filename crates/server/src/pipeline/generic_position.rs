@@ -236,19 +236,6 @@ pub async fn run_generic_position_task(
                     _ => continue,
                 };
                 let entry = api_pos.avg_price;
-                // 극소 포지션은 복구하지 않음 — 최소 주문금액($5) 미달 시 청산 불가 무한루프 방지
-                let pos_value = entry * Decimal::from(qty);
-                if pos_value < Decimal::new(5, 0) {
-                    tracing::warn!(
-                        market = %market_name,
-                        symbol = %api_pos.symbol,
-                        qty,
-                        entry = %entry,
-                        pos_value = %pos_value,
-                        "잔고 API 극소 포지션 — 복구 스킵 (최소주문금 미달)"
-                    );
-                    continue;
-                }
                 // ATR을 진입가의 2%로 추정
                 let atr = if entry > Decimal::ZERO {
                     entry * dec!(0.02)
@@ -557,22 +544,13 @@ pub async fn run_generic_position_task(
                         }),
                         Err(_) => false,
                     };
-                    // 포지션 가치가 최소 주문금액($5) 이하면 매도 불가 → 강제 제거 (VTS 잔고 불일치 or 극소 포지션)
-                    let min_order_value = rust_decimal::Decimal::new(5, 0);
-                    let pos_value = pos_states.get(&tick.symbol)
-                        .map(|(s, qty)| s.entry_price * rust_decimal::Decimal::from(*qty))
-                        .unwrap_or(rust_decimal::Decimal::ZERO);
-                    let too_small = still_held && pos_value < min_order_value;
-                    if still_held && !too_small {
+                    if still_held {
                         tracing::warn!(symbol = %tick.symbol, "exit_timeout: balance에 실제 보유 — 강제 제거 스킵 (T+1 추정)");
                         if let Some((state, _)) = pos_states.get_mut(&tick.symbol) {
                             state.exit_pending = false;
                             state.exit_pending_since = None;
                         }
                     } else {
-                    if too_small {
-                        tracing::warn!(symbol = %tick.symbol, %pos_value, "exit_timeout: 극소 포지션 (최소주문금 미달) — 강제 제거");
-                    }
                     tracing::error!(symbol = %tick.symbol, "exit 5회 타임아웃 — 매도 불가 포지션 강제 제거");
                     summary_alert.info(format!("⚠️ [{market_name}] {sym_label} exit 5회 실패 → 포지션 강제 제거 (VTS 잔고 불일치 추정)"));
                     pos_states.remove(&tick.symbol);

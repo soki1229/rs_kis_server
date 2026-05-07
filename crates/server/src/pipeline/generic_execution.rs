@@ -176,7 +176,13 @@ async fn process_single_order(
         Side::Sell => adapter.check_sell_orderable(&req.symbol, req.qty).await,
     };
     if checked_qty == 0 {
-        tracing::warn!(symbol = %req.symbol, side = %req.side, "주문가능수량 0 — 주문 스킵");
+        tracing::warn!(
+            symbol = %req.symbol,
+            side = %req.side,
+            requested = req.qty,
+            "주문가능수량 0 — 주문 스킵 (check_{}orderable API 반환값 0)",
+            if req.side == Side::Sell { "sell_" } else { "buy_" }
+        );
         // 매도: fill_tx 미전송 → exit_pending 유지 → 90초 타임아웃 후 재시도 (T+1 루프 방지)
         // 매수: 그냥 스킵
         return;
@@ -536,6 +542,12 @@ async fn process_single_order(
                 tracing::error!(order_id = %order_id, "Place order failed audit log DB insert failed: {e}");
                 Default::default()
             });
+            tracing::error!(
+                symbol = %req.symbol,
+                side = %req.side,
+                qty = req.qty,
+                "place_order 실패: {e}"
+            );
             alert.warn(format!("Order placement failed for {}: {}", req.symbol, e));
         }
     }
