@@ -592,6 +592,8 @@ pub async fn run_generic_position_task(
                             // exit_pending으로 중복 주문 방지 (취소 시 다음 틱에서 재발주됨)
                             if !state.partial_exit_done && !state.exit_pending {
                                 let exit_qty = *qty / 2;
+                                let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
+                                let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
                                 if exit_qty > 0 {
                                     if force_order_tx.send(OrderRequest {
                                         symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
@@ -601,13 +603,26 @@ pub async fn run_generic_position_task(
                                     } else {
                                         tracing::error!(symbol = %tick.symbol, qty = exit_qty, "PartialExit 주문 전송 실패 — 채널 닫힘");
                                     }
+                                    summary_alert.info(format!(
+                                        "🎯 1차익절 주문 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%)",
+                                        exit_qty, tick.price, pnl_pct
+                                    ));
+                                } else {
+                                    // qty=1 등 절반이 0이 되는 경우: 전량 청산으로 대체
+                                    if force_order_tx.send(OrderRequest {
+                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                                    }).await.is_ok() {
+                                        state.exit_pending = true;
+                                        state.exit_pending_since = Some(std::time::Instant::now());
+                                    } else {
+                                        tracing::error!(symbol = %tick.symbol, qty = *qty, "PartialExit→FullExit 주문 전송 실패 — 채널 닫힘");
+                                    }
+                                    state.partial_exit_done = true;
+                                    summary_alert.info(format!(
+                                        "🎯 목표가 달성 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%) — 전량청산 (qty=1)",
+                                        *qty, tick.price, pnl_pct
+                                    ));
                                 }
-                                let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
-                                let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
-                                summary_alert.info(format!(
-                                    "🎯 1차익절 주문 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%)",
-                                    exit_qty, tick.price, pnl_pct
-                                ));
                             }
                         }
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
