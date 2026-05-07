@@ -398,8 +398,10 @@ pub async fn run_generic_position_task(
                 tracing::warn!(market = %market_name, "EOD fallback fired — forcing exit for all positions");
                 eod_fallback_fired = true;
                 for (symbol, (state, qty)) in &pos_states {
+                    // VTS 시장가(price=None) 미체결 방지: last_prices 기준 지정가로 전송
+                    let price = last_prices.get(symbol).copied();
                     if let Err(e) = force_order_tx.send(OrderRequest {
-                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                     }).await {
                         tracing::error!(symbol = %symbol, error = %e, "EOD fallback: Failed to send force order for full exit");
                     }
@@ -408,8 +410,9 @@ pub async fn run_generic_position_task(
             Some(_) = eod_rx.recv() => {
                 tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
                 for (symbol, (state, qty)) in &pos_states {
+                    let price = last_prices.get(symbol).copied();
                     if let Err(e) = force_order_tx.send(OrderRequest {
-                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
                     }).await {
                         tracing::error!(symbol = %symbol, error = %e, "EOD trigger: Failed to send force order for full exit");
                     }
