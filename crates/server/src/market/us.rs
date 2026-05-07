@@ -481,7 +481,15 @@ async fn us_check_sell_orderable(base: &UsMarketBase, symbol: &str, qty: u64) ->
                 .output1
                 .iter()
                 .find(|p| p.ovrs_pdno == symbol)
-                .map(|p| p.ord_psbl_qty.to_u64().unwrap_or(0))
+                .map(|p| {
+                    let psbl = p.ord_psbl_qty.to_u64().unwrap_or(0);
+                    // ord_psbl_qty=0이면 ovrs_cblc_qty로 fallback (T+2 미결제 or VTS quirk)
+                    if psbl > 0 {
+                        psbl
+                    } else {
+                        p.ovrs_cblc_qty.to_u64().unwrap_or(0)
+                    }
+                })
                 .unwrap_or(0);
             if held < qty {
                 tracing::warn!(symbol = %symbol, requested = qty, held, "US 매도가능수량 부족 — 수량 조정");

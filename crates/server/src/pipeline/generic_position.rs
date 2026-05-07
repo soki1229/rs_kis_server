@@ -558,7 +558,21 @@ pub async fn run_generic_position_task(
                     }
                 } else if let Some((state, qty)) = pos_states.get_mut(&tick.symbol) {
                     last_prices.insert(tick.symbol.clone(), tick.price);
-                    let decision = evaluate_exit(state, tick.price);
+                    // 프리마켓/포스트마켓 틱으로 인한 오발주 방지
+                    let now_utc = chrono::Utc::now();
+                    let today = adapter.local_today();
+                    let in_trading_hours = match (
+                        adapter.market_open_utc(today),
+                        adapter.market_close_utc(today),
+                    ) {
+                        (Some(open), Some(close)) => now_utc >= open && now_utc <= close,
+                        _ => true,
+                    };
+                    let decision = if in_trading_hours {
+                        evaluate_exit(state, tick.price)
+                    } else {
+                        ExitDecision::Hold
+                    };
                     match decision {
                         ExitDecision::Hold => {
                             if let Some(new_ts) = calculate_trailing_stop(tick.price, state.atr_at_entry, &state.regime, state.trailing_atr_trending, state.trailing_atr_volatile) {
