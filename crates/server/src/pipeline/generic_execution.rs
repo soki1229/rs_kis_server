@@ -173,18 +173,8 @@ async fn process_single_order(
     };
     if checked_qty == 0 {
         tracing::warn!(symbol = %req.symbol, side = %req.side, "주문가능수량 0 — 주문 스킵");
-        if req.side == Side::Sell {
-            let _ = fill_tx
-                .send(FillInfo {
-                    order_id: Uuid::new_v4().to_string(),
-                    symbol: req.symbol.clone(),
-                    filled_qty: 0,
-                    filled_price: Decimal::ZERO,
-                    exchange_code: req.exchange_code.clone(),
-                    atr: req.atr,
-                })
-                .await;
-        }
+        // 매도: fill_tx 미전송 → exit_pending 유지 → 90초 타임아웃 후 재시도 (T+1 루프 방지)
+        // 매수: 그냥 스킵
         return;
     }
     let req = if checked_qty < req.qty {
