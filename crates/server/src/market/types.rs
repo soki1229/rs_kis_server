@@ -265,6 +265,7 @@ impl From<UnifiedFill> for crate::types::FillInfo {
             // UnifiedFill lacks ATR metadata; current pipeline retrieves ATR from DB/OrderRequest.
             atr: None,
             exchange_code: fill.metadata.exchange_code,
+            fatal: false,
         }
     }
 }

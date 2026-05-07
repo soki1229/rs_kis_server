@@ -138,6 +138,8 @@ pub struct FillInfo {
     pub atr: Option<Decimal>,
     /// KIS exchange code: "J"=KOSPI, "Q"=KOSDAQ. None for US orders.
     pub exchange_code: Option<String>,
+    /// true → 재시도 불가 치명적 오류 (e.g., 브로커 잔고 없음). position task가 포지션 강제 제거.
+    pub fatal: bool,
 }
 
 // ── PnL ───────────────────────────────────────────────────────────────────

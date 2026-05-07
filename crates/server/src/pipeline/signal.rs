@@ -857,6 +857,7 @@ mod tests {
             filled_price: entry_price,
             atr: req.atr,
             exchange_code: None,
+            fatal: false,
         };
 
         let pos_cfg = crate::config::PositionConfig {

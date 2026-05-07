@@ -419,6 +419,14 @@ pub async fn run_generic_position_task(
                 }
             }
             Some(fill) = fill_rx.recv() => {
+                if fill.fatal {
+                    // 재시도 불가 치명적 오류 (e.g., 브로커 잔고 없음) → 포지션 강제 제거
+                    tracing::error!(symbol = %fill.symbol, "치명적 매도 실패 — 포지션 강제 제거 (브로커 잔고 없음 등)");
+                    summary_alert.info(format!("⚠️ [{market_name}] {} 매도 불가 (브로커 잔고 없음) → 포지션 제거", fill.symbol));
+                    pos_states.remove(&fill.symbol);
+                    sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
+                    continue;
+                }
                 if fill.filled_qty == 0 {
                     if let Some((state, _)) = pos_states.get_mut(&fill.symbol) {
                         state.exit_pending = false;

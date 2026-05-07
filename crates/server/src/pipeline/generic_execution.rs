@@ -321,6 +321,7 @@ async fn process_single_order(
                                             filled_price,
                                             exchange_code: req.exchange_code.clone(),
                                             atr: req.atr,
+                                            fatal: false,
                                         })
                                         .await
                                     {
@@ -348,6 +349,7 @@ async fn process_single_order(
                                             filled_price,
                                             exchange_code: req.exchange_code.clone(),
                                             atr: req.atr,
+                                            fatal: false,
                                         })
                                         .await
                                     {
@@ -379,6 +381,7 @@ async fn process_single_order(
                                         filled_price: Decimal::ZERO,
                                         exchange_code: req.exchange_code.clone(),
                                         atr: req.atr,
+                                        fatal: false,
                                     })
                                     .await;
                                 return;
@@ -433,6 +436,7 @@ async fn process_single_order(
                                                 filled_price: Decimal::ZERO,
                                                 exchange_code: req.exchange_code.clone(),
                                                 atr: req.atr,
+                                                fatal: false,
                                             });
                                         }
                                         Ok(false) => {
@@ -456,6 +460,7 @@ async fn process_single_order(
                                                         filled_price: fp,
                                                         exchange_code: req.exchange_code.clone(),
                                                         atr: req.atr,
+                                                        fatal: false,
                                                     })
                                                     .await;
                                             } else {
@@ -467,6 +472,7 @@ async fn process_single_order(
                                                     filled_price: Decimal::ZERO,
                                                     exchange_code: req.exchange_code.clone(),
                                                     atr: req.atr,
+                                                    fatal: false,
                                                 });
                                             }
                                         }
@@ -491,6 +497,7 @@ async fn process_single_order(
                                                         filled_price: fp,
                                                         exchange_code: req.exchange_code.clone(),
                                                         atr: req.atr,
+                                                        fatal: false,
                                                     })
                                                     .await;
                                             } else {
@@ -503,6 +510,7 @@ async fn process_single_order(
                                                     filled_price: Decimal::ZERO,
                                                     exchange_code: req.exchange_code.clone(),
                                                     atr: req.atr,
+                                                    fatal: false,
                                                 });
                                             }
                                         }
@@ -549,6 +557,26 @@ async fn process_single_order(
                 "place_order 실패: {e}"
             );
             alert.warn(format!("Order placement failed for {}: {}", req.symbol, e));
+            // 브로커 잔고 없음 등 재시도 불가 오류 → position task에 fatal 신호 전송
+            let err_str = e.to_string();
+            let is_fatal = err_str.contains("잔고내역이 없습니다")
+                || err_str.contains("40240000")
+                || err_str.contains("잔고가 부족")
+                || err_str.contains("주문가능수량이 없");
+            if is_fatal && req.side == Side::Sell {
+                tracing::error!(symbol = %req.symbol, "매도 불가 치명적 오류 — position task에 강제 제거 신호 전송");
+                let _ = fill_tx
+                    .send(FillInfo {
+                        order_id: order_id.clone(),
+                        symbol: req.symbol.clone(),
+                        filled_qty: 0,
+                        filled_price: Decimal::ZERO,
+                        exchange_code: req.exchange_code.clone(),
+                        atr: req.atr,
+                        fatal: true,
+                    })
+                    .await;
+            }
         }
     }
 }
@@ -621,6 +649,7 @@ async fn reconcile_submitted_orders(
                                 filled_price,
                                 atr,
                                 exchange_code: ex_code,
+                                fatal: false,
                             })
                             .await
                         {
