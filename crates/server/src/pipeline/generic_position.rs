@@ -430,6 +430,30 @@ pub async fn run_generic_position_task(
                             .collect();
                         for sym in stale_symbols {
                             tracing::warn!(symbol = %sym, "balance sync: API에 없음 → 포지션 삭제");
+                            // 포지션 제거 전 실현 손익 기록 (last_price 기준 추정)
+                            if let Some((state, qty)) = pos_states.get(&sym) {
+                                let exit_price = last_prices.get(&sym).copied().unwrap_or(state.entry_price);
+                                let pnl = (exit_price - state.entry_price) * Decimal::from(*qty);
+                                let pnl_pct = if state.entry_price > Decimal::ZERO {
+                                    ((exit_price - state.entry_price) / state.entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
+                                } else { 0.0 };
+                                let pnl_f = pnl.to_f64().unwrap_or(0.0);
+                                let now_rfc = chrono::Utc::now().to_rfc3339();
+                                sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                                    .bind(uuid::Uuid::new_v4().to_string())
+                                    .bind(&sym)
+                                    .bind(&market_name)
+                                    .bind(qty.to_string())
+                                    .bind(state.entry_price.to_string())
+                                    .bind(exit_price.to_string())
+                                    .bind(pnl.to_string())
+                                    .bind(pnl_pct)
+                                    .bind(&now_rfc)
+                                    .execute(&db_pool).await.ok();
+                                realized_today += pnl_f;
+                                realized_month += pnl_f;
+                                realized_total += pnl_f;
+                            }
                             pos_states.remove(&sym);
                             sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&sym).execute(&db_pool).await.ok();
                         }
