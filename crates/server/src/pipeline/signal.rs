@@ -392,6 +392,16 @@ pub async fn run_signal_task(
                 let candle = state.candles.entry(tick.symbol.clone()).or_insert_with(CandleAccumulator::new);
                 candle.push(tick.clone());
                 if state.candle_start.entry(tick.symbol.clone()).or_insert_with(Instant::now).elapsed() >= candle_interval && candle.is_signal_eligible() {
+                    // 장 마감 후 신호 평가 차단
+                    let today = adapter.local_today();
+                    if let Some(close_utc) = adapter.market_close_utc(today) {
+                        if chrono::Utc::now() >= close_utc {
+                            tracing::debug!("[{market_id}] 장 마감 후 캔들 → 신호 평가 skip ({})", tick.symbol);
+                            candle.reset();
+                            state.candle_start.insert(tick.symbol.clone(), Instant::now());
+                            continue;
+                        }
+                    }
                     tracing::info!("[{market_id}] 🕯️ {} O={} H={} L={} C={} V={}", tick.symbol, candle.open, candle.high, candle.low, candle.close, candle.volume);
                     let completed_candle = CompletedCandle { open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume, ts: tick.timestamp };
                     let cq = state.completed.entry(tick.symbol.clone()).or_default();
