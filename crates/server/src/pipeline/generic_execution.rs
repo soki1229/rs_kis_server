@@ -492,9 +492,16 @@ async fn process_single_order(
                                             let delays = [15u64, 25, 35];
                                             let mut maybe_fill = None;
                                             for delay in delays {
-                                                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                                                tokio::time::sleep(std::time::Duration::from_secs(
+                                                    delay,
+                                                ))
+                                                .await;
                                                 let recheck = adapter
-                                                    .poll_order_status(&res.broker_id, &req.symbol, req.qty)
+                                                    .poll_order_status(
+                                                        &res.broker_id,
+                                                        &req.symbol,
+                                                        req.qty,
+                                                    )
                                                     .await;
                                                 tracing::info!(symbol = %req.symbol, delay, "40330000 재확인: {:?}", recheck);
                                                 if let Some(fill) = handle_recheck(recheck) {
@@ -519,24 +526,39 @@ async fn process_single_order(
                                                     .await;
                                             } else {
                                                 // balance API fallback: inquire_daily_ccld보다 즉각 반영
-                                                let balance_check = adapter.balance().await.ok().and_then(|b| {
-                                                    b.positions.into_iter().find(|p| p.symbol == req.symbol)
-                                                });
+                                                let balance_check =
+                                                    adapter.balance().await.ok().and_then(|b| {
+                                                        b.positions
+                                                            .into_iter()
+                                                            .find(|p| p.symbol == req.symbol)
+                                                    });
                                                 if let Some(pos) = balance_check {
-                                                    let fq = pos.qty.to_u64().unwrap_or(req.qty).min(req.qty);
-                                                    let fp = if pos.avg_price > Decimal::ZERO { pos.avg_price } else { pos.current_price };
+                                                    let fq = pos
+                                                        .qty
+                                                        .to_u64()
+                                                        .unwrap_or(req.qty)
+                                                        .min(req.qty);
+                                                    let fp = if pos.avg_price > Decimal::ZERO {
+                                                        pos.avg_price
+                                                    } else {
+                                                        pos.current_price
+                                                    };
                                                     tracing::info!(symbol = %req.symbol, qty = fq, price = %fp, "balance fallback 체결 확인 — 정상 처리");
                                                     let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
                                                         .bind(fq as i64).bind(fp.to_string()).bind(&ts).bind(&order_id).execute(db_pool).await;
-                                                    let _ = fill_tx.send(FillInfo {
-                                                        order_id: order_id.clone(),
-                                                        symbol: req.symbol.clone(),
-                                                        filled_qty: fq,
-                                                        filled_price: fp,
-                                                        exchange_code: req.exchange_code.clone(),
-                                                        atr: req.atr,
-                                                        fatal: false,
-                                                    }).await;
+                                                    let _ = fill_tx
+                                                        .send(FillInfo {
+                                                            order_id: order_id.clone(),
+                                                            symbol: req.symbol.clone(),
+                                                            filled_qty: fq,
+                                                            filled_price: fp,
+                                                            exchange_code: req
+                                                                .exchange_code
+                                                                .clone(),
+                                                            atr: req.atr,
+                                                            fatal: false,
+                                                        })
+                                                        .await;
                                                 } else {
                                                     tracing::error!(symbol = %req.symbol, "취소 오류 + 체결 미확인 — Failed 처리 (balance sync에서 orphaned 복구 대기)");
                                                     let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?").bind(&ts).bind(&order_id).execute(db_pool).await;

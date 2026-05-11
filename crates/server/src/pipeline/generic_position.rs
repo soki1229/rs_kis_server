@@ -145,7 +145,7 @@ pub async fn run_generic_position_task(
     let mut fatal_removed: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 실현 손익 누적 (DB에서 로드, fill 시 증분 갱신)
     let (mut realized_today, mut realized_month, mut realized_total) =
-        query_pnl_summary(&db_pool, &market_name).await;
+        query_pnl_summary(&db_pool, market_name).await;
     let mut initial_equity = query_initial_equity(&db_pool).await;
 
     // daily_ohlc 테이블에서 종목명 로드
@@ -237,7 +237,12 @@ pub async fn run_generic_position_task(
             // (재시작 시 이전 세션에서 청산된 포지션이 DB에 남아있으면 exit_pending 루프 발생)
             let api_qty_map: HashMap<String, u64> = api_positions
                 .iter()
-                .filter_map(|p| p.qty.to_u64().filter(|&q| q > 0).map(|q| (p.symbol.clone(), q)))
+                .filter_map(|p| {
+                    p.qty
+                        .to_u64()
+                        .filter(|&q| q > 0)
+                        .map(|q| (p.symbol.clone(), q))
+                })
                 .collect();
 
             let stale_symbols: Vec<String> = pos_states
@@ -418,7 +423,7 @@ pub async fn run_generic_position_task(
                         }
                     }
                 }
-                (realized_today, realized_month, realized_total) = query_pnl_summary(&db_pool, &market_name).await;
+                (realized_today, realized_month, realized_total) = query_pnl_summary(&db_pool, market_name).await;
                 initial_equity = query_initial_equity(&db_pool).await;
                 publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx, &symbol_names, available_cash, realized_today, realized_month, realized_total, initial_equity);
             }
@@ -455,12 +460,11 @@ pub async fn run_generic_position_task(
                                 let pnl_pct = if state.entry_price > Decimal::ZERO {
                                     ((exit_price - state.entry_price) / state.entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
                                 } else { 0.0 };
-                                let pnl_f = pnl.to_f64().unwrap_or(0.0);
                                 let now_rfc = chrono::Utc::now().to_rfc3339();
                                 sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
                                     .bind(uuid::Uuid::new_v4().to_string())
                                     .bind(&sym)
-                                    .bind(&market_name)
+                                    .bind(market_name)
                                     .bind(qty.to_string())
                                     .bind(state.entry_price.to_string())
                                     .bind(exit_price.to_string())
@@ -484,7 +488,7 @@ pub async fn run_generic_position_task(
                         }
                         // 5분마다 PnL 집계 DB에서 재동기화
                         (realized_today, realized_month, realized_total) =
-                            query_pnl_summary(&db_pool, &market_name).await;
+                            query_pnl_summary(&db_pool, market_name).await;
                         initial_equity = query_initial_equity(&db_pool).await;
                         publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx, &symbol_names, available_cash, realized_today, realized_month, realized_total, initial_equity);
                     }
@@ -617,7 +621,7 @@ pub async fn run_generic_position_task(
                         sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
                             .bind(uuid::Uuid::new_v4().to_string())
                             .bind(&fill.symbol)
-                            .bind(&market_name)
+                            .bind(market_name)
                             .bind(fill.filled_qty.to_string())
                             .bind(entry_price.to_string())
                             .bind(fill.filled_price.to_string())
@@ -652,7 +656,7 @@ pub async fn run_generic_position_task(
                             sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
                                 .bind(uuid::Uuid::new_v4().to_string())
                                 .bind(&fill.symbol)
-                                .bind(&market_name)
+                                .bind(market_name)
                                 .bind(fill.filled_qty.to_string())
                                 .bind(entry_price.to_string())
                                 .bind(fill.filled_price.to_string())
@@ -824,7 +828,7 @@ pub async fn run_generic_position_task(
 async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
     let today: f64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log \
-         WHERE date(exited_at, '+9 hours') = date('now', '+9 hours') AND market = ?"
+         WHERE date(exited_at, '+9 hours') = date('now', '+9 hours') AND market = ?",
     )
     .bind(market)
     .fetch_one(db)
@@ -841,7 +845,7 @@ async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
     .unwrap_or(0.0);
 
     let total: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log WHERE market = ?"
+        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log WHERE market = ?",
     )
     .bind(market)
     .fetch_one(db)
@@ -853,7 +857,7 @@ async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
 
 async fn query_initial_equity(db: &SqlitePool) -> Option<f64> {
     sqlx::query_scalar::<_, String>(
-        "SELECT value FROM portfolio_config WHERE key = 'initial_equity'"
+        "SELECT value FROM portfolio_config WHERE key = 'initial_equity'",
     )
     .fetch_optional(db)
     .await
@@ -862,6 +866,7 @@ async fn query_initial_equity(db: &SqlitePool) -> Option<f64> {
     .and_then(|v| v.parse::<f64>().ok())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_live_state(
     live_state_tx: &watch::Sender<MarketLiveState>,
     pos_states: &HashMap<String, (PositionState, u64)>,

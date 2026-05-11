@@ -214,7 +214,11 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     };
     let market_hours = market_hours_str(market);
 
-    let total_icon = if total_unrealized >= 0.0 { "🔺" } else { "🔽" };
+    let total_icon = if total_unrealized >= 0.0 {
+        "🔺"
+    } else {
+        "🔽"
+    };
     let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
 
     let is_us = market == "US";
@@ -251,10 +255,20 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     let equity_base = live.initial_equity;
     let fmt_realized_line = |label: &str, amt: f64| -> String {
         let pct_str = if let Some(base) = equity_base {
-            if base > 0.0 { fmt_pct(amt / base * 100.0) } else { "—".to_string() }
-        } else { "—".to_string() };
+            if base > 0.0 {
+                fmt_pct(amt / base * 100.0)
+            } else {
+                "—".to_string()
+            }
+        } else {
+            "—".to_string()
+        };
         let icon = if amt >= 0.0 { "🔺" } else { "🔽" };
-        format!("{icon} {label}: <b>{}</b> <i>({})</i>", fmt_pnl(amt), pct_str)
+        format!(
+            "{icon} {label}: <b>{}</b> <i>({})</i>",
+            fmt_pnl(amt),
+            pct_str
+        )
     };
     let realized_section = format!(
         "📊 <b>실현 손익</b>\n\
@@ -281,9 +295,7 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     let unrealized_line = if live.positions.is_empty() {
         String::new()
     } else {
-        format!(
-            "\n💼 미실현: <b>{total_sign}{total_amt}{total_unit}</b>  {total_icon}"
-        )
+        format!("\n💼 미실현: <b>{total_sign}{total_amt}{total_unit}</b>  {total_icon}")
     };
 
     format!(
