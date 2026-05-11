@@ -594,8 +594,24 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         .ok();
     }
 
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Received Ctrl+C — initiating graceful shutdown");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Received SIGINT (Ctrl+C) — initiating graceful shutdown");
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM — initiating graceful shutdown");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Received Ctrl+C — initiating graceful shutdown");
+    }
 
     let bot_stop_at = chrono::Utc::now().to_rfc3339();
     for (pool, market) in [
@@ -603,7 +619,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         (&us_db_pool, us_market_label),
     ] {
         sqlx::query(
-            "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_stopped', ?, NULL, 'Ctrl+C graceful shutdown', ?)",
+            "INSERT INTO audit_log (event_type, market, symbol, detail, created_at) VALUES ('bot_stopped', ?, NULL, 'Graceful shutdown', ?)",
         )
         .bind(market)
         .bind(&bot_stop_at)
@@ -619,7 +635,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             event: "BotShutdown".to_string(),
             market: "ALL".to_string(),
             mode: mode.to_string(),
-            detail: "Graceful shutdown initiated (Ctrl+C)".to_string(),
+            detail: "Graceful shutdown initiated".to_string(),
         },
     );
 
