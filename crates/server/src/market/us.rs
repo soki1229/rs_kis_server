@@ -412,7 +412,8 @@ impl MarketAdapter for UsVtsAdapter {
     }
 
     async fn check_buy_orderable(&self, symbol: &str, price: Decimal, qty: u64) -> u64 {
-        us_check_buy_orderable(&self.base, symbol, price, qty).await
+        // VTS: ord_psbl_qty가 항상 0 반환 → ord_psbl_frcr_amt / price로 직접 계산
+        us_check_buy_orderable_vts(&self.base, symbol, price, qty).await
     }
 
     async fn check_sell_orderable(&self, _symbol: &str, qty: u64) -> u64 {
@@ -456,6 +457,58 @@ async fn us_check_buy_orderable(
         }
         Err(e) => {
             tracing::warn!(symbol = %symbol, "US check_buy_orderable: inquire_psamount 실패 — 원래 수량으로 진행: {e}");
+            qty
+        }
+    }
+}
+
+/// VTS 전용: ord_psbl_qty는 항상 0 반환 버그 → ord_psbl_frcr_amt / price로 수량 계산
+async fn us_check_buy_orderable_vts(
+    base: &UsMarketBase,
+    symbol: &str,
+    price: Decimal,
+    qty: u64,
+) -> u64 {
+    if price.is_zero() {
+        return qty;
+    }
+    let exchange = UsMarketBase::exchange_from_hint(None, symbol);
+    base.throttler.wait().await;
+    match base
+        .client
+        .overseas()
+        .trading()
+        .overseas_stock_v1_trading_inquire_psamount(OverseasStockV1TradingInquirePsamountRequest {
+            cano: base.cano.clone(),
+            acnt_prdt_cd: base.acnt_prdt_cd.clone(),
+            ovrs_excg_cd: exchange,
+            ovrs_ord_unpr: price.to_string(),
+            item_cd: symbol.to_string(),
+        })
+        .await
+    {
+        Ok(resp) => {
+            let cash = resp
+                .output
+                .map(|o| o.ord_psbl_frcr_amt)
+                .unwrap_or(Decimal::ZERO);
+            let orderable = (cash / price).to_u64().unwrap_or(0);
+            if orderable < qty {
+                tracing::warn!(
+                    symbol = %symbol,
+                    requested = qty,
+                    orderable,
+                    available_cash = %cash,
+                    "US(VTS) 매수가능수량 부족 — 수량 조정"
+                );
+            }
+            qty.min(orderable)
+        }
+        Err(e) => {
+            tracing::warn!(
+                symbol = %symbol,
+                "US(VTS) check_buy_orderable: inquire_psamount 실패 — 원래 수량으로 진행: {e}"
+            );
             qty
         }
     }
