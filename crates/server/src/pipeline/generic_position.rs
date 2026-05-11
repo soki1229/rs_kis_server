@@ -15,7 +15,7 @@ use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub struct PositionState {
@@ -120,6 +120,7 @@ pub async fn run_generic_position_task(
     eod_fallback: chrono::DateTime<chrono::Utc>,
     pos_cfg: PositionConfig,
     summary_alert: AlertRouter,
+    refresh_notify: std::sync::Arc<Notify>,
 ) {
     let market_id = adapter.market_id();
     let market_name = adapter.name();
@@ -404,6 +405,23 @@ pub async fn run_generic_position_task(
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
+
+            // /status 즉시 갱신 요청 (Telegram에서 notify)
+            _ = refresh_notify.notified() => {
+                if let Ok(balance) = adapter.balance().await {
+                    available_cash = Some(balance.available_cash);
+                    for api_pos in &balance.positions {
+                        if let Some(name) = &api_pos.name {
+                            if !name.is_empty() {
+                                symbol_names.entry(api_pos.symbol.clone()).or_insert_with(|| name.clone());
+                            }
+                        }
+                    }
+                }
+                (realized_today, realized_month, realized_total) = query_pnl_summary(&db_pool, &market_name).await;
+                initial_equity = query_initial_equity(&db_pool).await;
+                publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx, &symbol_names, available_cash, realized_today, realized_month, realized_total, initial_equity);
+            }
 
             // 5분마다 잔고 API 동기화: qty 불일치 수정, available_cash 갱신, 종목명 보강
             _ = balance_sync_interval.tick() => {

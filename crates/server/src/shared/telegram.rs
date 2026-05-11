@@ -543,6 +543,10 @@ async fn run_command_loop(
             let text = msg.text().unwrap_or("");
 
             if text.trim() == "/status" {
+                // position task에 즉시 balance 갱신 요청 후 최신 값 읽기
+                kr_st.refresh_notify.notify_one();
+                us_st.refresh_notify.notify_one();
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                 let kr = format_status(&kr_st, "KR");
                 let us = format_status(&us_st, "US");
                 let reply = format!("{}\n\n━━━━━━━━━━━━━━━━━━\n\n{}", kr, us);

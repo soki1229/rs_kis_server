@@ -1,7 +1,7 @@
 use crate::types::Position;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum BotState {
@@ -83,6 +83,8 @@ pub struct PipelineConfig {
     /// Share this with ControlTask/ExecutionTask/SignalTask before calling build().
     pub summary: Arc<RwLock<MarketSummary>>,
     pub activity: crate::shared::activity::ActivityLog,
+    /// /status 즉시 갱신 신호 — Telegram이 notify, PositionTask가 balance 재조회 후 publish
+    pub refresh_notify: Arc<Notify>,
 }
 
 impl PipelineConfig {
@@ -93,6 +95,7 @@ impl PipelineConfig {
             live_state_rx: rx,
             summary: Arc::new(RwLock::new(MarketSummary::new())),
             activity,
+            refresh_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -103,6 +106,7 @@ impl PipelineConfig {
             live_state_rx: self.live_state_rx,
             summary: self.summary,
             activity: self.activity,
+            refresh_notify: self.refresh_notify,
         };
         (self.live_state_tx, state)
     }
@@ -128,6 +132,8 @@ pub struct PipelineState {
     /// Low-frequency summary — ControlTask writes, REST/Telegram read.
     pub summary: Arc<RwLock<MarketSummary>>,
     pub activity: crate::shared::activity::ActivityLog,
+    /// /status 즉시 갱신 신호 — Telegram이 notify, PositionTask가 balance 재조회 후 publish
+    pub refresh_notify: Arc<Notify>,
 }
 
 impl PipelineState {
