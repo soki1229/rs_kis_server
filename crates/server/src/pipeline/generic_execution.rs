@@ -183,8 +183,18 @@ async fn process_single_order(
             "주문가능수량 0 — 주문 스킵 (check_{}orderable API 반환값 0)",
             if req.side == Side::Sell { "sell_" } else { "buy_" }
         );
-        // 매도: fill_tx 미전송 → exit_pending 유지 → 90초 타임아웃 후 재시도 (T+1 루프 방지)
-        // 매수: 그냥 스킵
+        if req.side == Side::Sell {
+            // exit_pending 즉시 리셋 — 타임아웃 카운트 누적 방지 (VTS T+1 등)
+            let _ = fill_tx.try_send(FillInfo {
+                order_id: String::new(),
+                symbol: req.symbol.clone(),
+                filled_qty: 0,
+                filled_price: Decimal::ZERO,
+                atr: None,
+                exchange_code: req.exchange_code.clone(),
+                fatal: false,
+            });
+        }
         return;
     }
     let req = if checked_qty < req.qty {
@@ -477,26 +487,21 @@ async fn process_single_order(
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::warn!(symbol = %req.symbol, "StillOpen 취소 API 오류({e}) — 체결 여부 재확인");
-                                            // VTS에서는 취소 오류가 "이미 체결됨" 의미일 수 있음 — 잠시 대기 후 재확인
-                                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                            let recheck = adapter
-                                                .poll_order_status(
-                                                    &res.broker_id,
-                                                    &req.symbol,
-                                                    req.qty,
-                                                )
-                                                .await;
-                                            let maybe_fill = if let Some((fq, fp)) = handle_recheck(recheck) {
-                                                Some((fq, fp))
-                                            } else {
-                                                // 한 번 더 대기 후 최종 재확인
-                                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                                let recheck2 = adapter
+                                            tracing::warn!(symbol = %req.symbol, "StillOpen 취소 API 오류({e}) — 체결 여부 재확인 (VTS 반영 대기)");
+                                            // VTS는 체결 내역 API 반영에 수십 초가 걸릴 수 있음 — 단계적으로 재확인
+                                            let delays = [15u64, 25, 35];
+                                            let mut maybe_fill = None;
+                                            for delay in delays {
+                                                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                                                let recheck = adapter
                                                     .poll_order_status(&res.broker_id, &req.symbol, req.qty)
                                                     .await;
-                                                handle_recheck(recheck2)
-                                            };
+                                                tracing::info!(symbol = %req.symbol, delay, "40330000 재확인: {:?}", recheck);
+                                                if let Some(fill) = handle_recheck(recheck) {
+                                                    maybe_fill = Some(fill);
+                                                    break;
+                                                }
+                                            }
                                             if let Some((fq, fp)) = maybe_fill {
                                                 tracing::info!(symbol = %req.symbol, qty = fq, "취소 오류 후 체결 확인 — 정상 처리");
                                                 let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")

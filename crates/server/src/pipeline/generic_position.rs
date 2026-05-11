@@ -479,6 +479,7 @@ pub async fn run_generic_position_task(
                     if let Some((state, _)) = pos_states.get_mut(&fill.symbol) {
                         state.exit_pending = false;
                         state.exit_pending_since = None;
+                        state.exit_timeout_count = 0;
                         tracing::info!(symbol = %fill.symbol, "Order failure/cancel received, resetting exit_pending");
                     }
                     continue;
