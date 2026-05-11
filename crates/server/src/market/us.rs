@@ -416,9 +416,10 @@ impl MarketAdapter for UsVtsAdapter {
         us_check_buy_orderable_vts(&self.base, symbol, price, qty).await
     }
 
-    async fn check_sell_orderable(&self, _symbol: &str, qty: u64) -> u64 {
-        // VTS: ord_psbl_qty API 응답이 불일치하므로 체크 스킵 — 주문 제출 후 오류 시 처리
-        qty
+    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
+        // VTS: T+1 규칙으로 당일 매수 종목은 ord_psbl_qty=0 → 0 반환 → 매도 스킵
+        // generic_execution에서 qty=0이면 exit_pending 리셋 처리
+        us_check_sell_orderable(&self.base, symbol, qty).await
     }
 }
 
