@@ -468,9 +468,6 @@ pub async fn run_generic_position_task(
                                     .bind(pnl_pct)
                                     .bind(&now_rfc)
                                     .execute(&db_pool).await.ok();
-                                realized_today += pnl_f;
-                                realized_month += pnl_f;
-                                realized_total += pnl_f;
                             }
                             pos_states.remove(&sym);
                             sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&sym).execute(&db_pool).await.ok();
