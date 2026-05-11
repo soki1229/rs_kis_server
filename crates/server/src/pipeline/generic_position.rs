@@ -140,6 +140,8 @@ pub async fn run_generic_position_task(
     let mut symbol_names: HashMap<String, String> = HashMap::new();
     let mut available_cash: Option<Decimal> = None;
     let mut eod_fallback_fired = false;
+    // 이번 세션에서 fatal 오류로 강제 제거된 심볼 — balance_sync 재복구 방지
+    let mut fatal_removed: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // daily_ohlc 테이블에서 종목명 로드
     if let Ok(rows) =
@@ -225,9 +227,54 @@ pub async fn run_generic_position_task(
             }
         }
         {
-            for api_pos in balance.positions {
-                // DB에 이미 있는 포지션은 스킵 (balance sync가 qty 동기화)
+            let api_positions = balance.positions;
+            // 초기 balance sync: DB에는 있지만 API에 없는 포지션 정리
+            // (재시작 시 이전 세션에서 청산된 포지션이 DB에 남아있으면 exit_pending 루프 발생)
+            let api_qty_map: HashMap<String, u64> = api_positions
+                .iter()
+                .filter_map(|p| p.qty.to_u64().filter(|&q| q > 0).map(|q| (p.symbol.clone(), q)))
+                .collect();
+
+            let stale_symbols: Vec<String> = pos_states
+                .iter()
+                .filter(|(s, _)| !api_qty_map.contains_key(*s))
+                .map(|(s, _)| s.clone())
+                .collect();
+
+            for sym in stale_symbols {
+                tracing::warn!(symbol = %sym, "초기 balance sync: API에 없음 → 포지션 삭제 (stale)");
+                pos_states.remove(&sym);
+                sqlx::query("DELETE FROM positions WHERE symbol = ?")
+                    .bind(&sym)
+                    .execute(&db_pool)
+                    .await
+                    .ok();
+            }
+
+            // 초기 qty 불일치 수정
+            for (sym, api_qty) in &api_qty_map {
+                if let Some((_, pos_qty)) = pos_states.get_mut(sym) {
+                    if *pos_qty != *api_qty {
+                        tracing::warn!(symbol = %sym, pos_qty = %pos_qty, api_qty = %api_qty, "초기 balance sync: qty 불일치 → API 기준으로 수정");
+                        *pos_qty = *api_qty;
+                        sqlx::query("UPDATE positions SET qty = ? WHERE symbol = ?")
+                            .bind(api_qty.to_string())
+                            .bind(sym)
+                            .execute(&db_pool)
+                            .await
+                            .ok();
+                    }
+                }
+            }
+
+            for api_pos in api_positions {
+                // DB에 이미 있는 포지션은 스킵 (위에서 qty 동기화 완료)
                 if pos_states.contains_key(&api_pos.symbol) {
+                    continue;
+                }
+                // 이번 세션에서 fatal 오류로 강제 제거된 심볼은 재복구 차단
+                if fatal_removed.contains(&api_pos.symbol) {
+                    tracing::warn!(symbol = %api_pos.symbol, "fatal_removed 심볼 — orphaned recovery 스킵");
                     continue;
                 }
                 use rust_decimal_macros::dec;
@@ -420,10 +467,11 @@ pub async fn run_generic_position_task(
             }
             Some(fill) = fill_rx.recv() => {
                 if fill.fatal {
-                    // 재시도 불가 치명적 오류 (e.g., 브로커 잔고 없음) → 포지션 강제 제거
+                    // 재시도 불가 치명적 오류 (e.g., 브로커 잔고 없음) → 포지션 강제 제거 + 재복구 차단
                     tracing::error!(symbol = %fill.symbol, "치명적 매도 실패 — 포지션 강제 제거 (브로커 잔고 없음 등)");
                     summary_alert.info(format!("⚠️ [{market_name}] {} 매도 불가 (브로커 잔고 없음) → 포지션 제거", fill.symbol));
                     pos_states.remove(&fill.symbol);
+                    fatal_removed.insert(fill.symbol.clone());
                     sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
                     continue;
                 }

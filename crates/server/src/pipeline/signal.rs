@@ -255,7 +255,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     let qty = sized_qty.to_u64().unwrap_or(0);
     if qty == 0 {
-        tracing::warn!(
+        tracing::info!(
             market = %market.label(),
             symbol = %symbol,
             balance = %account_balance,
