@@ -214,13 +214,24 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
     };
     let market_hours = market_hours_str(market);
 
-    let total_icon = if total_unrealized >= 0.0 {
-        "🔺"
-    } else {
-        "🔽"
-    };
+    let total_icon = if total_unrealized >= 0.0 { "🔺" } else { "🔽" };
     let total_sign = if total_unrealized >= 0.0 { "+" } else { "" };
-    let (total_amt, total_unit, cash_str) = if market == "US" {
+
+    let is_us = market == "US";
+
+    let fmt_pnl = |v: f64| -> String {
+        if is_us {
+            let sign = if v >= 0.0 { "+" } else { "" };
+            format!("{sign}{:.2}$", v)
+        } else {
+            let sign = if v >= 0.0 { "+" } else { "" };
+            format!("{sign}{}", fmt_num(v as i64))
+        }
+    };
+
+    let fmt_pct = |v: f64| -> String { format!("{:+.2}%", v) };
+
+    let (total_amt, total_unit, cash_str) = if is_us {
         let amt = format!("{total_sign}{:.2}", total_unrealized);
         let cash = match live.available_cash {
             Some(c) => format!("<code>{}</code>", fmt_usd(c)),
@@ -236,6 +247,25 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
         (amt, "원", cash)
     };
 
+    // 실현 손익 섹션
+    let equity_base = live.initial_equity;
+    let fmt_realized_line = |label: &str, amt: f64| -> String {
+        let pct_str = if let Some(base) = equity_base {
+            if base > 0.0 { fmt_pct(amt / base * 100.0) } else { "—".to_string() }
+        } else { "—".to_string() };
+        let icon = if amt >= 0.0 { "🔺" } else { "🔽" };
+        format!("{icon} {label}: <b>{}</b> <i>({})</i>", fmt_pnl(amt), pct_str)
+    };
+    let realized_section = format!(
+        "📊 <b>실현 손익</b>\n\
+         {}\n\
+         {}\n\
+         {}",
+        fmt_realized_line("오늘", live.realized_today),
+        fmt_realized_line("이달", live.realized_month),
+        fmt_realized_line("전체", live.realized_total),
+    );
+
     let pos_count = live.positions.len();
     let pos_section = if live.positions.is_empty() {
         "  <i>보유 포지션 없음</i>".to_string()
@@ -247,12 +277,23 @@ pub fn format_status(state: &PipelineState, market: &str) -> String {
             .join("\n\n")
     };
 
+    // 미실현 손익 합계 라인
+    let unrealized_line = if live.positions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n💼 미실현: <b>{total_sign}{total_amt}{total_unit}</b>  {total_icon}"
+        )
+    };
+
     format!(
         "{market_flag} <b>{market}</b>  {bot_icon} {bot_label}\n\
          {market_hours}\n\
-         {regime_icon} {regime_label}  │  {total_icon} <b>{total_amt}{total_unit}</b>\n\
-         💵 가용 예수금: {cash_str}\n\
+         {regime_icon} {regime_label}\n\
+         💵 예수금: {cash_str}{unrealized_line}\n\
          🕐 <i>갱신 {updated_str}</i>\n\
+         ━━━━━━━━━━━━━━━━━━\n\
+         {realized_section}\n\
          ━━━━━━━━━━━━━━━━━━\n\
          📦 <b>{pos_count}종목 보유</b>\n\n\
          {pos_section}"
@@ -906,6 +947,10 @@ mod tests {
                 regime: "Trending".into(),
                 last_updated: Some(chrono::Utc::now()),
                 available_cash: None,
+                realized_today: 0.0,
+                realized_month: 0.0,
+                realized_total: 0.0,
+                initial_equity: None,
             })
             .unwrap();
         ps

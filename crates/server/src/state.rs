@@ -23,6 +23,14 @@ pub struct MarketLiveState {
     pub last_updated: Option<chrono::DateTime<chrono::Utc>>,
     /// 사용 가능 잔고 (KR: 원화, US: USD). None = 미조회
     pub available_cash: Option<rust_decimal::Decimal>,
+    /// 오늘(KST) 실현 손익 합계
+    pub realized_today: f64,
+    /// 이번달(KST) 실현 손익 합계
+    pub realized_month: f64,
+    /// 전체 실현 손익 합계
+    pub realized_total: f64,
+    /// 기준 예수금 (portfolio_config.initial_equity). None = 미설정
+    pub initial_equity: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

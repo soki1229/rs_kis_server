@@ -142,6 +142,10 @@ pub async fn run_generic_position_task(
     let mut eod_fallback_fired = false;
     // 이번 세션에서 fatal 오류로 강제 제거된 심볼 — balance_sync 재복구 방지
     let mut fatal_removed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 실현 손익 누적 (DB에서 로드, fill 시 증분 갱신)
+    let (mut realized_today, mut realized_month, mut realized_total) =
+        query_pnl_summary(&db_pool, &market_name).await;
+    let mut initial_equity = query_initial_equity(&db_pool).await;
 
     // daily_ohlc 테이블에서 종목명 로드
     if let Ok(rows) =
@@ -391,6 +395,10 @@ pub async fn run_generic_position_task(
         &regime_rx,
         &symbol_names,
         available_cash,
+        realized_today,
+        realized_month,
+        realized_total,
+        initial_equity,
     );
 
     loop {
@@ -435,7 +443,11 @@ pub async fn run_generic_position_task(
                                 }
                             }
                         }
-                        publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx, &symbol_names, available_cash);
+                        // 5분마다 PnL 집계 DB에서 재동기화
+                        (realized_today, realized_month, realized_total) =
+                            query_pnl_summary(&db_pool, &market_name).await;
+                        initial_equity = query_initial_equity(&db_pool).await;
+                        publish_live_state(&live_state_tx, &pos_states, &last_prices, &regime_rx, &symbol_names, available_cash, realized_today, realized_month, realized_total, initial_equity);
                     }
                     Err(e) => tracing::warn!(market = %market_name, error = %e, "balance sync 실패"),
                 }
@@ -552,13 +564,39 @@ pub async fn run_generic_position_task(
                     let pos_qty = pos_states.get(&fill.symbol).map(|(_, q)| *q).unwrap_or(0);
                     if fill.filled_qty >= pos_qty {
                         // 전체 청산
+                        let entry_price = pos_states.get(&fill.symbol).map(|(s, _)| s.entry_price).unwrap_or(fill.filled_price);
                         let sym_label = symbol_names.get(&fill.symbol).map(|n| format!("{n} ({})", fill.symbol)).unwrap_or_else(|| fill.symbol.clone());
+                        let pnl = (fill.filled_price - entry_price) * Decimal::from(fill.filled_qty);
+                        let pnl_pct = if entry_price > Decimal::ZERO {
+                            ((fill.filled_price - entry_price) / entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
+                        } else { 0.0 };
+                        let pnl_f = pnl.to_f64().unwrap_or(0.0);
                         pos_states.remove(&fill.symbol);
                         sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
-                        summary_alert.info(format!("📤 청산 [{market_name}] {sym_label} 포지션 종료"));
+                        // 실현 손익 기록
+                        let now_rfc = chrono::Utc::now().to_rfc3339();
+                        sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                            .bind(uuid::Uuid::new_v4().to_string())
+                            .bind(&fill.symbol)
+                            .bind(&market_name)
+                            .bind(fill.filled_qty.to_string())
+                            .bind(entry_price.to_string())
+                            .bind(fill.filled_price.to_string())
+                            .bind(pnl.to_string())
+                            .bind(pnl_pct)
+                            .bind(&now_rfc)
+                            .execute(&db_pool).await.ok();
+                        realized_today += pnl_f;
+                        realized_month += pnl_f;
+                        realized_total += pnl_f;
+                        summary_alert.info(format!(
+                            "📤 청산 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%) / 손익 {:+.0}",
+                            fill.filled_qty, fill.filled_price, pnl_pct, pnl_f
+                        ));
                     } else {
                         // 부분 체결 (1차 익절)
                         if let Some((state, qty)) = pos_states.get_mut(&fill.symbol) {
+                            let entry_price = state.entry_price;
                             let remaining = qty.saturating_sub(fill.filled_qty);
                             *qty = remaining;
                             state.partial_exit_done = true; // fill 체결 시점에 설정
@@ -566,8 +604,27 @@ pub async fn run_generic_position_task(
                             let now = chrono::Utc::now().to_rfc3339();
                             sqlx::query("UPDATE positions SET qty = ?, partial_exit_done = 1, updated_at = ? WHERE symbol = ?")
                                 .bind(remaining.to_string()).bind(&now).bind(&fill.symbol).execute(&db_pool).await.ok();
+                            let pnl = (fill.filled_price - entry_price) * Decimal::from(fill.filled_qty);
+                            let pnl_pct = if entry_price > Decimal::ZERO {
+                                ((fill.filled_price - entry_price) / entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
+                            } else { 0.0 };
+                            let pnl_f = pnl.to_f64().unwrap_or(0.0);
+                            // 실현 손익 기록 (1차 익절)
+                            sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                                .bind(uuid::Uuid::new_v4().to_string())
+                                .bind(&fill.symbol)
+                                .bind(&market_name)
+                                .bind(fill.filled_qty.to_string())
+                                .bind(entry_price.to_string())
+                                .bind(fill.filled_price.to_string())
+                                .bind(pnl.to_string())
+                                .bind(pnl_pct)
+                                .bind(&now)
+                                .execute(&db_pool).await.ok();
+                            realized_today += pnl_f;
+                            realized_month += pnl_f;
+                            realized_total += pnl_f;
                             let sym_label = symbol_names.get(&fill.symbol).map(|n| format!("{n} ({})", fill.symbol)).unwrap_or_else(|| fill.symbol.clone());
-                            let pnl_pct = ((fill.filled_price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
                             summary_alert.info(format!(
                                 "🎯 1차익절 체결 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%)\n잔여 {}주 보유 중",
                                 fill.filled_qty, fill.filled_price, pnl_pct, remaining
@@ -717,8 +774,53 @@ pub async fn run_generic_position_task(
             &regime_rx,
             &symbol_names,
             available_cash,
+            realized_today,
+            realized_month,
+            realized_total,
+            initial_equity,
         );
     }
+}
+
+async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
+    let today: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log \
+         WHERE date(exited_at, '+9 hours') = date('now', '+9 hours') AND market = ?"
+    )
+    .bind(market)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0.0);
+
+    let month: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log \
+         WHERE strftime('%Y-%m', exited_at, '+9 hours') = strftime('%Y-%m', 'now', '+9 hours') AND market = ?"
+    )
+    .bind(market)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0.0);
+
+    let total: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log WHERE market = ?"
+    )
+    .bind(market)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0.0);
+
+    (today, month, total)
+}
+
+async fn query_initial_equity(db: &SqlitePool) -> Option<f64> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT value FROM portfolio_config WHERE key = 'initial_equity'"
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|v| v.parse::<f64>().ok())
 }
 
 fn publish_live_state(
@@ -728,6 +830,10 @@ fn publish_live_state(
     regime_rx: &RegimeReceiver,
     symbol_names: &HashMap<String, String>,
     available_cash: Option<Decimal>,
+    realized_today: f64,
+    realized_month: f64,
+    realized_total: f64,
+    initial_equity: Option<f64>,
 ) {
     let positions = pos_states
         .iter()
@@ -759,10 +865,14 @@ fn publish_live_state(
     live_state_tx
         .send(MarketLiveState {
             positions,
-            daily_pnl_r: 0.0,
+            daily_pnl_r: realized_today,
             regime: format!("{:?}", *regime_rx.borrow()),
             last_updated: Some(chrono::Utc::now()),
             available_cash,
+            realized_today,
+            realized_month,
+            realized_total,
+            initial_equity,
         })
         .ok();
 }
