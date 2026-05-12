@@ -290,11 +290,22 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         let live = live_state_rx.borrow();
         live.positions.iter().any(|p| p.symbol == symbol)
     };
-    if already_held {
+    // 아직 체결 안 된 Submitted 주문이 있으면 중복 진입 차단
+    let has_pending_order = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM orders WHERE symbol = ? AND state = 'Submitted'",
+    )
+    .bind(&symbol)
+    .fetch_one(&db_pool)
+    .await
+    .unwrap_or(0)
+        > 0;
+    if already_held || has_pending_order {
         tracing::debug!(
-            "[{}] {} 이미 보유 중 → 중복 매수 skip",
+            "[{}] {} 이미 보유/주문 대기 중 → 중복 매수 skip (held={}, pending={})",
             market.label(),
-            symbol
+            symbol,
+            already_held,
+            has_pending_order,
         );
         activity.record_eval(market.label(), &symbol, score, "skip", "already_held");
         log_signal(
@@ -382,6 +393,33 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             Some(trade_signal.strength),
             "skip",
             Some("qty_zero"),
+            &regime_str,
+        )
+        .await;
+        return;
+    }
+
+    // 최소 주문 금액 체크: qty × 현재가 < $10 이면 브로커 거부 가능성 높음
+    const MIN_ORDER_NOTIONAL: &str = "10";
+    let notional = Decimal::from(qty) * current_price;
+    if notional
+        < Decimal::from_str_exact(MIN_ORDER_NOTIONAL).unwrap_or(rust_decimal_macros::dec!(10))
+    {
+        tracing::info!(
+            market = %market.label(),
+            symbol = %symbol,
+            notional = %notional,
+            "주문 금액 미달 — skip (notional < $10)"
+        );
+        activity.record_eval(market.label(), &symbol, score, "skip", "min_notional");
+        log_signal(
+            &db_pool,
+            &symbol,
+            setup_score,
+            Some(direction_str),
+            Some(trade_signal.strength),
+            "skip",
+            Some("min_notional"),
             &regime_str,
         )
         .await;
