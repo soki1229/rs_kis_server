@@ -1,5 +1,7 @@
 use rust_decimal::Decimal;
 
+// 스펙 Section 9 복구 로직 — 단위 테스트 문서화 용도로 보존
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryFailureCode {
     BalanceMismatch,
@@ -7,6 +9,7 @@ pub enum RecoveryFailureCode {
     BrokerOrderMissing,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum RecoveryOutcome {
     /// 모든 검사 통과 → 정상 기동
@@ -20,6 +23,7 @@ pub enum RecoveryOutcome {
     },
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct RecoveryInput {
     /// DB `positions` 테이블 총 평가액
     pub db_position_total: Decimal,
@@ -36,6 +40,7 @@ pub struct RecoveryInput {
 }
 
 /// 스펙 Section 9 재시작 복구 절차 (순수 함수 — 실제 API 호출 없음).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn run_recovery_check(input: &RecoveryInput) -> RecoveryOutcome {
     // 1순위: broker_order_id 없는 SUBMITTED 주문
     if input.has_orders_without_broker_id {

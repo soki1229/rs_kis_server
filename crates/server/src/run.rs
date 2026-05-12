@@ -703,60 +703,79 @@ async fn run_market_recovery(
     market: &str,
     db_pool: &sqlx::SqlitePool,
     adapter: Arc<dyn MarketAdapter>,
-) -> bool {
-    use crate::control::recovery::{RecoveryInput, RecoveryOutcome};
+) {
+    let now = chrono::Utc::now().to_rfc3339();
 
-    let has_orders_without_broker_id: bool = sqlx::query_scalar::<_, i64>(
+    // broker_id 없는 SUBMITTED 주문 → Failed 자동 처리 (재시작 전 제출 실패 추정)
+    let no_broker_id_count: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM orders WHERE state = 'Submitted' AND broker_order_id IS NULL",
     )
     .fetch_one(db_pool)
     .await
-    .unwrap_or(0)
-        > 0;
+    .unwrap_or(0);
 
-    let broker_ids = match adapter.unfilled_orders().await {
-        Ok(orders) => Some(orders.into_iter().map(|o| o.order_no).collect::<Vec<_>>()),
+    if no_broker_id_count > 0 {
+        let reason = r#"{"Failed":{"reason":"재시작 복구: broker_order_id 없음 (제출 미완료 추정)"}}"#;
+        let updated = sqlx::query(
+            "UPDATE orders SET state = ?, updated_at = ? WHERE state = 'Submitted' AND broker_order_id IS NULL",
+        )
+        .bind(reason)
+        .bind(&now)
+        .execute(db_pool)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        tracing::warn!(
+            market,
+            updated,
+            "recovery: broker_order_id 없는 SUBMITTED 주문 → Failed 자동 처리"
+        );
+    }
+
+    // 브로커 미체결 목록과 대조 — orphaned SUBMITTED 주문 → Failed 자동 처리
+    let broker_ids: Option<Vec<String>> = match adapter.unfilled_orders().await {
+        Ok(orders) => Some(orders.into_iter().map(|o| o.order_no).collect()),
         Err(_) => None,
     };
 
-    let has_orphaned_submitted_orders = if let Some(ids) = broker_ids {
-        let broker_set: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        let db_submitted: Vec<String> = sqlx::query_scalar(
-            "SELECT broker_order_id FROM orders WHERE state = 'Submitted' AND broker_order_id IS NOT NULL",
+    if let Some(ref ids) = broker_ids {
+        let broker_set: std::collections::HashSet<&str> =
+            ids.iter().map(|s| s.as_str()).collect();
+
+        // (내부 id, broker_order_id) 쌍으로 조회
+        let db_submitted: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, broker_order_id FROM orders WHERE state = 'Submitted' AND broker_order_id IS NOT NULL",
         )
         .fetch_all(db_pool)
         .await
         .unwrap_or_default();
-        db_submitted
-            .iter()
-            .any(|id| !broker_set.contains(id.as_str()))
+
+        let reason = r#"{"Failed":{"reason":"재시작 복구: 브로커 미체결 목록 없음 (체결/취소 추정)"}}"#;
+        let mut fixed = 0u64;
+        for (order_id, broker_id) in &db_submitted {
+            if !broker_set.contains(broker_id.as_str()) {
+                sqlx::query(
+                    "UPDATE orders SET state = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(reason)
+                .bind(&now)
+                .bind(order_id)
+                .execute(db_pool)
+                .await
+                .ok();
+                fixed += 1;
+            }
+        }
+        if fixed > 0 {
+            tracing::warn!(
+                market,
+                fixed,
+                "recovery: orphaned SUBMITTED 주문 → Failed 자동 처리"
+            );
+        } else {
+            tracing::info!(market, "recovery: orphaned 주문 없음");
+        }
     } else {
-        false
-    };
-
-    tracing::info!(
-        "{market} recovery input: orphaned={has_orphaned_submitted_orders}, no_broker_id={has_orders_without_broker_id}"
-    );
-
-    match crate::control::recovery::run_recovery_check(&RecoveryInput {
-        db_position_total: rust_decimal::Decimal::ZERO,
-        broker_balance_total: rust_decimal::Decimal::ZERO,
-        has_orphaned_submitted_orders,
-        unreconciled_fill_count: 0,
-        has_orders_without_broker_id,
-        mismatch_threshold_pct: rust_decimal_macros::dec!(0.05),
-    }) {
-        RecoveryOutcome::Fail { code, detail } => {
-            tracing::error!("{market} recovery check FAILED: {code:?} — {detail}");
-            true
-        }
-        RecoveryOutcome::AutoFixed { count } => {
-            tracing::warn!("{market} recovery: {count} unreconciled fills auto-fixed");
-            false
-        }
-        RecoveryOutcome::Pass => {
-            tracing::info!("{market} recovery check passed");
-            false
-        }
+        tracing::warn!(market, "recovery: unfilled_orders API 실패 — orphaned 검사 스킵");
     }
 }
