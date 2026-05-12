@@ -299,7 +299,8 @@ pub async fn run_generic_position_task(
                 } else {
                     Decimal::ONE
                 };
-                let stop = entry - pos_cfg.stop_atr_multiplier * atr;
+                // 손절가 하한: 진입가의 85% (ATR이 주가를 초과하는 극저가주에서 음수 방지)
+                let stop = (entry - pos_cfg.stop_atr_multiplier * atr).max(entry * dec!(0.85));
                 let pt1 = entry + pos_cfg.profit_target_1_atr * atr;
                 let pt2 = entry + pos_cfg.profit_target_2_atr * atr;
                 let exchange_code = if matches!(
@@ -552,7 +553,9 @@ pub async fn run_generic_position_task(
                     // If missing (e.g. manual fill or error), default to Decimal::ONE to avoid panic,
                     // although strategy should have provided it during Signal stage.
                     let atr = fill.atr.unwrap_or(Decimal::ONE);
-                    let stop_price = current_price - atr * pos_cfg.stop_atr_multiplier;
+                    // 손절가 하한: 진입가의 85% (ATR 이상치로 인한 음수 방지)
+                    let stop_price = (current_price - atr * pos_cfg.stop_atr_multiplier)
+                        .max(current_price * rust_decimal_macros::dec!(0.85));
                     let pt1 = current_price + atr * pos_cfg.profit_target_1_atr;
                     let pt2 = current_price + atr * pos_cfg.profit_target_2_atr;
 
