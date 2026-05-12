@@ -324,6 +324,49 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
 
     let qty = sized_qty.to_u64().unwrap_or(0);
     if qty == 0 {
+        // 슬롯 포화 시 교체 후보 확인
+        let replace_target = risk_strategy.replacement_candidate(&trade_signal, &portfolio);
+        if let Some(ref target_symbol) = replace_target {
+            let replace_qty = portfolio
+                .positions
+                .iter()
+                .find(|p| &p.symbol == target_symbol)
+                .map(|p| p.qty.unsigned_abs())
+                .unwrap_or(0);
+            if replace_qty > 0 {
+                tracing::info!(
+                    "[{}] 🔄 포지션 교체: {} → {} (신규 신호 score={})",
+                    market.label(),
+                    target_symbol,
+                    symbol,
+                    setup_score
+                );
+                let sell_req = OrderRequest {
+                    symbol: target_symbol.clone(),
+                    side: Side::Sell,
+                    qty: replace_qty,
+                    price: None,
+                    atr: None,
+                    exchange_code: exchange_code.clone(),
+                    strength: None,
+                    is_short: false,
+                };
+                let _ = order_tx.send(sell_req).await;
+                log_signal(
+                    &db_pool,
+                    &symbol,
+                    setup_score,
+                    Some(direction_str),
+                    Some(trade_signal.strength),
+                    "replace_pending",
+                    Some(target_symbol),
+                    &regime_str,
+                )
+                .await;
+                return;
+            }
+        }
+
         tracing::info!(
             market = %market.label(),
             symbol = %symbol,

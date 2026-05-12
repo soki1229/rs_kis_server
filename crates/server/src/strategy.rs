@@ -135,6 +135,16 @@ pub struct Portfolio {
 pub trait RiskStrategy: Send + Sync {
     /// 반환값: 주문 수량 (0이면 주문 안 함)
     fn size(&self, signal: &TradeSignal, portfolio: &Portfolio) -> Decimal;
+
+    /// 슬롯이 꽉 찼을 때 새 신호(`signal`)를 위해 청산할 포지션 심볼을 반환한다.
+    /// None이면 교체하지 않음 (기본: 교체 안 함).
+    fn replacement_candidate(
+        &self,
+        _signal: &TradeSignal,
+        _portfolio: &Portfolio,
+    ) -> Option<String> {
+        None
+    }
 }
 
 // ── Bundle ────────────────────────────────────────────────────────────────
