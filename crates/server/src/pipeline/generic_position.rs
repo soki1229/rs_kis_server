@@ -503,6 +503,7 @@ pub async fn run_generic_position_task(
             _ = tokio::time::sleep_until(fallback_instant), if !eod_fallback_fired => {
                 tracing::warn!(market = %market_name, "EOD fallback fired — forcing exit for all positions");
                 eod_fallback_fired = true;
+                write_session_stats(&db_pool, market_name).await;
                 for (symbol, (state, qty)) in &pos_states {
                     // VTS 시장가(price=None) 미체결 방지: last_prices 기준 지정가로 전송
                     let price = last_prices.get(symbol).copied();
@@ -515,6 +516,7 @@ pub async fn run_generic_position_task(
             }
             Some(_) = eod_rx.recv() => {
                 tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
+                write_session_stats(&db_pool, market_name).await;
                 for (symbol, (state, qty)) in &pos_states {
                     let price = last_prices.get(symbol).copied();
                     if let Err(e) = force_order_tx.send(OrderRequest {
@@ -857,6 +859,81 @@ async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
     .unwrap_or(0.0);
 
     (today, month, total)
+}
+
+async fn write_session_stats(db: &SqlitePool, market: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let date: String = sqlx::query_scalar("SELECT date('now', '+9 hours')")
+        .fetch_one(db)
+        .await
+        .unwrap_or_else(|_| chrono::Utc::now().format("%Y-%m-%d").to_string());
+
+    let pnl: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log \
+         WHERE date(exited_at, '+9 hours') = ? AND market = ?",
+    )
+    .bind(&date)
+    .bind(market)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0.0);
+
+    let trade_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM realized_pnl_log \
+         WHERE date(exited_at, '+9 hours') = ? AND market = ?",
+    )
+    .bind(&date)
+    .bind(market)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+
+    // 오늘 최대 단일 손실 (절대값)
+    let max_drawdown: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(ABS(MIN(CAST(pnl AS REAL))), 0.0) FROM realized_pnl_log \
+         WHERE date(exited_at, '+9 hours') = ? AND market = ? AND CAST(pnl AS REAL) < 0",
+    )
+    .bind(&date)
+    .bind(market)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0.0);
+
+    // 최근 연속 손실 횟수
+    let consecutive_losses: i64 = {
+        let pnls: Vec<f64> = sqlx::query_scalar(
+            "SELECT CAST(pnl AS REAL) FROM realized_pnl_log \
+             WHERE date(exited_at, '+9 hours') = ? AND market = ? ORDER BY exited_at DESC",
+        )
+        .bind(&date)
+        .bind(market)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        pnls.iter().take_while(|&&p| p < 0.0).count() as i64
+    };
+
+    sqlx::query(
+        "INSERT INTO session_stats (date, pnl, consecutive_losses, trade_count, max_drawdown, profile_active, updated_at) \
+         VALUES (?, ?, ?, ?, ?, 'default', ?) \
+         ON CONFLICT(date) DO UPDATE SET \
+           pnl = excluded.pnl, \
+           consecutive_losses = excluded.consecutive_losses, \
+           trade_count = excluded.trade_count, \
+           max_drawdown = excluded.max_drawdown, \
+           updated_at = excluded.updated_at",
+    )
+    .bind(&date)
+    .bind(pnl.to_string())
+    .bind(consecutive_losses)
+    .bind(trade_count)
+    .bind(max_drawdown.to_string())
+    .bind(&now)
+    .execute(db)
+    .await
+    .ok();
+
+    tracing::info!(market, date, pnl, trade_count, "session_stats 기록 완료");
 }
 
 async fn query_initial_equity(db: &SqlitePool) -> Option<f64> {

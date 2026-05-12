@@ -103,6 +103,35 @@ struct SignalContext {
     last_order_sent: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn log_signal(
+    db: &sqlx::SqlitePool,
+    symbol: &str,
+    setup_score: i32,
+    rule_direction: Option<&str>,
+    rule_strength: Option<f64>,
+    action: &str,
+    block_reason: Option<&str>,
+    regime: &str,
+) {
+    sqlx::query(
+        "INSERT INTO signal_log \
+         (symbol, setup_score, rule_direction, rule_strength, action, llm_block_reason, regime, logged_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(symbol)
+    .bind(setup_score)
+    .bind(rule_direction)
+    .bind(rule_strength)
+    .bind(action)
+    .bind(block_reason)
+    .bind(regime)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(db)
+    .await
+    .ok();
+}
+
 async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let SignalContext {
         symbol,
@@ -199,11 +228,28 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         None => {
             tracing::debug!("[{}] {} 신호 없음", market.label(), symbol);
             activity.record_eval(market.label(), &symbol, 0, "skip", "no_signal");
+            log_signal(
+                &db_pool,
+                &symbol,
+                0,
+                None,
+                None,
+                "skip",
+                Some("no_signal"),
+                &format!("{:?}", regime),
+            )
+            .await;
             return;
         }
     };
 
     let score = (trade_signal.strength * 100.0) as i32;
+    let setup_score = trade_signal.setup_score.unwrap_or(0);
+    let direction_str = match trade_signal.direction {
+        Direction::Long => "long",
+        Direction::Short => "short",
+    };
+    let regime_str = format!("{:?}", regime);
     tracing::info!(
         "[{}] 📶 신호 발생: {} score={} {:?} @ {}",
         market.label(),
@@ -226,20 +272,43 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     if let QualResult::Block { reason } = qual_result {
         tracing::info!("[{}] 🚫 {} 진입 차단 — {}", market.label(), symbol, reason);
         activity.record_eval(market.label(), &symbol, score, "blocked", &reason);
+        log_signal(
+            &db_pool,
+            &symbol,
+            setup_score,
+            Some(direction_str),
+            Some(trade_signal.strength),
+            "block",
+            Some(&reason),
+            &regime_str,
+        )
+        .await;
         return;
     }
 
-    {
+    let already_held = {
         let live = live_state_rx.borrow();
-        if live.positions.iter().any(|p| p.symbol == symbol) {
-            tracing::debug!(
-                "[{}] {} 이미 보유 중 → 중복 매수 skip",
-                market.label(),
-                symbol
-            );
-            activity.record_eval(market.label(), &symbol, score, "skip", "already_held");
-            return;
-        }
+        live.positions.iter().any(|p| p.symbol == symbol)
+    };
+    if already_held {
+        tracing::debug!(
+            "[{}] {} 이미 보유 중 → 중복 매수 skip",
+            market.label(),
+            symbol
+        );
+        activity.record_eval(market.label(), &symbol, score, "skip", "already_held");
+        log_signal(
+            &db_pool,
+            &symbol,
+            setup_score,
+            Some(direction_str),
+            Some(trade_signal.strength),
+            "skip",
+            Some("already_held"),
+            &regime_str,
+        )
+        .await;
+        return;
     }
 
     let portfolio = {
@@ -262,16 +331,32 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             "수량 산출 0 — 잔고 부족 또는 리스크 제한으로 주문 skip"
         );
         activity.record_eval(market.label(), &symbol, score, "skip", "qty_zero");
+        log_signal(
+            &db_pool,
+            &symbol,
+            setup_score,
+            Some(direction_str),
+            Some(trade_signal.strength),
+            "skip",
+            Some("qty_zero"),
+            &regime_str,
+        )
+        .await;
         return;
     }
 
-    activity.record_eval(
-        market.label(),
+    activity.record_eval(market.label(), &symbol, score, "order", &regime_str);
+    log_signal(
+        &db_pool,
         &symbol,
-        score,
-        "order",
-        &format!("{:?}", regime),
-    );
+        setup_score,
+        Some(direction_str),
+        Some(trade_signal.strength),
+        "enter",
+        None,
+        &regime_str,
+    )
+    .await;
     if let Some(nc) = notion {
         let row = crate::notion::SignalEvalRow {
             timestamp: chrono::Utc::now().to_rfc3339(),
