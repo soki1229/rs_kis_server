@@ -79,40 +79,54 @@ impl UsMarketBase {
             .with_timezone(&New_York)
             .format("%Y%m%d")
             .to_string();
-        match us_order_history(self, &today, &today).await {
-            Ok(history) => {
-                if let Some(h) = history.iter().find(|h| h.order_no == broker_order_no) {
-                    let filled_qty = h.filled_qty as u64;
-                    if filled_qty >= submitted_qty {
-                        return PollOutcome::Filled {
-                            filled_qty,
-                            filled_price: h.filled_price,
-                        };
-                    } else if filled_qty > 0 {
-                        return PollOutcome::PartialFilled {
-                            filled_qty,
-                            filled_price: h.filled_price,
-                        };
+
+        // inquire_ccnl은 VTS 서버 불안정으로 네트워크 에러가 잦음 — 최대 3회 재시도
+        let mut last_err = String::new();
+        for attempt in 1..=3u32 {
+            match us_order_history(self, &today, &today).await {
+                Ok(history) => {
+                    if let Some(h) = history.iter().find(|h| h.order_no == broker_order_no) {
+                        let filled_qty = h.filled_qty as u64;
+                        if filled_qty >= submitted_qty {
+                            return PollOutcome::Filled {
+                                filled_qty,
+                                filled_price: h.filled_price,
+                            };
+                        } else if filled_qty > 0 {
+                            return PollOutcome::PartialFilled {
+                                filled_qty,
+                                filled_price: h.filled_price,
+                            };
+                        }
+                        // rvse_cncl_dvsn="02" → 취소; 아직 체결 전이면 StillOpen
+                        if h.status == "02" {
+                            return PollOutcome::Cancelled;
+                        }
                     }
-                    // rvse_cncl_dvsn="02" → 취소; 아직 체결 전이면 StillOpen
-                    if h.status == "02" {
-                        return PollOutcome::Cancelled;
-                    }
+                    // 히스토리에 없거나 미체결 → 아직 처리 중
+                    return PollOutcome::StillOpen;
                 }
-                // 히스토리에 없거나 미체결 → 아직 처리 중
-                PollOutcome::StillOpen
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "UsMarketBase: order_history error for {}: {}",
-                    broker_order_no,
-                    e
-                );
-                PollOutcome::Failed {
-                    reason: format!("order_history error: {}", e),
+                Err(e) => {
+                    last_err = e.to_string();
+                    tracing::warn!(
+                        broker_order_no,
+                        attempt,
+                        "UsMarketBase: order_history 실패 — {}",
+                        last_err
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
                 }
             }
         }
+        // 3회 모두 실패 → 네트워크 일시 장애로 간주, StillOpen 반환해 외부 폴링 루프가 재시도
+        tracing::warn!(
+            broker_order_no,
+            "order_history 3회 실패 — StillOpen으로 처리 (다음 poll 재시도): {}",
+            last_err
+        );
+        PollOutcome::StillOpen
     }
 }
 
