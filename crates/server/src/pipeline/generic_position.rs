@@ -430,7 +430,11 @@ pub async fn run_generic_position_task(
 
             // 5분마다 잔고 API 동기화: qty 불일치 수정, available_cash 갱신, 종목명 보강
             _ = balance_sync_interval.tick() => {
-                match adapter.balance().await {
+                // 30s 타임아웃: balance API hang 시 position task 블록 방지 (eod_fallback 미발화 원인)
+                match tokio::time::timeout(std::time::Duration::from_secs(30), adapter.balance()).await.unwrap_or_else(|_| {
+                    tracing::warn!(market = %market_name, "balance sync 타임아웃 (30s) — 스킵");
+                    Err(crate::error::BotError::ApiError { msg: "balance sync timeout".into() })
+                }) {
                     Ok(balance) => {
                         available_cash = Some(balance.available_cash);
                         // 종목명 보강 (balance API에서 name 제공되는 경우)

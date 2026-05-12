@@ -86,7 +86,8 @@ pub async fn run_scheduler_task(
         let open = adapter.market_open_utc(today).unwrap();
         let close = adapter.market_close_utc(today).unwrap();
         let pre_open = open - chrono::Duration::hours(1);
-        let post_close = close + chrono::Duration::hours(1);
+        // EOD fallback backup: close + 10분 (fallback 미발화 시 보조 트리거)
+        let post_close = close + chrono::Duration::minutes(10);
         let now = Utc::now();
 
         let current_wl = watchlist_tx.borrow().clone();
