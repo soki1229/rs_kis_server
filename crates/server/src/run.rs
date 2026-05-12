@@ -715,7 +715,8 @@ async fn run_market_recovery(
     .unwrap_or(0);
 
     if no_broker_id_count > 0 {
-        let reason = r#"{"Failed":{"reason":"재시작 복구: broker_order_id 없음 (제출 미완료 추정)"}}"#;
+        let reason =
+            r#"{"Failed":{"reason":"재시작 복구: broker_order_id 없음 (제출 미완료 추정)"}}"#;
         let updated = sqlx::query(
             "UPDATE orders SET state = ?, updated_at = ? WHERE state = 'Submitted' AND broker_order_id IS NULL",
         )
@@ -739,8 +740,7 @@ async fn run_market_recovery(
     };
 
     if let Some(ref ids) = broker_ids {
-        let broker_set: std::collections::HashSet<&str> =
-            ids.iter().map(|s| s.as_str()).collect();
+        let broker_set: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
 
         // (내부 id, broker_order_id) 쌍으로 조회
         let db_submitted: Vec<(String, String)> = sqlx::query_as(
@@ -750,19 +750,18 @@ async fn run_market_recovery(
         .await
         .unwrap_or_default();
 
-        let reason = r#"{"Failed":{"reason":"재시작 복구: 브로커 미체결 목록 없음 (체결/취소 추정)"}}"#;
+        let reason =
+            r#"{"Failed":{"reason":"재시작 복구: 브로커 미체결 목록 없음 (체결/취소 추정)"}}"#;
         let mut fixed = 0u64;
         for (order_id, broker_id) in &db_submitted {
             if !broker_set.contains(broker_id.as_str()) {
-                sqlx::query(
-                    "UPDATE orders SET state = ?, updated_at = ? WHERE id = ?",
-                )
-                .bind(reason)
-                .bind(&now)
-                .bind(order_id)
-                .execute(db_pool)
-                .await
-                .ok();
+                sqlx::query("UPDATE orders SET state = ?, updated_at = ? WHERE id = ?")
+                    .bind(reason)
+                    .bind(&now)
+                    .bind(order_id)
+                    .execute(db_pool)
+                    .await
+                    .ok();
                 fixed += 1;
             }
         }
@@ -776,6 +775,9 @@ async fn run_market_recovery(
             tracing::info!(market, "recovery: orphaned 주문 없음");
         }
     } else {
-        tracing::warn!(market, "recovery: unfilled_orders API 실패 — orphaned 검사 스킵");
+        tracing::warn!(
+            market,
+            "recovery: unfilled_orders API 실패 — orphaned 검사 스킵"
+        );
     }
 }
