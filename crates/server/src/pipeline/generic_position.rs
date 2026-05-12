@@ -413,7 +413,7 @@ pub async fn run_generic_position_task(
 
             // /status 즉시 갱신 요청 (Telegram에서 notify)
             _ = refresh_notify.notified() => {
-                if let Ok(balance) = adapter.balance().await {
+                if let Ok(Ok(balance)) = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.balance()).await {
                     available_cash = Some(balance.available_cash);
                     for api_pos in &balance.positions {
                         if let Some(name) = &api_pos.name {
@@ -699,11 +699,11 @@ pub async fn run_generic_position_task(
                 if force_remove {
                     let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
                     // T+1 등 실제 보유 중인 포지션은 강제 제거하지 않음: balance API 최종 확인
-                    let still_held = match adapter.balance().await {
-                        Ok(bal) => bal.positions.iter().any(|p| {
+                    let still_held = match tokio::time::timeout(std::time::Duration::from_secs(30), adapter.balance()).await {
+                        Ok(Ok(bal)) => bal.positions.iter().any(|p| {
                             p.symbol == tick.symbol && p.qty.to_u64().unwrap_or(0) > 0
                         }),
-                        Err(_) => false,
+                        Ok(Err(_)) | Err(_) => false,
                     };
                     if still_held {
                         tracing::warn!(symbol = %tick.symbol, "exit_timeout: balance에 실제 보유 — 강제 제거 스킵 (T+1 추정)");

@@ -527,7 +527,9 @@ async fn handle_alert(
 }
 
 use teloxide::dispatching::UpdateFilterExt;
+use teloxide::error_handlers::LoggingErrorHandler;
 use teloxide::types::{Message, Update};
+use teloxide::update_listeners::Polling;
 
 #[allow(clippy::too_many_arguments)]
 async fn run_command_loop(
@@ -696,15 +698,21 @@ async fn run_command_loop(
         }
     });
 
-    let mut dispatcher = Dispatcher::builder(bot, handler).build();
+    let mut dispatcher = Dispatcher::builder(bot.clone(), handler).build();
     let shutdown = dispatcher.shutdown_token();
+
+    // 에러 후 backoff를 5초로 고정 — 기본 exponential backoff가 최대 수분까지 늘어나 명령 응답이 지연되는 문제 방지
+    let listener = Polling::builder(bot)
+        .timeout(std::time::Duration::from_secs(10))
+        .backoff_strategy(|_| std::time::Duration::from_secs(5))
+        .build();
 
     tokio::select! {
         _ = token.cancelled() => {
             let _ = shutdown.shutdown();
             tracing::info!("TelegramTask: command loop shutdown requested");
         }
-        _ = dispatcher.dispatch() => {
+        _ = dispatcher.dispatch_with_listener(listener, LoggingErrorHandler::with_custom_text("update_listener error")) => {
             tracing::warn!("TelegramTask: command loop dispatcher exited");
         }
     }
