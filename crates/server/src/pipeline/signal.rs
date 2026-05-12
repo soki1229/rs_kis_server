@@ -399,17 +399,17 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         return;
     }
 
-    // 최소 주문 금액 체크: qty × 현재가 < $10 이면 브로커 거부 가능성 높음
-    const MIN_ORDER_NOTIONAL: &str = "10";
+    // 최소 주문 금액 체크: TWAP 5분할 기준 슬라이스당 $10 이상 → 총합 $50 이상
+    const MIN_ORDER_NOTIONAL: &str = "50";
     let notional = Decimal::from(qty) * current_price;
     if notional
-        < Decimal::from_str_exact(MIN_ORDER_NOTIONAL).unwrap_or(rust_decimal_macros::dec!(10))
+        < Decimal::from_str_exact(MIN_ORDER_NOTIONAL).unwrap_or(rust_decimal_macros::dec!(50))
     {
         tracing::info!(
             market = %market.label(),
             symbol = %symbol,
             notional = %notional,
-            "주문 금액 미달 — skip (notional < $10)"
+            "주문 금액 미달 — skip (notional < $50, TWAP 슬라이스당 $10 미만)"
         );
         activity.record_eval(market.label(), &symbol, score, "skip", "min_notional");
         log_signal(
