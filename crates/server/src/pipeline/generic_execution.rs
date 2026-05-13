@@ -184,16 +184,8 @@ async fn process_single_order(
             if req.side == Side::Sell { "sell_" } else { "buy_" }
         );
         if req.side == Side::Sell {
-            // exit_pending 즉시 리셋 — 타임아웃 카운트 누적 방지 (VTS T+1 등)
-            let _ = fill_tx.try_send(FillInfo {
-                order_id: String::new(),
-                symbol: req.symbol.clone(),
-                filled_qty: 0,
-                filled_price: Decimal::ZERO,
-                atr: None,
-                exchange_code: req.exchange_code.clone(),
-                fatal: false,
-            });
+            // exit_pending을 유지 — 30초 타임아웃이 누적되어 balance 확인 후 phantom 포지션 강제 제거
+            // (FillInfo(filled_qty=0) 전송 시 exit_pending이 즉시 리셋되어 TS 재발동 루프 발생)
         }
         return;
     }
