@@ -209,6 +209,17 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             .collect()
     };
 
+    // 전일 종가 대비 당일 등락률 — HardBlock DailyGain/Loss 판정용 (daily_bars move 전에 계산)
+    let daily_change_pct = daily_bars
+        .get(1)
+        .filter(|prev| prev.close > Decimal::ZERO)
+        .map(|prev| {
+            ((current_price - prev.close) / prev.close * rust_decimal_macros::dec!(100))
+                .to_f64()
+                .unwrap_or(0.0)
+        })
+        .unwrap_or(0.0);
+
     let strategy_ctx = StrategySignalContext {
         symbol: symbol.clone(),
         market,
@@ -263,6 +274,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         signal: trade_signal.clone(),
         regime: regime.clone(),
         setup_score: trade_signal.setup_score,
+        daily_change_pct,
         // TODO: 파이프라인 레벨에서 실적/FOMC 캘린더 연동 후 실제 값 반영 필요
         has_earnings_event: false,
         has_fomc_today: false,
@@ -980,7 +992,7 @@ mod tests {
             signal: signal.clone(),
             regime: MarketRegime::Trending,
             setup_score: signal.setup_score,
-            // TODO: 파이프라인 레벨에서 실적/FOMC 캘린더 연동 후 실제 값 반영 필요
+            daily_change_pct: 0.0,
             has_earnings_event: false,
             has_fomc_today: false,
         };

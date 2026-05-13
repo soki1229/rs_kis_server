@@ -99,6 +99,8 @@ pub struct SignalCandidate {
     pub regime: MarketRegime,
     /// Signal 레벨에서 계산된 setup score (있으면 Qualification에서 재계산 안 함)
     pub setup_score: Option<i32>,
+    /// 당일 등락률 (전일종가 대비). HardBlock DailyGain/Loss 판정에 사용.
+    pub daily_change_pct: f64,
     /// 당일 실적 발표 여부
     pub has_earnings_event: bool,
     /// 당일 FOMC/경제 지표 발표 여부

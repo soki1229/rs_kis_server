@@ -560,7 +560,7 @@ async fn process_single_order(
                                                         })
                                                         .await;
                                                 } else {
-                                                    tracing::error!(symbol = %req.symbol, "취소 오류 + 체결 미확인 — Failed 처리 (balance sync에서 orphaned 복구 대기)");
+                                                    tracing::warn!(symbol = %req.symbol, "취소 오류 + 체결 미확인 — Failed 처리 (balance sync에서 orphaned 복구 대기)");
                                                     let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?").bind(&ts).bind(&order_id).execute(db_pool).await;
                                                     let _ = fill_tx.try_send(FillInfo {
                                                         order_id: order_id.clone(),

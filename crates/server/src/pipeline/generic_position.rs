@@ -299,8 +299,17 @@ pub async fn run_generic_position_task(
                 } else {
                     Decimal::ONE
                 };
-                // 손절가 하한: 진입가의 85% (ATR이 주가를 초과하는 극저가주에서 음수 방지)
-                let stop = (entry - pos_cfg.stop_atr_multiplier * atr).max(entry * dec!(0.85));
+                // 손절가: ATR 기반 + 주가대별 % 상한(좁은 쪽 선택) + 85% 하한
+                let max_stop_pct = if entry < dec!(5.0) {
+                    dec!(0.08)
+                } else if entry < dec!(50.0) {
+                    dec!(0.05)
+                } else {
+                    dec!(0.03)
+                };
+                let stop = (entry - pos_cfg.stop_atr_multiplier * atr)
+                    .max(entry - entry * max_stop_pct)
+                    .max(entry * dec!(0.85));
                 let pt1 = entry + pos_cfg.profit_target_1_atr * atr;
                 let pt2 = entry + pos_cfg.profit_target_2_atr * atr;
                 let exchange_code = if matches!(
@@ -553,8 +562,16 @@ pub async fn run_generic_position_task(
                     // If missing (e.g. manual fill or error), default to Decimal::ONE to avoid panic,
                     // although strategy should have provided it during Signal stage.
                     let atr = fill.atr.unwrap_or(Decimal::ONE);
-                    // 손절가 하한: 진입가의 85% (ATR 이상치로 인한 음수 방지)
+                    // 손절가: ATR 기반 + 주가대별 % 상한(좁은 쪽 선택) + 85% 하한
+                    let max_stop_pct = if current_price < rust_decimal_macros::dec!(5.0) {
+                        rust_decimal_macros::dec!(0.08)
+                    } else if current_price < rust_decimal_macros::dec!(50.0) {
+                        rust_decimal_macros::dec!(0.05)
+                    } else {
+                        rust_decimal_macros::dec!(0.03)
+                    };
                     let stop_price = (current_price - atr * pos_cfg.stop_atr_multiplier)
+                        .max(current_price - current_price * max_stop_pct)
                         .max(current_price * rust_decimal_macros::dec!(0.85));
                     let pt1 = current_price + atr * pos_cfg.profit_target_1_atr;
                     let pt2 = current_price + atr * pos_cfg.profit_target_2_atr;
