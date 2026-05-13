@@ -58,6 +58,9 @@ pub struct MarketConfig {
     /// When true, uses MarketAdapter-based generic tasks instead of legacy market-specific tasks.
     #[serde(default)]
     pub use_generic_pipeline: bool,
+    /// Volume ranking에서 제외할 종목 코드 목록 (레버리지/인버스 ETF, 매매불가 종목 등)
+    #[serde(default)]
+    pub symbol_blacklist: Vec<String>,
 }
 
 fn default_vts_account() -> AccountKind {
@@ -623,6 +626,7 @@ mod tests {
             watchlist_refresh_interval_secs: default_watchlist_refresh_interval(),
             strategies: default_strategies(),
             use_generic_pipeline: false,
+            symbol_blacklist: vec![],
         };
         assert_eq!(mc.watchlist.len(), 1);
         assert_eq!(mc.dynamic_watchlist_size, 10);

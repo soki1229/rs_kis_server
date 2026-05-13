@@ -18,6 +18,18 @@ pub async fn build_watchlist(
     let mut dynamic = strategy
         .build_watchlist(adapter.clone(), cfg.dynamic_watchlist_size)
         .await;
+
+    // config symbol_blacklist + 최근 7일 내 "매매불가" 주문실패 종목 제외
+    let auto_blacklist = fetch_order_fail_blacklist(db).await;
+    dynamic.retain(|sym| {
+        let in_config = cfg.symbol_blacklist.contains(sym);
+        let in_auto = auto_blacklist.contains(sym);
+        if in_config || in_auto {
+            tracing::debug!(symbol = %sym, config = in_config, auto = in_auto, "Blacklisted symbol excluded from watchlist");
+        }
+        !in_config && !in_auto
+    });
+
     // 정적 watchlist(config)에 있지만 dynamic에 없는 종목을 앞에 삽입
     for sym in cfg.watchlist.iter().rev() {
         if !dynamic.contains(sym) {
@@ -29,6 +41,24 @@ pub async fn build_watchlist(
         aggressive: vec![],
     };
     merge_with_protected_symbols(fresh, db, cfg).await
+}
+
+/// 최근 7일 내 "매매불가 종목" 오류(40070000)가 반복된 종목을 자동 블랙리스트로 반환.
+async fn fetch_order_fail_blacklist(db: &SqlitePool) -> Vec<String> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT symbol FROM audit_log
+         WHERE event_type = 'order_failed'
+           AND detail LIKE '%40070000%'
+           AND created_at >= datetime('now', '-7 days')
+           AND symbol IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .filter_map(|r| r.try_get::<String, _>("symbol").ok())
+        .collect()
 }
 
 async fn merge_with_protected_symbols(
@@ -304,6 +334,7 @@ mod tests {
             watchlist_refresh_interval_secs: 600,
             strategies: vec![],
             use_generic_pipeline: false,
+            symbol_blacklist: vec![],
         };
 
         let wl = build_watchlist(adapter, &discovery, &config, &alert, &db).await;

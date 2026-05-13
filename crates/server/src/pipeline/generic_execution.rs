@@ -129,6 +129,8 @@ async fn process_order(
             "Starting TWAP execution"
         );
 
+        let mut first_filled_price: Option<Decimal> = None;
+
         for i in 0..slice_count {
             let mut slice_qty = base_qty;
             if remaining_qty > 0 {
@@ -150,13 +152,54 @@ async fn process_order(
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 
-            process_single_order(adapter, slice_req, fill_tx, db_pool, alert, poll_sem).await;
+            let filled_price =
+                process_single_order(adapter, slice_req, fill_tx, db_pool, alert, poll_sem).await;
+
+            match filled_price {
+                None => {
+                    // 슬라이스 실패 → 잔여 슬라이스 중단 (추세 이탈 또는 주문 불가)
+                    tracing::warn!(
+                        symbol = %req.symbol,
+                        slice = i + 1,
+                        total = slice_count,
+                        "TWAP: 슬라이스 실패 — 잔여 슬라이스 중단"
+                    );
+                    break;
+                }
+                Some(fp) => {
+                    match first_filled_price {
+                        None => first_filled_price = Some(fp),
+                        Some(first_px) => {
+                            // 최초 체결가 대비 1% 이상 하락 시 추가 매수 중단
+                            if first_px > Decimal::ZERO && fp < first_px {
+                                let drop_pct = ((first_px - fp) / first_px
+                                    * rust_decimal::Decimal::from(100))
+                                .to_f64()
+                                .unwrap_or(0.0);
+                                if drop_pct >= 1.0 {
+                                    tracing::warn!(
+                                        symbol = %req.symbol,
+                                        first_px = %first_px,
+                                        current_px = %fp,
+                                        drop_pct = format!("{:.2}%", drop_pct),
+                                        slice = i + 1,
+                                        total = slice_count,
+                                        "TWAP: 체결가 역방향 하락 — 잔여 슬라이스 중단"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     } else {
         process_single_order(adapter, req, fill_tx, db_pool, alert, poll_sem).await;
     }
 }
 
+/// 단일 주문 실행. 체결 성공 시 filled_price 반환, 실패/취소 시 None.
 async fn process_single_order(
     adapter: &dyn MarketAdapter,
     req: OrderRequest,
@@ -164,7 +207,7 @@ async fn process_single_order(
     db_pool: &SqlitePool,
     alert: &AlertRouter,
     poll_sem: &Arc<Semaphore>,
-) {
+) -> Option<Decimal> {
     // 0. Pre-flight: 주문 가능 수량 확인 (API 기반, soft check — API 실패 시 원래 수량으로 진행)
     let preflight_price = req.price.unwrap_or(Decimal::ZERO);
     let checked_qty = match req.side {
@@ -187,7 +230,7 @@ async fn process_single_order(
             // exit_pending을 유지 — 30초 타임아웃이 누적되어 balance 확인 후 phantom 포지션 강제 제거
             // (FillInfo(filled_qty=0) 전송 시 exit_pending이 즉시 리셋되어 TS 재발동 루프 발생)
         }
-        return;
+        return None;
     }
     let req = if checked_qty < req.qty {
         tracing::info!(
@@ -232,7 +275,7 @@ async fn process_single_order(
         .bind(&order_id).bind(&req.symbol).bind(req.side.to_string()).bind(req.qty as i64).bind(req.price.map(|p| p.to_string())).bind(req.atr.map(|v| v.to_string())).bind("Created").bind(&now)
         .execute(db_pool).await {
         alert.warn(format!("DB error recording order {}: {}", req.symbol, e));
-        return;
+        return None;
     }
 
     // 2. Place Order
@@ -246,7 +289,7 @@ async fn process_single_order(
             }
             if res.broker_id.is_empty() {
                 tracing::error!(order_id = %order_id, symbol = %req.symbol, "broker_id 공백 — 주문 추적 불가, 폴링 중단");
-                return;
+                return None;
             }
 
             // 3. Poll for status — 각 이터레이션마다 신선한 타임스탬프 사용
@@ -330,7 +373,7 @@ async fn process_single_order(
                                         tracing::error!(symbol = %req.symbol, "Filled: fill_tx 전송 실패 — 포지션 태스크 종료?: {e}");
                                     }
                                 }
-                                return;
+                                return Some(filled_price);
                             }
                             PollOutcome::PartialFilled {
                                 filled_qty,
@@ -367,7 +410,7 @@ async fn process_single_order(
                                     tracing::error!(order_id = %order_id, "Cancelled: 'Cancelled' 상태 DB 업데이트 실패: {e}");
                                 }
                                 alert.warn(format!("Order {} cancelled by broker", req.symbol));
-                                return;
+                                return None;
                             }
                             PollOutcome::Failed { reason } => {
                                 if let Err(e) = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?")
@@ -386,7 +429,7 @@ async fn process_single_order(
                                         fatal: false,
                                     })
                                     .await;
-                                return;
+                                return None;
                             }
                             PollOutcome::StillOpen => {
                                 if attempt == 30 {
@@ -631,6 +674,7 @@ async fn process_single_order(
             }
         }
     }
+    None
 }
 
 async fn reconcile_submitted_orders(

@@ -19,6 +19,7 @@ pub enum RecoveryOutcome {
     /// Kill Switch 발동 필요
     Fail {
         code: RecoveryFailureCode,
+        #[allow(dead_code)]
         detail: String,
     },
 }
