@@ -467,9 +467,10 @@ pub async fn run_generic_position_task(
                             .iter()
                             .filter_map(|p| p.qty.to_u64().filter(|&q| q > 0).map(|q| (p.symbol.clone(), q)))
                             .collect();
-                        // API에 없는 종목은 청산된 것으로 처리 (단, exit_pending 중인 포지션은 보호)
+                        // API에 없는 종목은 청산된 것으로 처리
+                        // exit_pending 중이더라도 balance API에 없으면 phantom 포지션 → 제거
                         let stale_symbols: Vec<String> = pos_states.iter()
-                            .filter(|(s, (state, _))| !api_qty_map.contains_key(*s) && !state.exit_pending)
+                            .filter(|(s, _)| !api_qty_map.contains_key(*s))
                             .map(|(s, _)| s.clone())
                             .collect();
                         for sym in stale_symbols {
@@ -557,8 +558,8 @@ pub async fn run_generic_position_task(
                     if let Some((state, _)) = pos_states.get_mut(&fill.symbol) {
                         state.exit_pending = false;
                         state.exit_pending_since = None;
-                        state.exit_timeout_count = 0;
-                        tracing::info!(symbol = %fill.symbol, "Order failure/cancel received, resetting exit_pending");
+                        // exit_timeout_count는 유지 — 리셋하면 force_remove(count≥5) 카운트가 무한 초기화됨
+                        tracing::info!(symbol = %fill.symbol, count = state.exit_timeout_count, "Order failure/cancel received, resetting exit_pending");
                     }
                     continue;
                 }
