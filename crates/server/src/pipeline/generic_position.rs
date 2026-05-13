@@ -711,7 +711,7 @@ pub async fn run_generic_position_task(
                 }
             }
             Some(tick) = tick_pos_rx.recv() => {
-                // exit_pending 타임아웃 체크: 5회 초과 시 VTS 잔고없음 등으로 매도 불가 → 포지션 강제 제거
+                // exit_pending 타임아웃 체크: 2회 이상 시 balance 확인 후 강제 제거 (5회 대기 → 60초로 단축)
                 let force_remove = if let Some((state, _)) = pos_states.get_mut(&tick.symbol) {
                     if state.exit_pending {
                         if let Some(since) = state.exit_pending_since {
@@ -719,8 +719,8 @@ pub async fn run_generic_position_task(
                                 state.exit_timeout_count += 1;
                                 state.exit_pending = false;
                                 state.exit_pending_since = None;
-                                tracing::warn!(symbol = %tick.symbol, count = state.exit_timeout_count, "exit_pending 90초 타임아웃 → 리셋");
-                                state.exit_timeout_count >= 5
+                                tracing::warn!(symbol = %tick.symbol, count = state.exit_timeout_count, "exit_pending 30초 타임아웃 → 리셋");
+                                state.exit_timeout_count >= 2
                             } else { false }
                         } else { false }
                     } else { false }
@@ -742,8 +742,8 @@ pub async fn run_generic_position_task(
                             state.exit_pending_since = None;
                         }
                     } else {
-                    tracing::error!(symbol = %tick.symbol, "exit 5회 타임아웃 — 매도 불가 포지션 강제 제거");
-                    summary_alert.info(format!("⚠️ [{market_name}] {sym_label} exit 5회 실패 → 포지션 강제 제거 (VTS 잔고 불일치 추정)"));
+                    tracing::error!(symbol = %tick.symbol, "exit 2회 타임아웃 — 매도 불가 포지션 강제 제거");
+                    summary_alert.info(format!("⚠️ [{market_name}] {sym_label} exit 2회 실패 → 포지션 강제 제거 (VTS 잔고 불일치 추정)"));
                     pos_states.remove(&tick.symbol);
                     sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
                     }
