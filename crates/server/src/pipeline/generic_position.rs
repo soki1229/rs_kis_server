@@ -83,6 +83,13 @@ pub fn evaluate_exit(pos: &PositionState, current_price: Decimal) -> ExitDecisio
                 pct: Decimal::new(5, 1),
             }; // 0.5
         }
+        // 1차 익절 전이라도 trailing_stop이 fixed stop보다 높으면 ATR 기반 손절 적용
+        // (상승 후 되돌림 구간에서 손실 확대 방지)
+        if let Some(ts) = pos.trailing_stop_price {
+            if ts > pos.stop_price && current_price <= ts {
+                return ExitDecision::TrailingStop;
+            }
+        }
     }
 
     ExitDecision::Hold
