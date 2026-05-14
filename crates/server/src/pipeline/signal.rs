@@ -262,10 +262,11 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     };
     let regime_str = format!("{:?}", regime);
     tracing::info!(
-        "[{}] 📶 신호 발생: {} score={} {:?} @ {}",
+        "[{}] 📶 신호 후보: {} setup_score={} strength={:.2} {:?} @ {}",
         market.label(),
         symbol,
         trade_signal.setup_score.unwrap_or(0),
+        trade_signal.strength,
         trade_signal.direction,
         current_price
     );
@@ -312,14 +313,23 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     .unwrap_or(0)
         > 0;
     if already_held || has_pending_order {
-        tracing::debug!(
-            "[{}] {} 이미 보유/주문 대기 중 → 중복 매수 skip (held={}, pending={})",
-            market.label(),
-            symbol,
+        let reason = match (already_held, has_pending_order) {
+            (true, true) => "already_held_and_pending",
+            (true, false) => "already_held",
+            (false, true) => "pending_order",
+            (false, false) => "unknown",
+        };
+        tracing::info!(
+            market = %market.label(),
+            symbol = %symbol,
+            setup_score,
+            strength = trade_signal.strength,
             already_held,
             has_pending_order,
+            reason,
+            "신규 진입 skip — 이미 보유 중이거나 제출 대기 주문 존재"
         );
-        activity.record_eval(market.label(), &symbol, score, "skip", "already_held");
+        activity.record_eval(market.label(), &symbol, score, "skip", reason);
         log_signal(
             &db_pool,
             &symbol,
@@ -327,7 +337,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             Some(direction_str),
             Some(trade_signal.strength),
             "skip",
-            Some("already_held"),
+            Some(reason),
             &regime_str,
         )
         .await;
@@ -395,6 +405,10 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             market = %market.label(),
             symbol = %symbol,
             balance = %account_balance,
+            open_positions = portfolio.open_position_count,
+            held_symbols = %portfolio.positions.iter().map(|p| p.symbol.as_str()).collect::<Vec<_>>().join(","),
+            setup_score,
+            strength = trade_signal.strength,
             "수량 산출 0 — 잔고 부족 또는 리스크 제한으로 주문 skip"
         );
         activity.record_eval(market.label(), &symbol, score, "skip", "qty_zero");
