@@ -582,6 +582,7 @@ async fn process_single_order(
                                                         &[0]
                                                     };
                                                 let mut balance_check = None;
+                                                let mut sell_absent_from_balance = false;
                                                 for delay in balance_retry_delays {
                                                     if *delay > 0 {
                                                         tokio::time::sleep(
@@ -589,15 +590,20 @@ async fn process_single_order(
                                                         )
                                                         .await;
                                                     }
-                                                    balance_check =
-                                                        adapter.balance().await.ok().and_then(
-                                                            |b| {
-                                                                b.positions.into_iter().find(|p| {
-                                                                    p.symbol == req.symbol
-                                                                })
-                                                            },
-                                                        );
+                                                    if let Ok(balance) = adapter.balance().await {
+                                                        balance_check = balance
+                                                            .positions
+                                                            .into_iter()
+                                                            .find(|p| p.symbol == req.symbol);
+                                                        sell_absent_from_balance = req.side
+                                                            == Side::Sell
+                                                            && err.contains("IGW00014")
+                                                            && balance_check.is_none();
+                                                    }
                                                     if balance_check.is_some() {
+                                                        break;
+                                                    }
+                                                    if sell_absent_from_balance {
                                                         break;
                                                     }
                                                     tracing::debug!(symbol = %req.symbol, delay, "balance fallback 미확인 — 재시도 대기");
@@ -631,6 +637,11 @@ async fn process_single_order(
                                                         })
                                                         .await;
                                                     return Some(fp);
+                                                } else if sell_absent_from_balance {
+                                                    tracing::info!(symbol = %req.symbol, qty = req.qty, "balance fallback 매도 확인 — 잔고에서 종목 없음");
+                                                    let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
+                                                        .bind(req.qty as i64).bind(Decimal::ZERO.to_string()).bind(&ts).bind(&order_id).execute(db_pool).await;
+                                                    return Some(Decimal::ZERO);
                                                 } else {
                                                     tracing::warn!(symbol = %req.symbol, "취소 오류 + 체결 미확인 — Failed 처리 (balance sync에서 orphaned 복구 대기)");
                                                     let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?").bind(&ts).bind(&order_id).execute(db_pool).await;
