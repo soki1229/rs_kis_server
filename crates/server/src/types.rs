@@ -118,6 +118,13 @@ pub struct OrderRequest {
     /// True when the order is a short-sell (대차 매도). US only; KR always returns error.
     #[serde(default)]
     pub is_short: bool,
+    /// 목표 보유 일수 (swing: 1~5일, position: 7일+). 초과 시 강제 청산.
+    #[serde(default = "default_holding_days_5")]
+    pub max_holding_days: u32,
+}
+
+fn default_holding_days_5() -> u32 {
+    5
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,6 +147,9 @@ pub struct FillInfo {
     pub exchange_code: Option<String>,
     /// true → 재시도 불가 치명적 오류 (e.g., 브로커 잔고 없음). position task가 포지션 강제 제거.
     pub fatal: bool,
+    /// 목표 보유 일수 (swing: 1~5일, position: 7일+). 초과 시 강제 청산.
+    #[serde(default = "default_holding_days_5")]
+    pub max_holding_days: u32,
 }
 
 // ── PnL ───────────────────────────────────────────────────────────────────

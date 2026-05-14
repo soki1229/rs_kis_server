@@ -373,6 +373,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
                     exchange_code: exchange_code.clone(),
                     strength: None,
                     is_short: false,
+                    max_holding_days: 0,
                 };
                 let _ = order_tx.send(sell_req).await;
                 log_signal(
@@ -489,6 +490,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             exchange_code,
             strength: Some(trade_signal.strength),
             is_short,
+            max_holding_days: strategy.holding_days_target,
         };
         if order_tx.send(req).await.is_ok() {
             last_order_sent
@@ -1035,6 +1037,7 @@ mod tests {
             exchange_code: None,
             strength: None,
             is_short: false,
+            max_holding_days: 5,
         };
         assert_eq!(req.atr, Some(atr_value));
 
@@ -1046,6 +1049,7 @@ mod tests {
             atr: req.atr,
             exchange_code: None,
             fatal: false,
+            max_holding_days: 5,
         };
 
         let pos_cfg = crate::config::PositionConfig {

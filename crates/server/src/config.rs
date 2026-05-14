@@ -18,6 +18,13 @@ pub struct StrategyProfile {
     pub regime_filter: bool,
     #[serde(default)]
     pub aggressive_mode: bool,
+    /// 목표 보유 일수. swing=1~5일, position=7일+. 초과 시 강제 청산.
+    #[serde(default = "default_holding_days")]
+    pub holding_days_target: u32,
+}
+
+fn default_holding_days() -> u32 {
+    5
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -79,6 +86,7 @@ fn default_strategies() -> Vec<StrategyProfile> {
         setup_score_min: 60,
         regime_filter: true,
         aggressive_mode: false,
+        holding_days_target: 5,
     }]
 }
 

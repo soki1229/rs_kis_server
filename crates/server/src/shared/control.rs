@@ -171,6 +171,7 @@ mod tests {
             exchange_code: None,
             strength: None,
             is_short: false,
+            max_holding_days: 5,
         };
         cmd_tx
             .send(BotCommand::ForceOrder(req.clone()))

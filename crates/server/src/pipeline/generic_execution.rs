@@ -271,8 +271,8 @@ async fn process_single_order(
     };
 
     // 1. Record in DB
-    if let Err(e) = sqlx::query("INSERT INTO orders (id, symbol, side, qty, price, atr, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(&order_id).bind(&req.symbol).bind(req.side.to_string()).bind(req.qty as i64).bind(req.price.map(|p| p.to_string())).bind(req.atr.map(|v| v.to_string())).bind("Created").bind(&now)
+    if let Err(e) = sqlx::query("INSERT INTO orders (id, symbol, side, qty, price, atr, max_holding_days, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(&order_id).bind(&req.symbol).bind(req.side.to_string()).bind(req.qty as i64).bind(req.price.map(|p| p.to_string())).bind(req.atr.map(|v| v.to_string())).bind(req.max_holding_days as i64).bind("Created").bind(&now)
         .execute(db_pool).await {
         alert.warn(format!("DB error recording order {}: {}", req.symbol, e));
         return None;
@@ -367,6 +367,7 @@ async fn process_single_order(
                                             exchange_code: req.exchange_code.clone(),
                                             atr: req.atr,
                                             fatal: false,
+                                            max_holding_days: req.max_holding_days,
                                         })
                                         .await
                                     {
@@ -395,6 +396,7 @@ async fn process_single_order(
                                             exchange_code: req.exchange_code.clone(),
                                             atr: req.atr,
                                             fatal: false,
+                                            max_holding_days: req.max_holding_days,
                                         })
                                         .await
                                     {
@@ -427,6 +429,7 @@ async fn process_single_order(
                                         exchange_code: req.exchange_code.clone(),
                                         atr: req.atr,
                                         fatal: false,
+                                        max_holding_days: req.max_holding_days,
                                     })
                                     .await;
                                 return None;
@@ -482,6 +485,7 @@ async fn process_single_order(
                                                 exchange_code: req.exchange_code.clone(),
                                                 atr: req.atr,
                                                 fatal: false,
+                                                max_holding_days: req.max_holding_days,
                                             });
                                         }
                                         Ok(false) => {
@@ -506,6 +510,7 @@ async fn process_single_order(
                                                         exchange_code: req.exchange_code.clone(),
                                                         atr: req.atr,
                                                         fatal: false,
+                                                        max_holding_days: req.max_holding_days,
                                                     })
                                                     .await;
                                                 return Some(fp);
@@ -519,6 +524,7 @@ async fn process_single_order(
                                                     exchange_code: req.exchange_code.clone(),
                                                     atr: req.atr,
                                                     fatal: false,
+                                                    max_holding_days: req.max_holding_days,
                                                 });
                                             }
                                         }
@@ -558,6 +564,7 @@ async fn process_single_order(
                                                         exchange_code: req.exchange_code.clone(),
                                                         atr: req.atr,
                                                         fatal: false,
+                                                        max_holding_days: req.max_holding_days,
                                                     })
                                                     .await;
                                                 return Some(fp);
@@ -594,6 +601,7 @@ async fn process_single_order(
                                                                 .clone(),
                                                             atr: req.atr,
                                                             fatal: false,
+                                                            max_holding_days: req.max_holding_days,
                                                         })
                                                         .await;
                                                     return Some(fp);
@@ -608,6 +616,7 @@ async fn process_single_order(
                                                         exchange_code: req.exchange_code.clone(),
                                                         atr: req.atr,
                                                         fatal: false,
+                                                        max_holding_days: req.max_holding_days,
                                                     });
                                                 }
                                             }
@@ -672,6 +681,7 @@ async fn process_single_order(
                         exchange_code: req.exchange_code.clone(),
                         atr: req.atr,
                         fatal: true,
+                        max_holding_days: req.max_holding_days,
                     })
                     .await;
             }
@@ -687,7 +697,7 @@ async fn reconcile_submitted_orders(
     _alert: &AlertRouter,
     poll_sem: &Arc<Semaphore>,
 ) {
-    let rows = match sqlx::query("SELECT id, broker_order_id, symbol, qty, atr, exchange_code FROM orders WHERE state = 'Submitted'")
+    let rows = match sqlx::query("SELECT id, broker_order_id, symbol, qty, atr, exchange_code, max_holding_days FROM orders WHERE state = 'Submitted'")
         .fetch_all(db_pool).await {
         Ok(r) => r,
         Err(e) => {
@@ -715,6 +725,7 @@ async fn reconcile_submitted_orders(
             s.parse().map_err(|_| tracing::warn!(order_id = %order_id, "ATR parse failed, defaulting to None")).ok()
         });
         let ex_code: Option<String> = row.get("exchange_code");
+        let max_holding_days: u32 = row.try_get::<i64, _>("max_holding_days").unwrap_or(5) as u32;
 
         let _permit = poll_sem.acquire().await.expect("poll semaphore closed");
         match adapter
@@ -749,6 +760,7 @@ async fn reconcile_submitted_orders(
                                 atr,
                                 exchange_code: ex_code,
                                 fatal: false,
+                                max_holding_days,
                             })
                             .await
                         {

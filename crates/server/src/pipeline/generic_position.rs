@@ -41,6 +41,10 @@ pub struct PositionState {
     pub exit_pending_since: Option<std::time::Instant>,
     /// exit 90초 타임아웃 횟수 — 5회 이상이면 포지션 강제 제거 (잔고없음 무한루프 방지)
     pub exit_timeout_count: u32,
+    /// 목표 보유 일수 (swing: 1~5일, position: 7일+)
+    pub max_holding_days: u32,
+    /// 진입 날짜 (KST 기준) — 보유기간 초과 판단에 사용
+    pub entered_date: chrono::NaiveDate,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,7 +181,7 @@ pub async fn run_generic_position_task(
         );
 
     // Recover positions from DB
-    if let Ok(rows) = sqlx::query("SELECT symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, trailing_stop_price, partial_exit_done, regime_at_entry, qty, exchange_code FROM positions")
+    if let Ok(rows) = sqlx::query("SELECT symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, trailing_stop_price, partial_exit_done, regime_at_entry, qty, exchange_code, max_holding_days, entered_at FROM positions")
         .fetch_all(&db_pool)
         .await
     {
@@ -193,6 +197,14 @@ pub async fn run_generic_position_task(
             let regime_str: String = row.get("regime_at_entry");
             let qty: String = row.get("qty");
             let exchange_code: Option<String> = row.try_get("exchange_code").ok().flatten();
+            let max_holding_days: u32 = row.try_get::<i64, _>("max_holding_days").unwrap_or(5) as u32;
+            let entered_at_str: String = row.try_get("entered_at").unwrap_or_default();
+            let entered_date = chrono::DateTime::parse_from_rfc3339(&entered_at_str)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono_tz::Asia::Seoul).date_naive())
+                .unwrap_or_else(|| {
+                    chrono::Utc::now().with_timezone(&chrono_tz::Asia::Seoul).date_naive()
+                });
 
             let regime = match regime_str.as_str() {
                 "Volatile" => crate::types::MarketRegime::Volatile,
@@ -217,6 +229,8 @@ pub async fn run_generic_position_task(
                 exit_pending: false,
                 exit_pending_since: None,
                 exit_timeout_count: 0,
+                max_holding_days,
+                entered_date,
             };
             pos_states.insert(symbol, (state, qty.parse().unwrap_or(0)));
         }
@@ -345,6 +359,10 @@ pub async fn run_generic_position_task(
                     trailing_atr_trending: pos_cfg.trailing_atr_trending,
                     trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
                     exchange_code: exchange_code.clone(),
+                    max_holding_days: 5,
+                    entered_date: chrono::Utc::now()
+                        .with_timezone(&chrono_tz::Asia::Seoul)
+                        .date_naive(),
                 };
 
                 tracing::info!(
@@ -479,11 +497,13 @@ pub async fn run_generic_position_task(
                             if let Some((state, qty)) = pos_states.get(&sym) {
                                 let exit_price = last_prices.get(&sym).copied().unwrap_or(state.entry_price);
                                 let pnl = (exit_price - state.entry_price) * Decimal::from(*qty);
+                                let commission = calculate_commission(market_id, state.entry_price, exit_price, *qty, adapter.fx_spread_pct());
+                                let net_pnl = pnl - commission;
                                 let pnl_pct = if state.entry_price > Decimal::ZERO {
                                     ((exit_price - state.entry_price) / state.entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
                                 } else { 0.0 };
                                 let now_rfc = chrono::Utc::now().to_rfc3339();
-                                sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                                sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                                     .bind(uuid::Uuid::new_v4().to_string())
                                     .bind(&sym)
                                     .bind(market_name)
@@ -492,6 +512,8 @@ pub async fn run_generic_position_task(
                                     .bind(exit_price.to_string())
                                     .bind(pnl.to_string())
                                     .bind(pnl_pct)
+                                    .bind(commission.to_string())
+                                    .bind(net_pnl.to_string())
                                     .bind(&now_rfc)
                                     .execute(&db_pool).await.ok();
                             }
@@ -526,7 +548,7 @@ pub async fn run_generic_position_task(
                     // VTS 시장가(price=None) 미체결 방지: last_prices 기준 지정가로 전송
                     let price = last_prices.get(symbol).copied();
                     if let Err(e) = force_order_tx.send(OrderRequest {
-                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
                     }).await {
                         tracing::error!(symbol = %symbol, error = %e, "EOD fallback: Failed to send force order for full exit");
                     }
@@ -538,7 +560,7 @@ pub async fn run_generic_position_task(
                 for (symbol, (state, qty)) in &pos_states {
                     let price = last_prices.get(symbol).copied();
                     if let Err(e) = force_order_tx.send(OrderRequest {
-                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                        symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
                     }).await {
                         tracing::error!(symbol = %symbol, error = %e, "EOD trigger: Failed to send force order for full exit");
                     }
@@ -584,6 +606,11 @@ pub async fn run_generic_position_task(
                     let pt1 = current_price + atr * pos_cfg.profit_target_1_atr;
                     let pt2 = current_price + atr * pos_cfg.profit_target_2_atr;
 
+                    let entered_date = chrono::Utc::now()
+                        .with_timezone(&chrono_tz::Asia::Seoul)
+                        .date_naive();
+                    let max_holding_days = fill.max_holding_days;
+                    let holding_type = if max_holding_days <= 5 { "swing" } else { "position" };
                     let state = PositionState {
                         entry_price: current_price,
                         stop_price,
@@ -594,13 +621,15 @@ pub async fn run_generic_position_task(
                         partial_exit_done: false,
                         exit_pending: false,
                         exit_pending_since: None,
-                exit_timeout_count: 0,
+                        exit_timeout_count: 0,
                         regime: regime.clone(),
                         profit_target_1_atr: pos_cfg.profit_target_1_atr,
                         profit_target_2_atr: pos_cfg.profit_target_2_atr,
                         trailing_atr_trending: pos_cfg.trailing_atr_trending,
                         trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
                         exchange_code: fill.exchange_code.clone(),
+                        max_holding_days,
+                        entered_date,
                     };
                     pos_states.insert(fill.symbol.clone(), (state, fill.filled_qty));
                     // 종목명 갱신 (daily_ohlc에 있으면 사용)
@@ -614,7 +643,7 @@ pub async fn run_generic_position_task(
                         }
                     }
                     let now = chrono::Utc::now().to_rfc3339();
-                    if let Err(e) = sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    if let Err(e) = sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, holding_type, max_holding_days, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .bind(uuid::Uuid::new_v4().to_string())
                         .bind(&fill.order_id)
                         .bind(&fill.symbol)
@@ -626,6 +655,8 @@ pub async fn run_generic_position_task(
                         .bind(format!("{:?}", regime))
                         .bind(fill.filled_qty.to_string())
                         .bind(&fill.exchange_code)
+                        .bind(holding_type)
+                        .bind(max_holding_days as i64)
                         .bind(&now)
                         .bind(&now)
                         .execute(&db_pool).await {
@@ -633,8 +664,8 @@ pub async fn run_generic_position_task(
                         summary_alert.warn(format!("⚠️ [{market_name}] {} 포지션 DB 저장 실패 — 수동 확인 필요", fill.symbol));
                     }
                     summary_alert.info(format!(
-                        "📥 진입 [{market_name}] {} × {}주 @ {}\n스탑: {} | 목표1: {} | 목표2: {}",
-                        fill.symbol, fill.filled_qty, current_price, stop_price, pt1, pt2
+                        "📥 진입 [{market_name}] {} × {}주 @ {} [{}]\n스탑: {} | 목표1: {} | 목표2: {}",
+                        fill.symbol, fill.filled_qty, current_price, holding_type, stop_price, pt1, pt2
                     ));
                 } else {
                     // sell fill: partial vs full 구분
@@ -644,15 +675,16 @@ pub async fn run_generic_position_task(
                         let entry_price = pos_states.get(&fill.symbol).map(|(s, _)| s.entry_price).unwrap_or(fill.filled_price);
                         let sym_label = symbol_names.get(&fill.symbol).map(|n| format!("{n} ({})", fill.symbol)).unwrap_or_else(|| fill.symbol.clone());
                         let pnl = (fill.filled_price - entry_price) * Decimal::from(fill.filled_qty);
+                        let commission = calculate_commission(market_id, entry_price, fill.filled_price, fill.filled_qty, adapter.fx_spread_pct());
+                        let net_pnl = pnl - commission;
                         let pnl_pct = if entry_price > Decimal::ZERO {
                             ((fill.filled_price - entry_price) / entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
                         } else { 0.0 };
-                        let pnl_f = pnl.to_f64().unwrap_or(0.0);
+                        let net_pnl_f = net_pnl.to_f64().unwrap_or(0.0);
                         pos_states.remove(&fill.symbol);
                         sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
-                        // 실현 손익 기록
                         let now_rfc = chrono::Utc::now().to_rfc3339();
-                        sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                             .bind(uuid::Uuid::new_v4().to_string())
                             .bind(&fill.symbol)
                             .bind(market_name)
@@ -661,14 +693,16 @@ pub async fn run_generic_position_task(
                             .bind(fill.filled_price.to_string())
                             .bind(pnl.to_string())
                             .bind(pnl_pct)
+                            .bind(commission.to_string())
+                            .bind(net_pnl.to_string())
                             .bind(&now_rfc)
                             .execute(&db_pool).await.ok();
-                        realized_today += pnl_f;
-                        realized_month += pnl_f;
-                        realized_total += pnl_f;
+                        realized_today += net_pnl_f;
+                        realized_month += net_pnl_f;
+                        realized_total += net_pnl_f;
                         summary_alert.info(format!(
-                            "📤 청산 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%) / 손익 {:+.0}",
-                            fill.filled_qty, fill.filled_price, pnl_pct, pnl_f
+                            "📤 청산 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%) / 순손익 {:+.0} (수수료 {:.0})",
+                            fill.filled_qty, fill.filled_price, pnl_pct, net_pnl_f, commission.to_f64().unwrap_or(0.0)
                         ));
                     } else {
                         // 부분 체결 (1차 익절)
@@ -676,18 +710,19 @@ pub async fn run_generic_position_task(
                             let entry_price = state.entry_price;
                             let remaining = qty.saturating_sub(fill.filled_qty);
                             *qty = remaining;
-                            state.partial_exit_done = true; // fill 체결 시점에 설정
-                            state.exit_pending = false; // 다음 주문 가능하게 리셋
+                            state.partial_exit_done = true;
+                            state.exit_pending = false;
                             let now = chrono::Utc::now().to_rfc3339();
                             sqlx::query("UPDATE positions SET qty = ?, partial_exit_done = 1, updated_at = ? WHERE symbol = ?")
                                 .bind(remaining.to_string()).bind(&now).bind(&fill.symbol).execute(&db_pool).await.ok();
                             let pnl = (fill.filled_price - entry_price) * Decimal::from(fill.filled_qty);
+                            let commission = calculate_commission(market_id, entry_price, fill.filled_price, fill.filled_qty, adapter.fx_spread_pct());
+                            let net_pnl = pnl - commission;
                             let pnl_pct = if entry_price > Decimal::ZERO {
                                 ((fill.filled_price - entry_price) / entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
                             } else { 0.0 };
-                            let pnl_f = pnl.to_f64().unwrap_or(0.0);
-                            // 실현 손익 기록 (1차 익절)
-                            sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                            let net_pnl_f = net_pnl.to_f64().unwrap_or(0.0);
+                            sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                                 .bind(uuid::Uuid::new_v4().to_string())
                                 .bind(&fill.symbol)
                                 .bind(market_name)
@@ -696,11 +731,13 @@ pub async fn run_generic_position_task(
                                 .bind(fill.filled_price.to_string())
                                 .bind(pnl.to_string())
                                 .bind(pnl_pct)
+                                .bind(commission.to_string())
+                                .bind(net_pnl.to_string())
                                 .bind(&now)
                                 .execute(&db_pool).await.ok();
-                            realized_today += pnl_f;
-                            realized_month += pnl_f;
-                            realized_total += pnl_f;
+                            realized_today += net_pnl_f;
+                            realized_month += net_pnl_f;
+                            realized_total += net_pnl_f;
                             let sym_label = symbol_names.get(&fill.symbol).map(|n| format!("{n} ({})", fill.symbol)).unwrap_or_else(|| fill.symbol.clone());
                             summary_alert.info(format!(
                                 "🎯 1차익절 체결 [{market_name}] {sym_label} × {}주 @ {} ({:+.2}%)\n잔여 {}주 보유 중",
@@ -759,7 +796,22 @@ pub async fn run_generic_position_task(
                         (Some(open), Some(close)) => now_utc >= open && now_utc <= close,
                         _ => true,
                     };
-                    let decision = if in_trading_hours {
+                    // 보유기간 초과 체크: max_holding_days 초과 시 강제 청산
+                    let holding_expired = {
+                        let today_local = chrono::Utc::now()
+                            .with_timezone(&chrono_tz::Asia::Seoul)
+                            .date_naive();
+                        let days_held = (today_local - state.entered_date).num_days() as u32;
+                        days_held >= state.max_holding_days
+                    };
+                    let decision = if holding_expired && !state.exit_pending {
+                        tracing::info!(
+                            symbol = %tick.symbol,
+                            max_holding_days = state.max_holding_days,
+                            "보유기간 초과 → 강제 청산"
+                        );
+                        ExitDecision::FullExit
+                    } else if in_trading_hours {
                         evaluate_exit(state, tick.price)
                     } else {
                         ExitDecision::Hold
@@ -787,7 +839,7 @@ pub async fn run_generic_position_task(
                                 let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
                                 if exit_qty > 0 {
                                     if force_order_tx.send(OrderRequest {
-                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
                                     }).await.is_ok() {
                                         state.exit_pending = true;
                                         state.exit_pending_since = Some(std::time::Instant::now());
@@ -801,7 +853,7 @@ pub async fn run_generic_position_task(
                                 } else {
                                     // qty=1 등 절반이 0이 되는 경우: 전량 청산으로 대체
                                     if force_order_tx.send(OrderRequest {
-                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
                                     }).await.is_ok() {
                                         state.exit_pending = true;
                                         state.exit_pending_since = Some(std::time::Instant::now());
@@ -819,7 +871,7 @@ pub async fn run_generic_position_task(
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
                             if !state.exit_pending {
                                 if force_order_tx.send(OrderRequest {
-                                    symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false,
+                                    symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
                                 }).await.is_ok() {
                                     state.exit_pending = true;
                                     state.exit_pending_since = Some(std::time::Instant::now());
@@ -861,7 +913,7 @@ pub async fn run_generic_position_task(
 
 async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
     let today: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log \
+        "SELECT COALESCE(SUM(CAST(net_pnl AS REAL)), 0.0) FROM realized_pnl_log \
          WHERE date(exited_at, '+9 hours') = date('now', '+9 hours') AND market = ?",
     )
     .bind(market)
@@ -870,7 +922,7 @@ async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
     .unwrap_or(0.0);
 
     let month: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log \
+        "SELECT COALESCE(SUM(CAST(net_pnl AS REAL)), 0.0) FROM realized_pnl_log \
          WHERE strftime('%Y-%m', exited_at, '+9 hours') = strftime('%Y-%m', 'now', '+9 hours') AND market = ?"
     )
     .bind(market)
@@ -879,7 +931,7 @@ async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
     .unwrap_or(0.0);
 
     let total: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0.0) FROM realized_pnl_log WHERE market = ?",
+        "SELECT COALESCE(SUM(CAST(net_pnl AS REAL)), 0.0) FROM realized_pnl_log WHERE market = ?",
     )
     .bind(market)
     .fetch_one(db)
@@ -887,6 +939,28 @@ async fn query_pnl_summary(db: &SqlitePool, market: &str) -> (f64, f64, f64) {
     .unwrap_or(0.0);
 
     (today, month, total)
+}
+
+/// 수수료 계산.
+/// KR: 매수 0.015% + 매도(거래세+수수료) 0.195% = 왕복 0.21%
+/// US: 환전 스프레드 양방향 (fx_spread_pct는 단방향 기준)
+fn calculate_commission(
+    market_id: crate::market::MarketId,
+    entry: Decimal,
+    exit: Decimal,
+    qty: u64,
+    fx_spread_pct: Decimal,
+) -> Decimal {
+    use rust_decimal_macros::dec;
+    let qty_d = Decimal::from(qty);
+    match market_id {
+        crate::market::MarketId::Kr | crate::market::MarketId::KrVts => {
+            entry * dec!(0.00015) * qty_d + exit * dec!(0.00195) * qty_d
+        }
+        crate::market::MarketId::Us | crate::market::MarketId::UsVts => {
+            (entry + exit) * qty_d * fx_spread_pct
+        }
+    }
 }
 
 async fn write_session_stats(db: &SqlitePool, market: &str) {
@@ -1056,6 +1130,10 @@ mod tests {
             exit_pending: false,
             exit_pending_since: None,
             exit_timeout_count: 0,
+            max_holding_days: 5,
+            entered_date: chrono::Utc::now()
+                .with_timezone(&chrono_tz::Asia::Seoul)
+                .date_naive(),
         }
     }
 

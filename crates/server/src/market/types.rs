@@ -266,6 +266,7 @@ impl From<UnifiedFill> for crate::types::FillInfo {
             atr: None,
             exchange_code: fill.metadata.exchange_code,
             fatal: false,
+            max_holding_days: 5,
         }
     }
 }
