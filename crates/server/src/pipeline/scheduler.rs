@@ -21,13 +21,16 @@ pub async fn build_watchlist(
 
     // config symbol_blacklist + 최근 7일 내 "매매불가" 주문실패 종목 제외
     let auto_blacklist = fetch_order_fail_blacklist(db).await;
+    // KR: daily_ohlc 종목명 기반 레버리지/인버스/선물/ETN 제외
+    let name_blacklist = fetch_name_blacklist(db, adapter.market_id()).await;
     dynamic.retain(|sym| {
         let in_config = cfg.symbol_blacklist.contains(sym);
         let in_auto = auto_blacklist.contains(sym);
-        if in_config || in_auto {
-            tracing::debug!(symbol = %sym, config = in_config, auto = in_auto, "Blacklisted symbol excluded from watchlist");
+        let in_name = name_blacklist.contains(sym);
+        if in_config || in_auto || in_name {
+            tracing::debug!(symbol = %sym, config = in_config, auto = in_auto, name = in_name, "Blacklisted symbol excluded from watchlist");
         }
-        !in_config && !in_auto
+        !in_config && !in_auto && !in_name
     });
 
     // 정적 watchlist(config)에 있지만 dynamic에 없는 종목을 앞에 삽입
@@ -41,6 +44,32 @@ pub async fn build_watchlist(
         aggressive: vec![],
     };
     merge_with_protected_symbols(fresh, db, cfg).await
+}
+
+/// KR: daily_ohlc 종목명에 레버리지/인버스/선물/ETN 키워드가 포함된 종목을 블랙리스트로 반환.
+async fn fetch_name_blacklist(db: &SqlitePool, market_id: crate::market::MarketId) -> Vec<String> {
+    if !matches!(
+        market_id,
+        crate::market::MarketId::Kr | crate::market::MarketId::KrVts
+    ) {
+        return vec![];
+    }
+    let rows = sqlx::query(
+        "SELECT DISTINCT symbol FROM daily_ohlc
+         WHERE name IS NOT NULL
+           AND (name LIKE '%레버리지%'
+             OR name LIKE '%인버스%'
+             OR name LIKE '%선물%'
+             OR name LIKE '%ETN%'
+             OR name LIKE '%곱버스%')",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .filter_map(|r| r.try_get::<String, _>("symbol").ok())
+        .collect()
 }
 
 /// 최근 7일 내 "매매불가 종목" 오류(40070000)가 반복된 종목을 자동 블랙리스트로 반환.
