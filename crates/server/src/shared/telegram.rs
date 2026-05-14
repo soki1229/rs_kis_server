@@ -527,7 +527,6 @@ async fn handle_alert(
 }
 
 use teloxide::dispatching::UpdateFilterExt;
-use teloxide::error_handlers::LoggingErrorHandler;
 use teloxide::types::{Message, Update};
 use teloxide::update_listeners::Polling;
 
@@ -712,7 +711,12 @@ async fn run_command_loop(
             let _ = shutdown.shutdown();
             tracing::info!("TelegramTask: command loop shutdown requested");
         }
-        _ = dispatcher.dispatch_with_listener(listener, LoggingErrorHandler::with_custom_text("update_listener error")) => {
+        _ = dispatcher.dispatch_with_listener(
+            listener,
+            std::sync::Arc::new(|error| async move {
+                tracing::warn!(?error, "TelegramTask: update listener error; retrying");
+            }),
+        ) => {
             tracing::warn!("TelegramTask: command loop dispatcher exited");
         }
     }
