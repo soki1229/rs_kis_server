@@ -45,6 +45,8 @@ pub struct PositionState {
     pub max_holding_days: u32,
     /// 진입 날짜 (KST 기준) — 보유기간 초과 판단에 사용
     pub entered_date: chrono::NaiveDate,
+    /// 청산 사유 (fill 수신 시 realized_pnl_log에 기록)
+    pub pending_exit_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,7 +102,9 @@ pub fn evaluate_exit(pos: &PositionState, current_price: Decimal) -> ExitDecisio
 }
 
 /// 레짐별 trailing stop 가격 계산. 스펙 Section 7 기반.
-/// Quiet 레짐은 trailing stop 없음 → None 반환.
+/// Chandelier Exit 방식 trailing stop.
+/// Trending/Volatile: ATR × regime_multiplier, Quiet: ATR × 3.0 (보수적).
+/// 반환값은 최근 고가(롤링 최고가) - ATR × k.
 pub fn calculate_trailing_stop(
     high_price: Decimal,
     atr: Decimal,
@@ -111,7 +115,8 @@ pub fn calculate_trailing_stop(
     let multiplier = match regime {
         MarketRegime::Trending => trending_multiplier,
         MarketRegime::Volatile => volatile_multiplier,
-        MarketRegime::Quiet => return None,
+        // Quiet 레짐에서도 3× ATR 보수적 trailing stop 적용 (포지션 보호)
+        MarketRegime::Quiet => Decimal::from(3),
     };
     Some(high_price - atr * multiplier)
 }
@@ -231,6 +236,7 @@ pub async fn run_generic_position_task(
                 exit_timeout_count: 0,
                 max_holding_days,
                 entered_date,
+                pending_exit_reason: "Unknown".to_string(),
             };
             pos_states.insert(symbol, (state, qty.parse().unwrap_or(0)));
         }
@@ -363,6 +369,7 @@ pub async fn run_generic_position_task(
                     entered_date: chrono::Utc::now()
                         .with_timezone(&chrono_tz::Asia::Seoul)
                         .date_naive(),
+                    pending_exit_reason: "Unknown".to_string(),
                 };
 
                 tracing::info!(
@@ -503,7 +510,7 @@ pub async fn run_generic_position_task(
                                     ((exit_price - state.entry_price) / state.entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
                                 } else { 0.0 };
                                 let now_rfc = chrono::Utc::now().to_rfc3339();
-                                sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                                sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exit_reason, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                                     .bind(uuid::Uuid::new_v4().to_string())
                                     .bind(&sym)
                                     .bind(market_name)
@@ -514,6 +521,7 @@ pub async fn run_generic_position_task(
                                     .bind(pnl_pct)
                                     .bind(commission.to_string())
                                     .bind(net_pnl.to_string())
+                                    .bind("BalanceSync")
                                     .bind(&now_rfc)
                                     .execute(&db_pool).await.ok();
                             }
@@ -630,6 +638,7 @@ pub async fn run_generic_position_task(
                         exchange_code: fill.exchange_code.clone(),
                         max_holding_days,
                         entered_date,
+                        pending_exit_reason: "Unknown".to_string(),
                     };
                     pos_states.insert(fill.symbol.clone(), (state, fill.filled_qty));
                     // 종목명 갱신 (daily_ohlc에 있으면 사용)
@@ -673,6 +682,7 @@ pub async fn run_generic_position_task(
                     if fill.filled_qty >= pos_qty {
                         // 전체 청산
                         let entry_price = pos_states.get(&fill.symbol).map(|(s, _)| s.entry_price).unwrap_or(fill.filled_price);
+                        let exit_reason = pos_states.get(&fill.symbol).map(|(s, _)| s.pending_exit_reason.clone()).unwrap_or_else(|| "Unknown".to_string());
                         let sym_label = symbol_names.get(&fill.symbol).map(|n| format!("{n} ({})", fill.symbol)).unwrap_or_else(|| fill.symbol.clone());
                         let pnl = (fill.filled_price - entry_price) * Decimal::from(fill.filled_qty);
                         let commission = calculate_commission(market_id, entry_price, fill.filled_price, fill.filled_qty, adapter.fx_spread_pct());
@@ -684,7 +694,7 @@ pub async fn run_generic_position_task(
                         pos_states.remove(&fill.symbol);
                         sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
                         let now_rfc = chrono::Utc::now().to_rfc3339();
-                        sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exit_reason, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                             .bind(uuid::Uuid::new_v4().to_string())
                             .bind(&fill.symbol)
                             .bind(market_name)
@@ -695,6 +705,7 @@ pub async fn run_generic_position_task(
                             .bind(pnl_pct)
                             .bind(commission.to_string())
                             .bind(net_pnl.to_string())
+                            .bind(&exit_reason)
                             .bind(&now_rfc)
                             .execute(&db_pool).await.ok();
                         realized_today += net_pnl_f;
@@ -722,7 +733,7 @@ pub async fn run_generic_position_task(
                                 ((fill.filled_price - entry_price) / entry_price * Decimal::from(100)).to_f64().unwrap_or(0.0)
                             } else { 0.0 };
                             let net_pnl_f = net_pnl.to_f64().unwrap_or(0.0);
-                            sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                            sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exit_reason, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                                 .bind(uuid::Uuid::new_v4().to_string())
                                 .bind(&fill.symbol)
                                 .bind(market_name)
@@ -733,6 +744,7 @@ pub async fn run_generic_position_task(
                                 .bind(pnl_pct)
                                 .bind(commission.to_string())
                                 .bind(net_pnl.to_string())
+                                .bind("PartialExit")
                                 .bind(&now)
                                 .execute(&db_pool).await.ok();
                             realized_today += net_pnl_f;
@@ -810,9 +822,19 @@ pub async fn run_generic_position_task(
                             max_holding_days = state.max_holding_days,
                             "보유기간 초과 → 강제 청산"
                         );
+                        state.pending_exit_reason = "HoldingExpired".to_string();
                         ExitDecision::FullExit
                     } else if in_trading_hours {
-                        evaluate_exit(state, tick.price)
+                        let d = evaluate_exit(state, tick.price);
+                        // exit 결정 시점에 사유를 PositionState에 기록
+                        match &d {
+                            ExitDecision::StopLoss => state.pending_exit_reason = "StopLoss".to_string(),
+                            ExitDecision::TrailingStop => state.pending_exit_reason = "TrailingStop".to_string(),
+                            ExitDecision::FullExit => state.pending_exit_reason = "TargetHit".to_string(),
+                            ExitDecision::PartialExit { .. } => state.pending_exit_reason = "PartialExit".to_string(),
+                            ExitDecision::Hold => {}
+                        }
+                        d
                     } else {
                         ExitDecision::Hold
                     };
@@ -1134,6 +1156,7 @@ mod tests {
             entered_date: chrono::Utc::now()
                 .with_timezone(&chrono_tz::Asia::Seoul)
                 .date_naive(),
+            pending_exit_reason: "Unknown".to_string(),
         }
     }
 
@@ -1200,7 +1223,8 @@ mod tests {
     }
 
     #[test]
-    fn trailing_stop_returns_none_for_quiet_regime() {
+    fn trailing_stop_price_for_quiet_regime() {
+        // Quiet 레짐: 3.0× ATR conservative trailing stop
         let stop = calculate_trailing_stop(
             dec!(120),
             dec!(5),
@@ -1208,6 +1232,7 @@ mod tests {
             dec!(2.0),
             dec!(1.0),
         );
-        assert_eq!(stop, None);
+        // 120 - 5 × 3.0 = 105
+        assert_eq!(stop, Some(dec!(105)));
     }
 }
