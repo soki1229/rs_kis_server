@@ -42,7 +42,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
     if !cfg.integrations.llm.enabled {
         tracing::info!("LLM evaluation disabled via config");
     } else if !llm_available {
-        tracing::error!(
+        tracing::warn!(
             "ANTHROPIC_API_KEY not set — LLM evaluation will be skipped in signal tasks"
         );
     }
