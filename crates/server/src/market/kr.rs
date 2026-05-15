@@ -347,8 +347,10 @@ impl MarketAdapter for KrVtsAdapter {
         kr_check_buy_orderable(&self.base, symbol, price, qty).await
     }
 
-    async fn check_sell_orderable(&self, symbol: &str, qty: u64) -> u64 {
-        kr_check_sell_orderable(&self.base, symbol, qty).await
+    async fn check_sell_orderable(&self, _symbol: &str, qty: u64) -> u64 {
+        // VTS: 잔고 반영 딜레이(30초~2분)로 balance API가 0을 반환할 수 있음.
+        // DB 포지션 상태를 신뢰하고 qty 그대로 반환.
+        qty
     }
 }
 
