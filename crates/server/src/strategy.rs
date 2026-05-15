@@ -105,6 +105,8 @@ pub struct SignalCandidate {
     pub has_earnings_event: bool,
     /// 당일 FOMC/경제 지표 발표 여부
     pub has_fomc_today: bool,
+    /// config에서 설정된 최소 setup score 기준 (strategy.setup_score_min)
+    pub setup_score_min: u32,
 }
 
 /// 심사 결과

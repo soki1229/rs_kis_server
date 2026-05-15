@@ -318,6 +318,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         // TODO: 파이프라인 레벨에서 실적/FOMC 캘린더 연동 후 실제 값 반영 필요
         has_earnings_event: false,
         has_fomc_today: false,
+        setup_score_min: strategy.setup_score_min,
     };
     let qual_result = qual_strategy.qualify(&candidate);
 
@@ -1118,6 +1119,7 @@ mod tests {
             daily_change_pct: 0.0,
             has_earnings_event: false,
             has_fomc_today: false,
+            setup_score_min: 60,
         };
         let qual = qual_strat.qualify(&candidate);
         assert_eq!(qual, QualResult::Pass);
