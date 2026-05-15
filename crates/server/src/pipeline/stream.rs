@@ -218,25 +218,36 @@ async fn handle_stream(
     ws: &mut FullWsStream,
     cmd_rx: &mut mpsc::Receiver<StreamCmd>,
 ) -> Result<(), String> {
+    // KIS WS 서버는 일정 시간 idle 시 조용히 데이터 전송을 중단(zombie).
+    // 마지막 메시지 수신 후 30초 내 응답이 없으면 재접속한다.
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let mut last_msg_at = tokio::time::Instant::now();
     loop {
+        let idle_deadline = tokio::time::sleep_until(last_msg_at + IDLE_TIMEOUT);
         tokio::select! {
-            msg = ws.next() => match msg {
-                Some(Ok(Message::Text(text))) => {
-                    if text.starts_with('{') {
-                        if text.contains("\"tr_id\":\"PINGPONG\"") {
-                            ws.send(Message::Text(text)).await.ok();
-                        } else if log_server_json_response(&text) {
-                            // OPSP8996: key already in use — signal reconnect loop to refresh key
-                            inner.key_in_use.store(true, Ordering::Relaxed);
+            msg = ws.next() => {
+                last_msg_at = tokio::time::Instant::now();
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if text.starts_with('{') {
+                            if text.contains("\"tr_id\":\"PINGPONG\"") {
+                                ws.send(Message::Text(text)).await.ok();
+                            } else if log_server_json_response(&text) {
+                                // OPSP8996: key already in use — signal reconnect loop to refresh key
+                                inner.key_in_use.store(true, Ordering::Relaxed);
+                            }
+                        } else if let Some(event) = parse_ws_message(&text) {
+                            let _ = inner.tx.send(event);
                         }
-                    } else if let Some(event) = parse_ws_message(&text) {
-                        let _ = inner.tx.send(event);
                     }
+                    Some(Ok(Message::Close(_))) => return Err("Closed by server".into()),
+                    Some(Err(e)) => return Err(e.to_string()),
+                    None => return Err("Stream EOF".into()),
+                    _ => {}
                 }
-                Some(Ok(Message::Close(_))) => return Err("Closed by server".into()),
-                Some(Err(e)) => return Err(e.to_string()),
-                None => return Err("Stream EOF".into()),
-                _ => {}
+            },
+            _ = idle_deadline => {
+                return Err("idle timeout (30s) — reconnect".into());
             },
             cmd = cmd_rx.recv() => match cmd {
                 Some(StreamCmd::Subscribe(key, kind)) => {
