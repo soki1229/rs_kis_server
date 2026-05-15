@@ -783,11 +783,19 @@ pub async fn run_generic_position_task(
                 if force_remove {
                     let sym_label = symbol_names.get(&tick.symbol).map(|n| format!("{n} ({})", tick.symbol)).unwrap_or_else(|| tick.symbol.clone());
                     // T+1 등 실제 보유 중인 포지션은 강제 제거하지 않음: balance API 최종 확인
+                    // balance API 실패 시 안전하게 보유 중으로 간주 (false positive 방지)
                     let still_held = match tokio::time::timeout(std::time::Duration::from_secs(30), adapter.balance()).await {
                         Ok(Ok(bal)) => bal.positions.iter().any(|p| {
                             p.symbol == tick.symbol && p.qty.to_u64().unwrap_or(0) > 0
                         }),
-                        Ok(Err(_)) | Err(_) => false,
+                        Ok(Err(e)) => {
+                            tracing::warn!(symbol = %tick.symbol, "exit_timeout: balance 조회 실패 — 강제 제거 스킵: {e}");
+                            true
+                        }
+                        Err(_) => {
+                            tracing::warn!(symbol = %tick.symbol, "exit_timeout: balance 조회 타임아웃 — 강제 제거 스킵");
+                            true
+                        }
                     };
                     if still_held {
                         tracing::warn!(symbol = %tick.symbol, "exit_timeout: balance에 실제 보유 — 강제 제거 스킵 (T+1 추정)");
@@ -796,10 +804,11 @@ pub async fn run_generic_position_task(
                             state.exit_pending_since = None;
                         }
                     } else {
-                    tracing::error!(symbol = %tick.symbol, "exit 2회 타임아웃 — 매도 불가 포지션 강제 제거");
-                    summary_alert.info(format!("⚠️ [{market_name}] {sym_label} exit 2회 실패 → 포지션 강제 제거 (VTS 잔고 불일치 추정)"));
-                    pos_states.remove(&tick.symbol);
-                    sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
+                        // balance에 없음 = 이미 매도 완료 (재시작 전 체결된 주문). 정상 정리.
+                        tracing::warn!(symbol = %tick.symbol, "exit_timeout: VTS 잔고 없음 확인 → DB 포지션 정리 (재시작 전 매도 완료 추정)");
+                        summary_alert.info(format!("✅ [{market_name}] {sym_label} VTS 잔고 없음 → 포지션 정리 완료 (재시작 전 매도)"));
+                        pos_states.remove(&tick.symbol);
+                        sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
                     }
                 } else if let Some((state, qty)) = pos_states.get_mut(&tick.symbol) {
                     last_prices.insert(tick.symbol.clone(), tick.price);
