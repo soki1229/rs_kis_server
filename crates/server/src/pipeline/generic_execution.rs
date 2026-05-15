@@ -436,7 +436,7 @@ async fn process_single_order(
                             }
                             PollOutcome::StillOpen => {
                                 if attempt == 30 {
-                                    tracing::warn!(symbol = %req.symbol, broker_id = %res.broker_id, "30회 폴링 후에도 미체결 — 주문 취소 시도");
+                                    tracing::info!(symbol = %req.symbol, broker_id = %res.broker_id, "30회 폴링 후 미체결 — 체결 재확인 시도 (VTS 딜레이 가능)");
                                     let cancel_order = UnifiedUnfilledOrder {
                                         order_no: res.broker_id.clone(),
                                         symbol: req.symbol.clone(),
@@ -529,26 +529,31 @@ async fn process_single_order(
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::warn!(symbol = %req.symbol, "StillOpen 취소 API 오류({e}) — 체결 여부 재확인 (VTS 반영 대기)");
-                                            // VTS는 체결 내역 API 반영에 수십 초가 걸릴 수 있음 — 단계적으로 재확인
-                                            let delays = [15u64, 25, 35];
+                                            let err = e.to_string();
                                             let mut maybe_fill = None;
-                                            for delay in delays {
-                                                tokio::time::sleep(std::time::Duration::from_secs(
-                                                    delay,
-                                                ))
-                                                .await;
-                                                let recheck = adapter
-                                                    .poll_order_status(
-                                                        &res.broker_id,
-                                                        &req.symbol,
-                                                        req.qty,
+                                            if err.contains("IGW00014") {
+                                                tracing::debug!(symbol = %req.symbol, "취소 불가(IGW00014) — 체결됨으로 간주, balance fallback");
+                                            } else {
+                                                tracing::warn!(symbol = %req.symbol, "StillOpen 취소 API 오류({e}) — 체결 여부 재확인");
+                                                // VTS는 체결 내역 API 반영에 수십 초가 걸릴 수 있음 — 단계적으로 재확인
+                                                let delays = [15u64, 25, 35];
+                                                for delay in delays {
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_secs(delay),
                                                     )
                                                     .await;
-                                                tracing::info!(symbol = %req.symbol, delay, "40330000 재확인: {:?}", recheck);
-                                                if let Some(fill) = handle_recheck(recheck) {
-                                                    maybe_fill = Some(fill);
-                                                    break;
+                                                    let recheck = adapter
+                                                        .poll_order_status(
+                                                            &res.broker_id,
+                                                            &req.symbol,
+                                                            req.qty,
+                                                        )
+                                                        .await;
+                                                    tracing::debug!(symbol = %req.symbol, delay, outcome = ?recheck, "체결 재확인");
+                                                    if let Some(fill) = handle_recheck(recheck) {
+                                                        maybe_fill = Some(fill);
+                                                        break;
+                                                    }
                                                 }
                                             }
                                             if let Some((fq, fp)) = maybe_fill {
@@ -570,12 +575,39 @@ async fn process_single_order(
                                                 return Some(fp);
                                             } else {
                                                 // balance API fallback: inquire_daily_ccld보다 즉각 반영
-                                                let balance_check =
-                                                    adapter.balance().await.ok().and_then(|b| {
-                                                        b.positions
+                                                let balance_retry_delays: &[u64] =
+                                                    if err.contains("IGW00014") {
+                                                        &[0, 10, 20, 40]
+                                                    } else {
+                                                        &[0]
+                                                    };
+                                                let mut balance_check = None;
+                                                let mut sell_absent_from_balance = false;
+                                                for delay in balance_retry_delays {
+                                                    if *delay > 0 {
+                                                        tokio::time::sleep(
+                                                            std::time::Duration::from_secs(*delay),
+                                                        )
+                                                        .await;
+                                                    }
+                                                    if let Ok(balance) = adapter.balance().await {
+                                                        balance_check = balance
+                                                            .positions
                                                             .into_iter()
-                                                            .find(|p| p.symbol == req.symbol)
-                                                    });
+                                                            .find(|p| p.symbol == req.symbol);
+                                                        sell_absent_from_balance = req.side
+                                                            == Side::Sell
+                                                            && err.contains("IGW00014")
+                                                            && balance_check.is_none();
+                                                    }
+                                                    if balance_check.is_some() {
+                                                        break;
+                                                    }
+                                                    if sell_absent_from_balance {
+                                                        break;
+                                                    }
+                                                    tracing::debug!(symbol = %req.symbol, delay, "balance fallback 미확인 — 재시도 대기");
+                                                }
                                                 if let Some(pos) = balance_check {
                                                     let fq = pos
                                                         .qty
@@ -605,6 +637,11 @@ async fn process_single_order(
                                                         })
                                                         .await;
                                                     return Some(fp);
+                                                } else if sell_absent_from_balance {
+                                                    tracing::info!(symbol = %req.symbol, qty = req.qty, "balance fallback 매도 확인 — 잔고에서 종목 없음");
+                                                    let _ = sqlx::query("UPDATE orders SET state = 'Filled', filled_qty = ?, filled_price = ?, updated_at = ? WHERE id = ?")
+                                                        .bind(req.qty as i64).bind(Decimal::ZERO.to_string()).bind(&ts).bind(&order_id).execute(db_pool).await;
+                                                    return Some(Decimal::ZERO);
                                                 } else {
                                                     tracing::warn!(symbol = %req.symbol, "취소 오류 + 체결 미확인 — Failed 처리 (balance sync에서 orphaned 복구 대기)");
                                                     let _ = sqlx::query("UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?").bind(&ts).bind(&order_id).execute(db_pool).await;

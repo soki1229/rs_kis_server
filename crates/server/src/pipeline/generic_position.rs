@@ -395,6 +395,10 @@ pub async fn run_generic_position_task(
                         .bind(&now)
                         .execute(&mut *tx)
                         .await?;
+                    sqlx::query("DELETE FROM positions WHERE symbol = ?")
+                        .bind(&symbol)
+                        .execute(&mut *tx)
+                        .await?;
                     sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .bind(&pos_id)
                         .bind(&recovery_order_id)
@@ -652,6 +656,7 @@ pub async fn run_generic_position_task(
                         }
                     }
                     let now = chrono::Utc::now().to_rfc3339();
+                    sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
                     if let Err(e) = sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, holding_type, max_holding_days, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .bind(uuid::Uuid::new_v4().to_string())
                         .bind(&fill.order_id)

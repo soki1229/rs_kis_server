@@ -85,6 +85,7 @@ struct SignalState {
 struct SignalContext {
     symbol: String,
     market: MarketId,
+    entry_cutoff_utc: Option<chrono::DateTime<chrono::Utc>>,
     db_pool: sqlx::SqlitePool,
     order_tx: mpsc::Sender<OrderRequest>,
     regime: MarketRegime,
@@ -101,6 +102,22 @@ struct SignalContext {
     risk_strategy: Arc<dyn RiskStrategy>,
     live_state_rx: watch::Receiver<crate::state::MarketLiveState>,
     last_order_sent: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+}
+
+fn entry_cutoff_utc(
+    adapter: &dyn MarketAdapter,
+    entry_blackout_close_mins: u32,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    adapter
+        .market_close_utc(adapter.local_today())
+        .map(|close| close - chrono::Duration::minutes(i64::from(entry_blackout_close_mins)))
+}
+
+fn is_entry_blackout(
+    now: chrono::DateTime<chrono::Utc>,
+    cutoff_utc: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    cutoff_utc.is_some_and(|cutoff| now >= cutoff)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,6 +153,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     let SignalContext {
         symbol,
         market,
+        entry_cutoff_utc,
         db_pool,
         order_tx,
         regime,
@@ -163,6 +181,27 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     };
 
     let current_price = last.close;
+    if is_entry_blackout(chrono::Utc::now(), entry_cutoff_utc) {
+        tracing::info!(
+            market = %market.label(),
+            symbol = %symbol,
+            "신규 진입 skip — 장마감 진입금지 구간"
+        );
+        activity.record_eval(market.label(), &symbol, 0, "skip", "entry_blackout_close");
+        log_signal(
+            &db_pool,
+            &symbol,
+            0,
+            None,
+            None,
+            "skip",
+            Some("entry_blackout_close"),
+            &format!("{:?}", regime),
+        )
+        .await;
+        return;
+    }
+
     let rolling_high = completed
         .iter()
         .map(|c| c.high)
@@ -262,10 +301,11 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     };
     let regime_str = format!("{:?}", regime);
     tracing::info!(
-        "[{}] 📶 신호 발생: {} score={} {:?} @ {}",
+        "[{}] 📶 신호 후보: {} setup_score={} strength={:.2} {:?} @ {}",
         market.label(),
         symbol,
         trade_signal.setup_score.unwrap_or(0),
+        trade_signal.strength,
         trade_signal.direction,
         current_price
     );
@@ -312,14 +352,23 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
     .unwrap_or(0)
         > 0;
     if already_held || has_pending_order {
-        tracing::debug!(
-            "[{}] {} 이미 보유/주문 대기 중 → 중복 매수 skip (held={}, pending={})",
-            market.label(),
-            symbol,
+        let reason = match (already_held, has_pending_order) {
+            (true, true) => "already_held_and_pending",
+            (true, false) => "already_held",
+            (false, true) => "pending_order",
+            (false, false) => "unknown",
+        };
+        tracing::info!(
+            market = %market.label(),
+            symbol = %symbol,
+            setup_score,
+            strength = trade_signal.strength,
             already_held,
             has_pending_order,
+            reason,
+            "신규 진입 skip — 이미 보유 중이거나 제출 대기 주문 존재"
         );
-        activity.record_eval(market.label(), &symbol, score, "skip", "already_held");
+        activity.record_eval(market.label(), &symbol, score, "skip", reason);
         log_signal(
             &db_pool,
             &symbol,
@@ -327,7 +376,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             Some(direction_str),
             Some(trade_signal.strength),
             "skip",
-            Some("already_held"),
+            Some(reason),
             &regime_str,
         )
         .await;
@@ -395,6 +444,10 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             market = %market.label(),
             symbol = %symbol,
             balance = %account_balance,
+            open_positions = portfolio.open_position_count,
+            held_symbols = %portfolio.positions.iter().map(|p| p.symbol.as_str()).collect::<Vec<_>>().join(","),
+            setup_score,
+            strength = trade_signal.strength,
             "수량 산출 0 — 잔고 부족 또는 리스크 제한으로 주문 skip"
         );
         activity.record_eval(market.label(), &symbol, score, "skip", "qty_zero");
@@ -520,6 +573,7 @@ pub async fn run_signal_task(
     mut watchlist_rx: watch::Receiver<WatchlistSet>,
     summary: Arc<StdRwLock<crate::state::MarketSummary>>,
     signal_cfg: crate::config::SignalConfig,
+    entry_blackout_close_mins: u32,
     strategies: Vec<crate::config::StrategyProfile>,
     activity: crate::shared::activity::ActivityLog,
     notion: Option<Arc<TokioRwLock<crate::notion::NotionClient>>>,
@@ -572,15 +626,12 @@ pub async fn run_signal_task(
                 let candle = state.candles.entry(tick.symbol.clone()).or_insert_with(CandleAccumulator::new);
                 candle.push(tick.clone());
                 if state.candle_start.entry(tick.symbol.clone()).or_insert_with(Instant::now).elapsed() >= candle_interval && candle.is_signal_eligible() {
-                    // 장 마감 후 신호 평가 차단
-                    let today = adapter.local_today();
-                    if let Some(close_utc) = adapter.market_close_utc(today) {
-                        if chrono::Utc::now() >= close_utc {
-                            tracing::debug!("[{market_id}] 장 마감 후 캔들 → 신호 평가 skip ({})", tick.symbol);
-                            candle.reset();
-                            state.candle_start.insert(tick.symbol.clone(), Instant::now());
-                            continue;
-                        }
+                    let entry_cutoff_utc = entry_cutoff_utc(adapter.as_ref(), entry_blackout_close_mins);
+                    if is_entry_blackout(chrono::Utc::now(), entry_cutoff_utc) {
+                        tracing::debug!("[{market_id}] 장마감 진입금지 구간 캔들 → 신호 평가 skip ({})", tick.symbol);
+                        candle.reset();
+                        state.candle_start.insert(tick.symbol.clone(), Instant::now());
+                        continue;
                     }
                     tracing::info!("[{market_id}] 🕯️ {} O={} H={} L={} C={} V={}", tick.symbol, candle.open, candle.high, candle.low, candle.close, candle.volume);
                     let completed_candle = CompletedCandle { open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume, ts: tick.timestamp };
@@ -631,7 +682,7 @@ pub async fn run_signal_task(
                         let _guard = PendingGuard(ps_clone, sym_for_guard);
                         for strategy in strategies_snap {
                             evaluate_and_maybe_order(SignalContext {
-                                symbol: sym_for_eval.clone(), market: market_id, db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
+                                symbol: sym_for_eval.clone(), market: market_id, entry_cutoff_utc, db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
                                 completed: completed_snap.clone(), quote: quote_snap.clone(),
                                 summary: summary_clone.clone(), account_balance, exchange_code: ex_code.clone(),
                                 strategy, activity: act.clone(), notion: notion_clone.clone(),
@@ -870,7 +921,77 @@ mod tests {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
         sqlx::query("CREATE TABLE daily_ohlc (symbol TEXT, name TEXT, date TEXT, open TEXT, high TEXT, low TEXT, close TEXT, volume TEXT, PRIMARY KEY(symbol, date))")
             .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE signal_log (symbol TEXT, setup_score INTEGER, rule_direction TEXT, rule_strength REAL, action TEXT, llm_block_reason TEXT, regime TEXT, logged_at TEXT)")
+            .execute(&pool).await.unwrap();
         pool
+    }
+
+    #[test]
+    fn test_entry_blackout_after_cutoff() {
+        let now = chrono::Utc::now();
+        assert!(is_entry_blackout(
+            now,
+            Some(now - chrono::Duration::minutes(1))
+        ));
+        assert!(!is_entry_blackout(
+            now,
+            Some(now + chrono::Duration::minutes(1))
+        ));
+        assert!(!is_entry_blackout(now, None));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_skips_orders_in_entry_blackout() {
+        let db = setup_test_db().await;
+        let (order_tx, mut order_rx) = mpsc::channel(1);
+        let (_live_tx, live_state_rx) = watch::channel(crate::state::MarketLiveState::default());
+        let summary = Arc::new(StdRwLock::new(crate::state::MarketSummary::new()));
+        summary.write().unwrap().bot_state = crate::state::BotState::Active;
+
+        evaluate_and_maybe_order(SignalContext {
+            symbol: "GOOGL".into(),
+            market: MarketId::Us,
+            entry_cutoff_utc: Some(chrono::Utc::now() - chrono::Duration::minutes(1)),
+            db_pool: db.clone(),
+            order_tx,
+            regime: MarketRegime::Trending,
+            completed: vec![CompletedCandle {
+                open: dec!(100),
+                high: dec!(102),
+                low: dec!(99),
+                close: dec!(101),
+                volume: 1000,
+                ts: chrono::Utc::now(),
+            }],
+            quote: None,
+            summary,
+            account_balance: dec!(100000),
+            exchange_code: Some("NASD".into()),
+            strategy: crate::config::StrategyProfile {
+                id: "test".into(),
+                allocation_pct: dec!(1.0),
+                setup_score_min: 60,
+                regime_filter: true,
+                aggressive_mode: false,
+                holding_days_target: 5,
+            },
+            activity: crate::shared::activity::ActivityLog::new(),
+            notion: None,
+            signal_strategy: Arc::new(AlwaysBuySignal),
+            qual_strategy: Arc::new(AlwaysPassQual),
+            risk_strategy: Arc::new(FixedQtyRisk(dec!(10))),
+            live_state_rx,
+            last_order_sent: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        })
+        .await;
+
+        assert!(order_rx.try_recv().is_err());
+        let reason: String =
+            sqlx::query_scalar("SELECT llm_block_reason FROM signal_log WHERE symbol = 'GOOGL'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(reason, "entry_blackout_close");
     }
 
     #[tokio::test]
