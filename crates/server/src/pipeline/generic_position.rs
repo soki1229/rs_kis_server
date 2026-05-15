@@ -337,8 +337,10 @@ pub async fn run_generic_position_task(
                 let stop = (entry - pos_cfg.stop_atr_multiplier * atr)
                     .max(entry - entry * max_stop_pct)
                     .max(entry * dec!(0.85));
-                let pt1 = entry + pos_cfg.profit_target_1_atr * atr;
-                let pt2 = entry + pos_cfg.profit_target_2_atr * atr;
+                // 실제 위험(entry - stop) 기준으로 목표가 계산 (R:R 일관성 유지)
+                let actual_risk = (entry - stop).max(dec!(0.01));
+                let pt1 = entry + pos_cfg.profit_target_1_atr * actual_risk;
+                let pt2 = entry + pos_cfg.profit_target_2_atr * actual_risk;
                 let exchange_code = if matches!(
                     market_id,
                     crate::market::MarketId::Kr | crate::market::MarketId::KrVts
@@ -615,8 +617,12 @@ pub async fn run_generic_position_task(
                     let stop_price = (current_price - atr * pos_cfg.stop_atr_multiplier)
                         .max(current_price - current_price * max_stop_pct)
                         .max(current_price * rust_decimal_macros::dec!(0.85));
-                    let pt1 = current_price + atr * pos_cfg.profit_target_1_atr;
-                    let pt2 = current_price + atr * pos_cfg.profit_target_2_atr;
+                    // 실제 위험(entry - stop) 기준으로 목표가 계산.
+                    // ATR이 큰 종목(KR 주식 등)에서 % 상한으로 stop이 좁아진 경우에도
+                    // R:R 비율이 유지되도록 actual_risk를 기준으로 pt 산출.
+                    let actual_risk = (current_price - stop_price).max(rust_decimal_macros::dec!(0.01));
+                    let pt1 = current_price + pos_cfg.profit_target_1_atr * actual_risk;
+                    let pt2 = current_price + pos_cfg.profit_target_2_atr * actual_risk;
 
                     let entered_date = chrono::Utc::now()
                         .with_timezone(&chrono_tz::Asia::Seoul)
