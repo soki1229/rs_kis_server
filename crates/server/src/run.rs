@@ -382,19 +382,21 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             kr_db_pool.clone(),
             t,
             {
-                // EOD fallback: 장 종료 5분 전 — throttler+TWAP 처리 시간 확보
+                // KR EOD fallback: 정규 연속매매 종료(15:20) 2분 전 발동 — 동시호가(15:20~15:30) 진입 전
+                // market_close_utc = 15:30(동시호가 포함), 실제 일반 주문 마감은 15:20
+                // close - 12min = 15:18 → 동시호가 직전, 정상 체결 가능 구간
                 let now = chrono::Utc::now();
                 let close = kr_adapter
                     .market_close_utc(kr_adapter.local_today())
                     .unwrap()
-                    - chrono::Duration::minutes(5);
+                    - chrono::Duration::minutes(12);
                 if close > now {
                     close
                 } else {
                     kr_adapter
                         .market_close_utc(kr_adapter.local_today() + chrono::Duration::days(1))
                         .unwrap()
-                        - chrono::Duration::minutes(5)
+                        - chrono::Duration::minutes(12)
                 }
             },
             cfg.position.clone(),

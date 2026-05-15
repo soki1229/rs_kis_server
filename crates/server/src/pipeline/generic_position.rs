@@ -561,8 +561,9 @@ pub async fn run_generic_position_task(
                 let eod_symbols: Vec<String> = pos_states.keys().cloned().collect();
                 for symbol in &eod_symbols {
                     if let Some((state, qty)) = pos_states.get(symbol) {
-                        // VTS 시장가(price=None) 미체결 방지: last_prices 기준 지정가로 전송
-                        let price = last_prices.get(symbol).copied();
+                        // last_prices 없으면(봇 재시작 등) entry_price 폴백 — price=None(=0)은 호가단위 오류
+                        let price = last_prices.get(symbol).copied()
+                            .or(Some(state.entry_price));
                         if let Err(e) = force_order_tx.send(OrderRequest {
                             symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
                         }).await {
@@ -585,7 +586,9 @@ pub async fn run_generic_position_task(
                 let eod_symbols: Vec<String> = pos_states.keys().cloned().collect();
                 for symbol in &eod_symbols {
                     if let Some((state, qty)) = pos_states.get(symbol) {
-                        let price = last_prices.get(symbol).copied();
+                        // last_prices 없으면 entry_price 폴백
+                        let price = last_prices.get(symbol).copied()
+                            .or(Some(state.entry_price));
                         if let Err(e) = force_order_tx.send(OrderRequest {
                             symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
                         }).await {
@@ -613,7 +616,36 @@ pub async fn run_generic_position_task(
                     continue;
                 }
                 if fill.filled_qty == 0 {
-                    if let Some((state, _)) = pos_states.get_mut(&fill.symbol) {
+                    // EOD 발동 후 청산 실패 → 최대 3회 자동 재시도 (호가단위 오류 등 일시적 실패 대응)
+                    if eod_fallback_fired {
+                        if let Some((state, qty)) = pos_states.get_mut(&fill.symbol) {
+                            let retry = state.exit_timeout_count;
+                            state.exit_timeout_count += 1;
+                            state.exit_pending = false;
+                            state.exit_pending_since = None;
+                            if retry < 3 {
+                                let price = last_prices.get(&fill.symbol).copied()
+                                    .or(Some(state.entry_price));
+                                let exchange_code = state.exchange_code.clone();
+                                let qty = *qty;
+                                tracing::warn!(
+                                    symbol = %fill.symbol,
+                                    retry = retry + 1,
+                                    "EOD 청산 실패 — 재시도 ({}/3)", retry + 1
+                                );
+                                if force_order_tx.try_send(OrderRequest {
+                                    symbol: fill.symbol.clone(), side: Side::Sell, qty, price,
+                                    atr: None, exchange_code, strength: None,
+                                    is_short: false, max_holding_days: 0,
+                                }).is_ok() {
+                                    state.exit_pending = true;
+                                    state.exit_pending_since = Some(std::time::Instant::now());
+                                }
+                            } else {
+                                tracing::warn!(symbol = %fill.symbol, "EOD 청산 3회 재시도 초과 — 포기, 내일 개장 시 처리");
+                            }
+                        }
+                    } else if let Some((state, _)) = pos_states.get_mut(&fill.symbol) {
                         state.exit_pending = false;
                         state.exit_pending_since = None;
                         // exit_timeout_count는 유지 — 리셋하면 force_remove(count≥5) 카운트가 무한 초기화됨
