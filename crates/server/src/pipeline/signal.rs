@@ -596,6 +596,31 @@ pub async fn run_signal_task(
         pending_symbols: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         last_order_sent: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
+
+    // 봇 재시작 시 DB에서 최근 buy 주문 시간 복구 → 300초 쿨다운 지속성 유지
+    {
+        use sqlx::Row as _;
+        const COOLDOWN_SECS: u64 = 300;
+        if let Ok(rows) = sqlx::query(
+            "SELECT symbol, submitted_at FROM orders WHERE side = 'buy' AND submitted_at IS NOT NULL ORDER BY submitted_at DESC"
+        ).fetch_all(&db_pool).await {
+            let now_utc = chrono::Utc::now();
+            let mut los = state.last_order_sent.lock().unwrap();
+            for row in rows {
+                let sym: String = row.get("symbol");
+                let sat: String = row.get("submitted_at");
+                if los.contains_key(&sym) { continue; }
+                if let Ok(submitted) = chrono::DateTime::parse_from_rfc3339(&sat) {
+                    let elapsed = (now_utc - submitted.with_timezone(&chrono::Utc)).num_seconds().max(0) as u64;
+                    if elapsed < COOLDOWN_SECS {
+                        let fake_instant = Instant::now() - Duration::from_secs(elapsed);
+                        los.insert(sym, fake_instant);
+                    }
+                }
+            }
+        }
+    }
+
     let candle_interval = Duration::from_secs(signal_cfg.candle_interval_secs);
     let initial_wl = watchlist_rx.borrow().clone();
     state.watchlist = initial_wl.clone();

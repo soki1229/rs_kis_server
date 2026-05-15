@@ -810,9 +810,37 @@ pub async fn run_generic_position_task(
                             state.exit_pending_since = None;
                         }
                     } else {
-                        // balance에 없음 = 이미 매도 완료 (재시작 전 체결된 주문). 정상 정리.
-                        tracing::warn!(symbol = %tick.symbol, "exit_timeout: VTS 잔고 없음 확인 → DB 포지션 정리 (재시작 전 매도 완료 추정)");
-                        summary_alert.info(format!("✅ [{market_name}] {sym_label} VTS 잔고 없음 → 포지션 정리 완료 (재시작 전 매도)"));
+                        // balance에 없음 = 이미 매도 완료 (재시작 전 체결된 주문). 정상 정리 + PnL 기록.
+                        let exit_price = last_prices.get(&tick.symbol).copied().unwrap_or(Decimal::ZERO);
+                        if let Some((st, qty)) = pos_states.get(&tick.symbol) {
+                            let ep = st.entry_price;
+                            let xp = if exit_price > Decimal::ZERO { exit_price } else { ep };
+                            let pnl = (xp - ep) * Decimal::from(*qty);
+                            let commission = calculate_commission(market_id, ep, xp, *qty, adapter.fx_spread_pct());
+                            let net_pnl = pnl - commission;
+                            let pnl_pct = if ep > Decimal::ZERO { ((xp - ep) / ep * Decimal::from(100)).to_f64().unwrap_or(0.0) } else { 0.0 };
+                            let net_pnl_f = net_pnl.to_f64().unwrap_or(0.0);
+                            let now_rfc = chrono::Utc::now().to_rfc3339();
+                            sqlx::query("INSERT INTO realized_pnl_log (id, symbol, market, qty, entry_price, exit_price, pnl, pnl_pct, commission, net_pnl, exit_reason, exited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                                .bind(uuid::Uuid::new_v4().to_string())
+                                .bind(&tick.symbol)
+                                .bind(market_name)
+                                .bind(qty.to_string())
+                                .bind(ep.to_string())
+                                .bind(xp.to_string())
+                                .bind(pnl.to_string())
+                                .bind(pnl_pct)
+                                .bind(commission.to_string())
+                                .bind(net_pnl.to_string())
+                                .bind("ExitTimeout")
+                                .bind(&now_rfc)
+                                .execute(&db_pool).await.ok();
+                            realized_today += net_pnl_f;
+                            realized_month += net_pnl_f;
+                            realized_total += net_pnl_f;
+                            tracing::warn!(symbol = %tick.symbol, pnl_pct = %format!("{pnl_pct:.2}%"), "exit_timeout: VTS 잔고 없음 확인 → DB 포지션 정리 (재시작 전 매도 완료 추정)");
+                            summary_alert.info(format!("✅ [{market_name}] {sym_label} VTS 잔고 없음 → 정리 완료 ({pnl_pct:+.2}%)"));
+                        }
                         pos_states.remove(&tick.symbol);
                         sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&tick.symbol).execute(&db_pool).await.ok();
                     }
