@@ -40,6 +40,13 @@ impl std::fmt::Display for MarketRegime {
 
 // ── Watchlist ─────────────────────────────────────────────────────────────
 
+/// 런타임 워치리스트 덮어쓰기 패치. REST API로 주입, scheduler가 빌드 시 반영.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WatchlistPatch {
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct WatchlistSet {
     pub stable: Vec<String>,

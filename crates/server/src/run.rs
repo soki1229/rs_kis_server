@@ -208,6 +208,8 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         us_state.clone(),
         kr_pipeline.control_tx.clone(),
         us_pipeline.control_tx.clone(),
+        kr_pipeline.watchlist_rx.clone(),
+        us_pipeline.watchlist_rx.clone(),
         secrets.rest_admin_token.clone(),
         token.clone(),
     ));
@@ -282,6 +284,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             &cfg.kr,
             &kr_alert_router,
             &kr_db_pool,
+            &kr_state.watchlist_patch,
         )
         .await;
         pipeline::signal::seed_symbols(
@@ -422,6 +425,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
             &cfg.us,
             &us_alert_router,
             &us_db_pool,
+            &us_state.watchlist_patch,
         )
         .await;
         pipeline::signal::seed_symbols(
@@ -559,6 +563,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         kr_pipeline.summary_alert.clone(),
         activity.clone(),
         kr_db_pool.clone(),
+        kr_state.watchlist_patch.clone(),
         t,
     )));
 
@@ -574,6 +579,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
         us_pipeline.summary_alert.clone(),
         activity,
         us_db_pool.clone(),
+        us_state.watchlist_patch.clone(),
         t,
     )));
 

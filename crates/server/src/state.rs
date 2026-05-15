@@ -1,4 +1,4 @@
-use crate::types::Position;
+use crate::types::{Position, WatchlistPatch};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{watch, Notify};
@@ -85,6 +85,8 @@ pub struct PipelineConfig {
     pub activity: crate::shared::activity::ActivityLog,
     /// /status 즉시 갱신 신호 — Telegram이 notify, PositionTask가 balance 재조회 후 publish
     pub refresh_notify: Arc<Notify>,
+    /// 런타임 워치리스트 패치 — REST가 쓰고 scheduler가 읽어 반영
+    pub watchlist_patch: Arc<RwLock<WatchlistPatch>>,
 }
 
 impl PipelineConfig {
@@ -96,6 +98,7 @@ impl PipelineConfig {
             summary: Arc::new(RwLock::new(MarketSummary::new())),
             activity,
             refresh_notify: Arc::new(Notify::new()),
+            watchlist_patch: Arc::new(RwLock::new(WatchlistPatch::default())),
         }
     }
 
@@ -107,6 +110,7 @@ impl PipelineConfig {
             summary: self.summary,
             activity: self.activity,
             refresh_notify: self.refresh_notify,
+            watchlist_patch: self.watchlist_patch,
         };
         (self.live_state_tx, state)
     }
@@ -134,6 +138,8 @@ pub struct PipelineState {
     pub activity: crate::shared::activity::ActivityLog,
     /// /status 즉시 갱신 신호 — Telegram이 notify, PositionTask가 balance 재조회 후 publish
     pub refresh_notify: Arc<Notify>,
+    /// 런타임 워치리스트 패치 — REST가 쓰고 scheduler가 읽어 반영
+    pub watchlist_patch: Arc<RwLock<WatchlistPatch>>,
 }
 
 impl PipelineState {

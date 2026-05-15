@@ -2,10 +2,10 @@ use crate::config::MarketConfig;
 use crate::market::MarketAdapter;
 use crate::monitoring::alert::AlertRouter;
 use crate::strategy::DiscoveryStrategy;
-use crate::types::WatchlistSet;
+use crate::types::{WatchlistPatch, WatchlistSet};
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub async fn build_watchlist(
@@ -14,6 +14,7 @@ pub async fn build_watchlist(
     cfg: &MarketConfig,
     _alert: &AlertRouter,
     db: &SqlitePool,
+    watchlist_patch: &Arc<RwLock<WatchlistPatch>>,
 ) -> WatchlistSet {
     let mut dynamic = strategy
         .build_watchlist(adapter.clone(), cfg.dynamic_watchlist_size)
@@ -43,7 +44,19 @@ pub async fn build_watchlist(
         stable: dynamic,
         aggressive: vec![],
     };
-    merge_with_protected_symbols(fresh, db, cfg).await
+    let mut result = merge_with_protected_symbols(fresh, db, cfg).await;
+
+    // 런타임 패치 적용: add는 stable 앞에 삽입, remove는 stable/aggressive 모두에서 제거
+    let patch = watchlist_patch.read().unwrap();
+    for sym in patch.add.iter().rev() {
+        if !result.stable.contains(sym) {
+            result.stable.insert(0, sym.clone());
+        }
+    }
+    result.stable.retain(|s| !patch.remove.contains(s));
+    result.aggressive.retain(|s| !patch.remove.contains(s));
+
+    result
 }
 
 /// KR: daily_ohlc 종목명에 레버리지/선물/ETN/2x인버스 키워드가 포함된 종목을 블랙리스트로 반환.
@@ -136,6 +149,7 @@ pub async fn run_scheduler_task(
     summary_alert: AlertRouter,
     activity: crate::shared::activity::ActivityLog,
     db: SqlitePool,
+    watchlist_patch: Arc<RwLock<WatchlistPatch>>,
     token: CancellationToken,
 ) {
     let market_label = adapter.market_id().label();
@@ -168,8 +182,15 @@ pub async fn run_scheduler_task(
             sleep_until_next_day(&token).await;
         } else if now >= pre_open {
             activity.set_phase(market_label, "장 중");
-            let merged =
-                build_watchlist(adapter.clone(), &discovery_strategy, &config, &alert, &db).await;
+            let merged = build_watchlist(
+                adapter.clone(),
+                &discovery_strategy,
+                &config,
+                &alert,
+                &db,
+                &watchlist_patch,
+            )
+            .await;
             if merged != *watchlist_tx.borrow() {
                 activity.set_watchlist(market_label, &merged.all_unique());
                 watchlist_tx.send(merged.clone()).ok();
@@ -366,7 +387,10 @@ mod tests {
             symbol_blacklist: vec![],
         };
 
-        let wl = build_watchlist(adapter, &discovery, &config, &alert, &db).await;
+        let patch = Arc::new(std::sync::RwLock::new(
+            crate::types::WatchlistPatch::default(),
+        ));
+        let wl = build_watchlist(adapter, &discovery, &config, &alert, &db, &patch).await;
         assert!(wl.stable.contains(&"AAPL".to_string()));
         assert!(wl.stable.contains(&"POS1".to_string()));
     }
