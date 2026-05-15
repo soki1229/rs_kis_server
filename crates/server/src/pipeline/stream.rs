@@ -161,17 +161,15 @@ async fn run_connection_loop(inner: Arc<StreamInner>, mut cmd_rx: mpsc::Receiver
         // If the last disconnect was due to OPSP8996 (key already in use),
         // refresh the approval_key before reconnecting and wait longer.
         if inner.key_in_use.swap(false, Ordering::Relaxed) {
-            tracing::info!(
-                "WS: ALREADY IN USE detected — refreshing approval_key before reconnect"
-            );
+            tracing::info!("WS: approval key 무효 — 30초 대기 후 재발급");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             match inner.kis_client.approval_key().await {
                 Ok(new_key) => {
                     *inner.approval_key.write().await = new_key;
-                    tracing::info!("WS: approval_key refreshed");
+                    tracing::info!("WS: approval_key 재발급 완료");
                 }
-                Err(e) => tracing::warn!("WS: approval_key refresh failed: {e}"),
+                Err(e) => tracing::warn!("WS: approval_key 재발급 실패: {e}"),
             }
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
 
         tracing::info!("WS 접속 중...");
@@ -401,6 +399,17 @@ fn log_server_json_response(text: &str) -> bool {
                 msg_cd,
                 msg1,
                 "WS: ALREADY IN USE — will refresh key"
+            );
+            true
+        } else if msg_cd == "OPSP0011" {
+            // invalid approval key — refresh before next reconnect
+            tracing::warn!(
+                tr_id,
+                tr_key,
+                rt_cd,
+                msg_cd,
+                msg1,
+                "WS: INVALID APPROVAL — will refresh key"
             );
             true
         } else if !rt_cd.is_empty() {
