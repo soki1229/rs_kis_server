@@ -154,7 +154,7 @@ async fn process_order(
                 ..req.clone()
             };
 
-            if i > 0 {
+            if i > 0 && twap_cfg.delay_secs_per_slice > 0 {
                 let delay_ms = rand::random::<u64>() % (twap_cfg.delay_secs_per_slice * 1000);
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
@@ -824,7 +824,28 @@ async fn reconcile_submitted_orders(
                         tracing::error!(order_id = %order_id, "Reconcile: 'Cancelled' 상태 DB 업데이트 실패: {e}");
                     }
                 }
-                _ => {}
+                _ => {
+                    // StillOpen / PartialFilled: VTS 딜레이로 체결 미반영 가능.
+                    // Failed 처리 후 FillInfo(qty=0) 전송 → balance sync에서 포지션 복구.
+                    tracing::warn!(order_id = %order_id, symbol = %symbol, "reconcile: StillOpen — Failed 처리 (체결 시 balance sync에서 orphaned 복구 예정)");
+                    let _ = sqlx::query(
+                        "UPDATE orders SET state = 'Failed', updated_at = ? WHERE id = ?",
+                    )
+                    .bind(chrono::Utc::now().to_rfc3339())
+                    .bind(&order_id)
+                    .execute(db_pool)
+                    .await;
+                    let _ = fill_tx.try_send(FillInfo {
+                        order_id: order_id.clone(),
+                        symbol: symbol.clone(),
+                        filled_qty: 0,
+                        filled_price: Decimal::ZERO,
+                        exchange_code: ex_code,
+                        atr,
+                        fatal: false,
+                        max_holding_days,
+                    });
+                }
             },
             Err(e) => {
                 tracing::warn!("Reconciliation failed for {}: {}", symbol, e);

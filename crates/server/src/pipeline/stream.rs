@@ -355,14 +355,14 @@ fn parse_time(hms: &str, tr_id: &str) -> Option<DateTime<Utc>> {
         let now_kst = Utc::now().with_timezone(&Seoul);
         Seoul
             .from_local_datetime(&now_kst.date_naive().and_time(time))
-            .single()
+            .earliest()
             .map(|dt| dt.with_timezone(&Utc))
     } else {
         use chrono_tz::America::New_York;
         let now_ny = Utc::now().with_timezone(&New_York);
         New_York
             .from_local_datetime(&now_ny.date_naive().and_time(time))
-            .single()
+            .earliest()
             .map(|dt| dt.with_timezone(&Utc))
     }
 }

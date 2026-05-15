@@ -722,7 +722,7 @@ async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
             msg: format!("kr balance: {}", e),
         })?;
 
-    let positions = resp
+    let positions: Vec<UnifiedPosition> = resp
         .output1
         .iter()
         .map(|item| UnifiedPosition {
@@ -742,8 +742,10 @@ async fn kr_balance(base: &KrMarketBase) -> Result<UnifiedBalance, BotError> {
         .map(|o| o.dnca_tot_amt)
         .unwrap_or(Decimal::ZERO);
 
+    let position_value: Decimal = positions.iter().map(|p| p.current_price * p.qty).sum();
+
     Ok(UnifiedBalance {
-        total_equity: cash,
+        total_equity: cash + position_value,
         available_cash: cash,
         positions,
     })

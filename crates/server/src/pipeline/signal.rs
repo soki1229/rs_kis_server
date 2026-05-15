@@ -585,6 +585,7 @@ pub async fn run_signal_task(
     token: tokio_util::sync::CancellationToken,
 ) {
     let eval_sem = Arc::new(tokio::sync::Semaphore::new(20));
+    let mut eval_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut state = SignalState {
         candles: HashMap::new(),
         completed: HashMap::new(),
@@ -631,8 +632,13 @@ pub async fn run_signal_task(
     let market_id = adapter.market_id();
 
     loop {
+        // 완료된 핸들 정리 (메모리 누수 방지)
+        eval_handles.retain(|h| !h.is_finished());
         tokio::select! {
-            _ = token.cancelled() => return,
+            _ = token.cancelled() => {
+                for h in eval_handles { h.abort(); }
+                return;
+            }
             Ok(_) = watchlist_rx.changed() => {
                 let wl_set = watchlist_rx.borrow().clone();
                 let new_wl = wl_set.all_unique();
@@ -701,7 +707,7 @@ pub async fn run_signal_task(
                     let q_strat = Arc::clone(&qual_strategy);
                     let r_strat = Arc::clone(&risk_strategy);
                     let live_rx = live_state_rx.clone();
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         let _permit = permit;
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
                         impl Drop for PendingGuard { fn drop(&mut self) { self.0.lock().unwrap().remove(&self.1); } }
@@ -718,6 +724,7 @@ pub async fn run_signal_task(
                             }).await;
                         }
                     });
+                    eval_handles.push(handle);
                     candle.reset(); state.candle_start.insert(tick.symbol.clone(), Instant::now());
                 }
             }
