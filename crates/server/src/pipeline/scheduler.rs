@@ -46,7 +46,8 @@ pub async fn build_watchlist(
     merge_with_protected_symbols(fresh, db, cfg).await
 }
 
-/// KR: daily_ohlc 종목명에 레버리지/인버스/선물/ETN 키워드가 포함된 종목을 블랙리스트로 반환.
+/// KR: daily_ohlc 종목명에 레버리지/선물/ETN/2x인버스 키워드가 포함된 종목을 블랙리스트로 반환.
+/// 1x 인버스 ETF(예: KODEX 인버스 114800)는 Volatile 하락장 대응을 위해 허용한다.
 async fn fetch_name_blacklist(db: &SqlitePool, market_id: crate::market::MarketId) -> Vec<String> {
     if !matches!(
         market_id,
@@ -58,7 +59,6 @@ async fn fetch_name_blacklist(db: &SqlitePool, market_id: crate::market::MarketI
         "SELECT DISTINCT symbol FROM daily_ohlc
          WHERE name IS NOT NULL
            AND (name LIKE '%레버리지%'
-             OR name LIKE '%인버스%'
              OR name LIKE '%선물%'
              OR name LIKE '%ETN%'
              OR name LIKE '%곱버스%')",
