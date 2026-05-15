@@ -108,6 +108,13 @@ pub async fn run_generic_execution_task(
     }
 }
 
+/// 취소 API 에러가 "이미 체결됨"을 의미하는지 판별.
+/// - IGW00014: US VTS — 주문 금액 확인 (체결 후 취소 불가)
+/// - 40330000: KR VTS — 모의투자 정정/취소할 수량이 없음 (이미 체결됨)
+fn is_already_filled_cancel_err(err: &str) -> bool {
+    err.contains("IGW00014") || err.contains("40330000")
+}
+
 async fn process_order(
     adapter: &dyn MarketAdapter,
     req: OrderRequest,
@@ -531,8 +538,8 @@ async fn process_single_order(
                                         Err(e) => {
                                             let err = e.to_string();
                                             let mut maybe_fill = None;
-                                            if err.contains("IGW00014") {
-                                                tracing::debug!(symbol = %req.symbol, "취소 불가(IGW00014) — 체결됨으로 간주, balance fallback");
+                                            if is_already_filled_cancel_err(&err) {
+                                                tracing::debug!(symbol = %req.symbol, "취소 불가({err}) — 체결됨으로 간주, balance fallback");
                                             } else {
                                                 tracing::warn!(symbol = %req.symbol, "StillOpen 취소 API 오류({e}) — 체결 여부 재확인");
                                                 // VTS는 체결 내역 API 반영에 수십 초가 걸릴 수 있음 — 단계적으로 재확인
@@ -575,12 +582,14 @@ async fn process_single_order(
                                                 return Some(fp);
                                             } else {
                                                 // balance API fallback: inquire_daily_ccld보다 즉각 반영
-                                                let balance_retry_delays: &[u64] =
-                                                    if err.contains("IGW00014") {
-                                                        &[0, 10, 20, 40]
-                                                    } else {
-                                                        &[0]
-                                                    };
+                                                let already_filled =
+                                                    is_already_filled_cancel_err(&err);
+                                                let balance_retry_delays: &[u64] = if already_filled
+                                                {
+                                                    &[0, 10, 20, 40]
+                                                } else {
+                                                    &[0]
+                                                };
                                                 let mut balance_check = None;
                                                 let mut sell_absent_from_balance = false;
                                                 for delay in balance_retry_delays {
@@ -597,7 +606,7 @@ async fn process_single_order(
                                                             .find(|p| p.symbol == req.symbol);
                                                         sell_absent_from_balance = req.side
                                                             == Side::Sell
-                                                            && err.contains("IGW00014")
+                                                            && already_filled
                                                             && balance_check.is_none();
                                                     }
                                                     if balance_check.is_some() {

@@ -68,14 +68,13 @@ impl KrMarketBase {
             }
             Ok(None) => PollOutcome::StillOpen,
             Err(e) => {
-                tracing::warn!(
-                    "KrMarketBase: order_status error for {}: {}",
+                // 네트워크 에러는 일시적 — StillOpen으로 처리해 다음 폴링 시도 유지
+                tracing::info!(
+                    "KrMarketBase: order_status 일시 에러 (재시도 예정) for {}: {}",
                     broker_order_no,
                     e
                 );
-                PollOutcome::Failed {
-                    reason: format!("order_status error: {}", e),
-                }
+                PollOutcome::StillOpen
             }
         }
     }
