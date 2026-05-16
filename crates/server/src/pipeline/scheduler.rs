@@ -159,8 +159,8 @@ pub async fn run_scheduler_task(
         let open = adapter.market_open_utc(today).unwrap();
         let close = adapter.market_close_utc(today).unwrap();
         let pre_open = open - chrono::Duration::hours(1);
-        // EOD fallback backup: close + 10분 (fallback 미발화 시 보조 트리거)
-        let post_close = close + chrono::Duration::minutes(10);
+        // VTS는 장 종료 시각에 주문을 차단하므로 5분 전에 EOD를 발화한다.
+        let post_close = close - chrono::Duration::minutes(5);
         let now = Utc::now();
 
         let current_wl = watchlist_tx.borrow().clone();
