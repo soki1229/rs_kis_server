@@ -216,7 +216,9 @@ pub async fn run_scheduler_task(
                 .await
                 .ok();
             }
-            tokio::select! { _ = token.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {} }
+            // post_close까지 남은 시간과 600s 중 짧은 쪽으로 sleep — EOD 발화 지연 방지
+            let secs = (post_close - Utc::now()).num_seconds().clamp(0, 600) as u64;
+            tokio::select! { _ = token.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {} }
         } else {
             activity.set_phase(market_label, "장 오픈 대기");
             watchlist_tx.send(WatchlistSet::default()).ok();
