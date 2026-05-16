@@ -172,6 +172,7 @@ mod tests {
             strength: None,
             is_short: false,
             max_holding_days: 5,
+            strategy_id: "stable".to_string(),
         };
         cmd_tx
             .send(BotCommand::ForceOrder(req.clone()))

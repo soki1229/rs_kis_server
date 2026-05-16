@@ -375,6 +375,7 @@ async fn process_single_order(
                                             atr: req.atr,
                                             fatal: false,
                                             max_holding_days: req.max_holding_days,
+                                            strategy_id: req.strategy_id.clone(),
                                         })
                                         .await
                                     {
@@ -404,6 +405,7 @@ async fn process_single_order(
                                             atr: req.atr,
                                             fatal: false,
                                             max_holding_days: req.max_holding_days,
+                                            strategy_id: req.strategy_id.clone(),
                                         })
                                         .await
                                     {
@@ -437,6 +439,7 @@ async fn process_single_order(
                                         atr: req.atr,
                                         fatal: false,
                                         max_holding_days: req.max_holding_days,
+                                        strategy_id: req.strategy_id.clone(),
                                     })
                                     .await;
                                 return None;
@@ -493,6 +496,7 @@ async fn process_single_order(
                                                 atr: req.atr,
                                                 fatal: false,
                                                 max_holding_days: req.max_holding_days,
+                                                strategy_id: req.strategy_id.clone(),
                                             });
                                         }
                                         Ok(false) => {
@@ -518,6 +522,7 @@ async fn process_single_order(
                                                         atr: req.atr,
                                                         fatal: false,
                                                         max_holding_days: req.max_holding_days,
+                                                        strategy_id: req.strategy_id.clone(),
                                                     })
                                                     .await;
                                                 return Some(fp);
@@ -532,6 +537,7 @@ async fn process_single_order(
                                                     atr: req.atr,
                                                     fatal: false,
                                                     max_holding_days: req.max_holding_days,
+                                                    strategy_id: req.strategy_id.clone(),
                                                 });
                                             }
                                         }
@@ -577,6 +583,7 @@ async fn process_single_order(
                                                         atr: req.atr,
                                                         fatal: false,
                                                         max_holding_days: req.max_holding_days,
+                                                        strategy_id: req.strategy_id.clone(),
                                                     })
                                                     .await;
                                                 return Some(fp);
@@ -643,6 +650,7 @@ async fn process_single_order(
                                                             atr: req.atr,
                                                             fatal: false,
                                                             max_holding_days: req.max_holding_days,
+                                                            strategy_id: req.strategy_id.clone(),
                                                         })
                                                         .await;
                                                     return Some(fp);
@@ -663,6 +671,7 @@ async fn process_single_order(
                                                         atr: req.atr,
                                                         fatal: false,
                                                         max_holding_days: req.max_holding_days,
+                                                        strategy_id: req.strategy_id.clone(),
                                                     });
                                                 }
                                             }
@@ -728,6 +737,7 @@ async fn process_single_order(
                         atr: req.atr,
                         fatal: true,
                         max_holding_days: req.max_holding_days,
+                        strategy_id: req.strategy_id.clone(),
                     })
                     .await;
             }
@@ -807,6 +817,7 @@ async fn reconcile_submitted_orders(
                                 exchange_code: ex_code,
                                 fatal: false,
                                 max_holding_days,
+                                strategy_id: "stable".to_string(),
                             })
                             .await
                         {
@@ -844,6 +855,7 @@ async fn reconcile_submitted_orders(
                         atr,
                         fatal: false,
                         max_holding_days,
+                        strategy_id: "stable".to_string(),
                     });
                 }
             },

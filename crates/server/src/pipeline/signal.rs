@@ -120,6 +120,20 @@ fn is_entry_blackout(
     cutoff_utc.is_some_and(|cutoff| now >= cutoff)
 }
 
+/// 전략이 해당 심볼을 담당하는지 판정.
+/// symbols 명시 → 해당 심볼만. symbols 비어있음 → 다른 전략이 claim하지 않은 심볼.
+fn strategy_owns_symbol(
+    strategy: &crate::config::StrategyProfile,
+    symbol: &str,
+    all_claimed: &std::collections::HashSet<String>,
+) -> bool {
+    if strategy.symbols.is_empty() {
+        !all_claimed.contains(symbol)
+    } else {
+        strategy.symbols.iter().any(|s| s == symbol)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn log_signal(
     db: &sqlx::SqlitePool,
@@ -271,6 +285,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
         regime: regime.clone(),
         setup_score_min: strategy.setup_score_min,
         regime_filter: strategy.regime_filter,
+        strategy_id: strategy_id.clone(),
     };
 
     let trade_signal = match signal_strategy.evaluate(&strategy_ctx).await {
@@ -424,6 +439,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
                     strength: None,
                     is_short: false,
                     max_holding_days: 0,
+                    strategy_id: strategy_id.clone(),
                 };
                 let _ = order_tx.send(sell_req).await;
                 log_signal(
@@ -545,6 +561,7 @@ async fn evaluate_and_maybe_order(ctx: SignalContext) {
             strength: Some(trade_signal.strength),
             is_short,
             max_holding_days: strategy.holding_days_target,
+            strategy_id: strategy_id.clone(),
         };
         if order_tx.send(req).await.is_ok() {
             last_order_sent
@@ -712,7 +729,20 @@ pub async fn run_signal_task(
                         struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
                         impl Drop for PendingGuard { fn drop(&mut self) { self.0.lock().unwrap().remove(&self.1); } }
                         let _guard = PendingGuard(ps_clone, sym_for_guard);
+                        // 모든 전략이 명시적으로 소유한 심볼 집합 (빈 symbols 전략의 catch-all 범위 계산용)
+                        let all_claimed: std::collections::HashSet<String> = strategies_snap
+                            .iter()
+                            .flat_map(|s| s.symbols.iter().cloned())
+                            .collect();
                         for strategy in strategies_snap {
+                            if !strategy_owns_symbol(&strategy, &sym_for_eval, &all_claimed) {
+                                tracing::debug!(
+                                    symbol = %sym_for_eval,
+                                    strategy = %strategy.id,
+                                    "symbol routing: skip (not owned by this strategy)"
+                                );
+                                continue;
+                            }
                             evaluate_and_maybe_order(SignalContext {
                                 symbol: sym_for_eval.clone(), market: market_id, entry_cutoff_utc, db_pool: pool.clone(), order_tx: order_tx.clone(), regime: regime.clone(),
                                 completed: completed_snap.clone(), quote: quote_snap.clone(),
@@ -932,6 +962,7 @@ mod tests {
                 atr: dec!(2.5),
                 setup_score: Some(80),
                 regime: None,
+                strategy_id: ctx.strategy_id.clone(),
             })
         }
     }
@@ -1007,6 +1038,13 @@ mod tests {
                 regime_filter: true,
                 aggressive_mode: false,
                 holding_days_target: 5,
+                symbols: vec![],
+                eod_liquidation: false,
+                stop_atr_multiplier: None,
+                trailing_atr_trending: None,
+                trailing_atr_volatile: None,
+                profit_target_1_atr: None,
+                profit_target_2_atr: None,
             },
             activity: crate::shared::activity::ActivityLog::new(),
             notion: None,
@@ -1136,6 +1174,7 @@ mod tests {
             regime: MarketRegime::Trending,
             setup_score_min: 60,
             regime_filter: true,
+            strategy_id: "stable".to_string(),
         };
 
         // 1. Signal
@@ -1181,6 +1220,7 @@ mod tests {
             atr: atr_value,
             setup_score: None,
             regime: None,
+            strategy_id: "stable".to_string(),
         };
 
         let req = OrderRequest {
@@ -1193,6 +1233,7 @@ mod tests {
             strength: None,
             is_short: false,
             max_holding_days: 5,
+            strategy_id: "stable".to_string(),
         };
         assert_eq!(req.atr, Some(atr_value));
 
@@ -1205,6 +1246,7 @@ mod tests {
             exchange_code: None,
             fatal: false,
             max_holding_days: 5,
+            strategy_id: "stable".to_string(),
         };
 
         let pos_cfg = crate::config::PositionConfig {

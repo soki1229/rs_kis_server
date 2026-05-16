@@ -128,10 +128,17 @@ pub struct OrderRequest {
     /// 목표 보유 일수 (swing: 1~5일, position: 7일+). 초과 시 강제 청산.
     #[serde(default = "default_holding_days_5")]
     pub max_holding_days: u32,
+    /// 이 주문을 발생시킨 전략 ID (positions DB 태깅용)
+    #[serde(default = "default_strategy_id")]
+    pub strategy_id: String,
 }
 
 fn default_holding_days_5() -> u32 {
     5
+}
+
+fn default_strategy_id() -> String {
+    "stable".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +164,9 @@ pub struct FillInfo {
     /// 목표 보유 일수 (swing: 1~5일, position: 7일+). 초과 시 강제 청산.
     #[serde(default = "default_holding_days_5")]
     pub max_holding_days: u32,
+    /// 이 주문을 발생시킨 전략 ID (positions DB 태깅용)
+    #[serde(default = "default_strategy_id")]
+    pub strategy_id: String,
 }
 
 // ── PnL ───────────────────────────────────────────────────────────────────

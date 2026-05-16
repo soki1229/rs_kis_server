@@ -47,6 +47,8 @@ pub struct PositionState {
     pub entered_date: chrono::NaiveDate,
     /// 청산 사유 (fill 수신 시 realized_pnl_log에 기록)
     pub pending_exit_reason: String,
+    /// 이 포지션을 생성한 전략 ID
+    pub strategy_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +123,19 @@ pub fn calculate_trailing_stop(
     Some(high_price - atr * multiplier)
 }
 
+/// 전략 ID로 per-strategy 포지션 파라미터를 조회. 미발견 시 전역 pos_cfg 폴백.
+fn find_strategy_params(
+    strategy_id: &str,
+    strategies: &[crate::config::StrategyProfile],
+    pos_cfg: &PositionConfig,
+) -> PositionConfig {
+    strategies
+        .iter()
+        .find(|s| s.id == strategy_id)
+        .map(|s| s.resolve_position_params(pos_cfg))
+        .unwrap_or_else(|| pos_cfg.clone())
+}
+
 /// Generic position task that works with any MarketAdapter.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_generic_position_task(
@@ -135,6 +150,7 @@ pub async fn run_generic_position_task(
     token: CancellationToken,
     eod_fallback: chrono::DateTime<chrono::Utc>,
     pos_cfg: PositionConfig,
+    strategies: Vec<crate::config::StrategyProfile>,
     summary_alert: AlertRouter,
     refresh_notify: std::sync::Arc<Notify>,
 ) {
@@ -186,7 +202,7 @@ pub async fn run_generic_position_task(
         );
 
     // Recover positions from DB
-    if let Ok(rows) = sqlx::query("SELECT symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, trailing_stop_price, partial_exit_done, regime_at_entry, qty, exchange_code, max_holding_days, entered_at FROM positions")
+    if let Ok(rows) = sqlx::query("SELECT symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, trailing_stop_price, partial_exit_done, regime_at_entry, qty, exchange_code, max_holding_days, entered_at, strategy_id FROM positions")
         .fetch_all(&db_pool)
         .await
     {
@@ -210,6 +226,7 @@ pub async fn run_generic_position_task(
                 .unwrap_or_else(|| {
                     chrono::Utc::now().with_timezone(&chrono_tz::Asia::Seoul).date_naive()
                 });
+            let strategy_id: String = row.try_get("strategy_id").unwrap_or_else(|_| "stable".to_string());
 
             let regime = match regime_str.as_str() {
                 "Volatile" => crate::types::MarketRegime::Volatile,
@@ -217,6 +234,7 @@ pub async fn run_generic_position_task(
                 _ => crate::types::MarketRegime::Trending,
             };
 
+            let strategy_pos_cfg = find_strategy_params(&strategy_id, &strategies, &pos_cfg);
             let state = PositionState {
                 entry_price: entry_price.parse().unwrap_or(Decimal::ZERO),
                 stop_price: stop_price.parse().unwrap_or(Decimal::ZERO),
@@ -226,10 +244,10 @@ pub async fn run_generic_position_task(
                 trailing_stop_price: ts.and_then(|s| s.parse().ok()),
                 partial_exit_done: partial != 0,
                 regime,
-                profit_target_1_atr: pos_cfg.profit_target_1_atr,
-                profit_target_2_atr: pos_cfg.profit_target_2_atr,
-                trailing_atr_trending: pos_cfg.trailing_atr_trending,
-                trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
+                profit_target_1_atr: strategy_pos_cfg.profit_target_1_atr,
+                profit_target_2_atr: strategy_pos_cfg.profit_target_2_atr,
+                trailing_atr_trending: strategy_pos_cfg.trailing_atr_trending,
+                trailing_atr_volatile: strategy_pos_cfg.trailing_atr_volatile,
                 exchange_code,
                 exit_pending: false,
                 exit_pending_since: None,
@@ -237,6 +255,7 @@ pub async fn run_generic_position_task(
                 max_holding_days,
                 entered_date,
                 pending_exit_reason: "Unknown".to_string(),
+                strategy_id,
             };
             pos_states.insert(symbol, (state, qty.parse().unwrap_or(0)));
         }
@@ -372,6 +391,7 @@ pub async fn run_generic_position_task(
                         .with_timezone(&chrono_tz::Asia::Seoul)
                         .date_naive(),
                     pending_exit_reason: "Unknown".to_string(),
+                    strategy_id: "stable".to_string(),
                 };
 
                 tracing::info!(
@@ -401,7 +421,7 @@ pub async fn run_generic_position_task(
                         .bind(&symbol)
                         .execute(&mut *tx)
                         .await?;
-                    sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, strategy_id, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .bind(&pos_id)
                         .bind(&recovery_order_id)
                         .bind(&symbol)
@@ -413,6 +433,7 @@ pub async fn run_generic_position_task(
                         .bind("Trending")
                         .bind(qty.to_string())
                         .bind(exchange_code)
+                        .bind("stable")
                         .bind(&now)
                         .bind(&now)
                         .execute(&mut *tx)
@@ -565,7 +586,7 @@ pub async fn run_generic_position_task(
                         let price = last_prices.get(symbol).copied()
                             .or(Some(state.entry_price));
                         if let Err(e) = force_order_tx.send(OrderRequest {
-                            symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
+                            symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0, strategy_id: state.strategy_id.clone(),
                         }).await {
                             tracing::error!(symbol = %symbol, error = %e, "EOD fallback: Failed to send force order for full exit");
                         }
@@ -582,26 +603,30 @@ pub async fn run_generic_position_task(
             }
             Some(_) = eod_rx.recv() => {
                 write_session_stats(&db_pool, market_name).await;
-                if !pos_cfg.eod_liquidation {
-                    tracing::info!(market = %market_name, "EOD trigger received — EOD liquidation disabled (swing mode), positions held overnight");
-                } else {
-                    tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
-                    let eod_symbols: Vec<String> = pos_states.keys().cloned().collect();
-                    for symbol in &eod_symbols {
-                        if let Some((state, qty)) = pos_states.get(symbol) {
-                            // last_prices 없으면 entry_price 폴백
-                            let price = last_prices.get(symbol).copied()
-                                .or(Some(state.entry_price));
-                            if let Err(e) = force_order_tx.send(OrderRequest {
-                                symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
-                            }).await {
-                                tracing::error!(symbol = %symbol, error = %e, "EOD trigger: Failed to send force order for full exit");
-                            }
+                tracing::info!(market = %market_name, "EOD trigger received — per-strategy eod_liquidation 적용");
+                let eod_symbols: Vec<String> = pos_states.keys().cloned().collect();
+                let now_inst = std::time::Instant::now();
+                for symbol in &eod_symbols {
+                    if let Some((state, qty)) = pos_states.get(symbol) {
+                        let strategy_cfg = find_strategy_params(&state.strategy_id, &strategies, &pos_cfg);
+                        if !strategy_cfg.eod_liquidation {
+                            tracing::debug!(
+                                market = %market_name, symbol = %symbol,
+                                strategy = %state.strategy_id,
+                                "EOD skip — strategy eod_liquidation=false"
+                            );
+                            continue;
                         }
-                    }
-                    // exit_pending 설정 — 이후 틱에서 중복 청산 주문 방지
-                    let now_inst = std::time::Instant::now();
-                    for symbol in &eod_symbols {
+                        // last_prices 없으면 entry_price 폴백
+                        let price = last_prices.get(symbol).copied().or(Some(state.entry_price));
+                        if let Err(e) = force_order_tx.send(OrderRequest {
+                            symbol: symbol.clone(), side: Side::Sell, qty: *qty, price,
+                            atr: None, exchange_code: state.exchange_code.clone(),
+                            strength: None, is_short: false, max_holding_days: 0,
+                            strategy_id: state.strategy_id.clone(),
+                        }).await {
+                            tracing::error!(symbol = %symbol, error = %e, "EOD trigger: force order send failed");
+                        }
                         if let Some((state, _)) = pos_states.get_mut(symbol) {
                             state.exit_pending = true;
                             state.exit_pending_since = Some(now_inst);
@@ -641,6 +666,7 @@ pub async fn run_generic_position_task(
                                     symbol: fill.symbol.clone(), side: Side::Sell, qty, price,
                                     atr: None, exchange_code, strength: None,
                                     is_short: false, max_holding_days: 0,
+                                    strategy_id: state.strategy_id.clone(),
                                 }).is_ok() {
                                     state.exit_pending = true;
                                     state.exit_pending_since = Some(std::time::Instant::now());
@@ -672,15 +698,16 @@ pub async fn run_generic_position_task(
                     } else {
                         rust_decimal_macros::dec!(0.03)
                     };
-                    let stop_price = (current_price - atr * pos_cfg.stop_atr_multiplier)
+                    let fill_strategy_cfg = find_strategy_params(&fill.strategy_id, &strategies, &pos_cfg);
+                    let stop_price = (current_price - atr * fill_strategy_cfg.stop_atr_multiplier)
                         .max(current_price - current_price * max_stop_pct)
                         .max(current_price * rust_decimal_macros::dec!(0.85));
                     // 실제 위험(entry - stop) 기준으로 목표가 계산.
                     // ATR이 큰 종목(KR 주식 등)에서 % 상한으로 stop이 좁아진 경우에도
                     // R:R 비율이 유지되도록 actual_risk를 기준으로 pt 산출.
                     let actual_risk = (current_price - stop_price).max(rust_decimal_macros::dec!(0.01));
-                    let pt1 = current_price + pos_cfg.profit_target_1_atr * actual_risk;
-                    let pt2 = current_price + pos_cfg.profit_target_2_atr * actual_risk;
+                    let pt1 = current_price + fill_strategy_cfg.profit_target_1_atr * actual_risk;
+                    let pt2 = current_price + fill_strategy_cfg.profit_target_2_atr * actual_risk;
 
                     let entered_date = chrono::Utc::now()
                         .with_timezone(&chrono_tz::Asia::Seoul)
@@ -699,14 +726,15 @@ pub async fn run_generic_position_task(
                         exit_pending_since: None,
                         exit_timeout_count: 0,
                         regime: regime.clone(),
-                        profit_target_1_atr: pos_cfg.profit_target_1_atr,
-                        profit_target_2_atr: pos_cfg.profit_target_2_atr,
-                        trailing_atr_trending: pos_cfg.trailing_atr_trending,
-                        trailing_atr_volatile: pos_cfg.trailing_atr_volatile,
+                        profit_target_1_atr: fill_strategy_cfg.profit_target_1_atr,
+                        profit_target_2_atr: fill_strategy_cfg.profit_target_2_atr,
+                        trailing_atr_trending: fill_strategy_cfg.trailing_atr_trending,
+                        trailing_atr_volatile: fill_strategy_cfg.trailing_atr_volatile,
                         exchange_code: fill.exchange_code.clone(),
                         max_holding_days,
                         entered_date,
                         pending_exit_reason: "Unknown".to_string(),
+                        strategy_id: fill.strategy_id.clone(),
                     };
                     pos_states.insert(fill.symbol.clone(), (state, fill.filled_qty));
                     // 종목명 갱신 (daily_ohlc에 있으면 사용)
@@ -721,7 +749,7 @@ pub async fn run_generic_position_task(
                     }
                     let now = chrono::Utc::now().to_rfc3339();
                     sqlx::query("DELETE FROM positions WHERE symbol = ?").bind(&fill.symbol).execute(&db_pool).await.ok();
-                    if let Err(e) = sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, holding_type, max_holding_days, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    if let Err(e) = sqlx::query("INSERT OR REPLACE INTO positions (id, order_id, symbol, entry_price, stop_price, atr_at_entry, profit_target_1, profit_target_2, regime_at_entry, qty, exchange_code, holding_type, max_holding_days, strategy_id, entered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .bind(uuid::Uuid::new_v4().to_string())
                         .bind(&fill.order_id)
                         .bind(&fill.symbol)
@@ -735,6 +763,7 @@ pub async fn run_generic_position_task(
                         .bind(&fill.exchange_code)
                         .bind(holding_type)
                         .bind(max_holding_days as i64)
+                        .bind(&fill.strategy_id)
                         .bind(&now)
                         .bind(&now)
                         .execute(&db_pool).await {
@@ -967,7 +996,7 @@ pub async fn run_generic_position_task(
                                 let pnl_pct = ((tick.price - state.entry_price) / state.entry_price.max(Decimal::ONE) * Decimal::from(100)).to_f64().unwrap_or(0.0);
                                 if exit_qty > 0 {
                                     if force_order_tx.send(OrderRequest {
-                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
+                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: exit_qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0, strategy_id: state.strategy_id.clone(),
                                     }).await.is_ok() {
                                         state.exit_pending = true;
                                         state.exit_pending_since = Some(std::time::Instant::now());
@@ -981,7 +1010,7 @@ pub async fn run_generic_position_task(
                                 } else {
                                     // qty=1 등 절반이 0이 되는 경우: 전량 청산으로 대체
                                     if force_order_tx.send(OrderRequest {
-                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
+                                        symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0, strategy_id: state.strategy_id.clone(),
                                     }).await.is_ok() {
                                         state.exit_pending = true;
                                         state.exit_pending_since = Some(std::time::Instant::now());
@@ -999,7 +1028,7 @@ pub async fn run_generic_position_task(
                         ExitDecision::StopLoss | ExitDecision::FullExit | ExitDecision::TrailingStop => {
                             if !state.exit_pending {
                                 if force_order_tx.send(OrderRequest {
-                                    symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
+                                    symbol: tick.symbol.clone(), side: Side::Sell, qty: *qty, price: None, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0, strategy_id: state.strategy_id.clone(),
                                 }).await.is_ok() {
                                     state.exit_pending = true;
                                     state.exit_pending_since = Some(std::time::Instant::now());
@@ -1263,6 +1292,7 @@ mod tests {
                 .with_timezone(&chrono_tz::Asia::Seoul)
                 .date_naive(),
             pending_exit_reason: "Unknown".to_string(),
+            strategy_id: "stable".to_string(),
         }
     }
 

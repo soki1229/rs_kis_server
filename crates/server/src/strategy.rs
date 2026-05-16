@@ -51,6 +51,8 @@ pub struct SignalContext {
     pub setup_score_min: u32,
     /// config에서 설정한 regime filter 활성화 여부
     pub regime_filter: bool,
+    /// 현재 평가 중인 전략 ID (signal 태깅용)
+    pub strategy_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,6 +83,8 @@ pub struct TradeSignal {
     pub setup_score: Option<i32>,
     /// 시장 레짐 (Risk sizing에서 사용)
     pub regime: Option<MarketRegime>,
+    /// 이 신호를 생성한 전략 ID
+    pub strategy_id: String,
 }
 
 /// 시그널 전략. 틱/캔들 컨텍스트를 받아 진입 신호를 생성한다.

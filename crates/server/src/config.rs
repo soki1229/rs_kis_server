@@ -21,6 +21,51 @@ pub struct StrategyProfile {
     /// 목표 보유 일수. swing=1~5일, position=7일+. 초과 시 강제 청산.
     #[serde(default = "default_holding_days")]
     pub holding_days_target: u32,
+
+    /// 담당 종목 목록. 비어있으면 다른 전략이 소유하지 않은 전체 watchlist 종목.
+    #[serde(default)]
+    pub symbols: Vec<String>,
+
+    /// 장 마감 시 이 전략의 포지션을 강제 청산할지 여부.
+    #[serde(default)]
+    pub eod_liquidation: bool,
+
+    // 포지션 파라미터 오버라이드 (None이면 전역 PositionConfig 폴백)
+    #[serde(default)]
+    pub stop_atr_multiplier: Option<Decimal>,
+    #[serde(default)]
+    pub trailing_atr_trending: Option<Decimal>,
+    #[serde(default)]
+    pub trailing_atr_volatile: Option<Decimal>,
+    #[serde(default)]
+    pub profit_target_1_atr: Option<Decimal>,
+    #[serde(default)]
+    pub profit_target_2_atr: Option<Decimal>,
+}
+
+impl StrategyProfile {
+    /// 전략별 포지션 파라미터를 반환. None 필드는 전역 pos_cfg 폴백.
+    pub fn resolve_position_params(&self, pos_cfg: &PositionConfig) -> PositionConfig {
+        PositionConfig {
+            stop_atr_multiplier: self
+                .stop_atr_multiplier
+                .unwrap_or(pos_cfg.stop_atr_multiplier),
+            trailing_atr_trending: self
+                .trailing_atr_trending
+                .unwrap_or(pos_cfg.trailing_atr_trending),
+            trailing_atr_volatile: self
+                .trailing_atr_volatile
+                .unwrap_or(pos_cfg.trailing_atr_volatile),
+            profit_target_1_atr: self
+                .profit_target_1_atr
+                .unwrap_or(pos_cfg.profit_target_1_atr),
+            profit_target_2_atr: self
+                .profit_target_2_atr
+                .unwrap_or(pos_cfg.profit_target_2_atr),
+            eod_liquidation: self.eod_liquidation,
+            ..pos_cfg.clone()
+        }
+    }
 }
 
 fn default_holding_days() -> u32 {
@@ -87,6 +132,13 @@ fn default_strategies() -> Vec<StrategyProfile> {
         regime_filter: true,
         aggressive_mode: false,
         holding_days_target: 5,
+        symbols: vec![],
+        eod_liquidation: false,
+        stop_atr_multiplier: None,
+        trailing_atr_trending: None,
+        trailing_atr_volatile: None,
+        profit_target_1_atr: None,
+        profit_target_2_atr: None,
     }]
 }
 

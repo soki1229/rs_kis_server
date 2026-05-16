@@ -267,6 +267,7 @@ impl From<UnifiedFill> for crate::types::FillInfo {
             exchange_code: fill.metadata.exchange_code,
             fatal: false,
             max_holding_days: 5,
+            strategy_id: "stable".to_string(),
         }
     }
 }

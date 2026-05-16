@@ -403,6 +403,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
                 }
             },
             cfg.position.clone(),
+            cfg.kr.strategies.clone(),
             kr_pipeline.summary_alert.clone(),
             kr_state.refresh_notify.clone(),
         )));
@@ -542,6 +543,7 @@ pub async fn run(cfg: ServerConfig, strategies: StrategyBundle) -> anyhow::Resul
                 }
             },
             cfg.position.clone(),
+            cfg.us.strategies.clone(),
             us_pipeline.summary_alert.clone(),
             us_state.refresh_notify.clone(),
         )));
