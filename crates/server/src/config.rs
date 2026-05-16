@@ -333,6 +333,10 @@ pub struct PositionConfig {
     /// US market FX spread compensation (e.g., 0.005 = 0.5%)
     #[serde(default = "default_us_fx_spread_pct")]
     pub us_fx_spread_pct: Decimal,
+    /// 장 마감 시 모든 포지션 강제 청산 여부.
+    /// true = 데이 트레이딩 (매일 청산), false = 스윙 트레이딩 (trailing stop/목표가 청산).
+    #[serde(default)]
+    pub eod_liquidation: bool,
 }
 
 fn default_us_fx_spread_pct() -> Decimal {
@@ -352,6 +356,7 @@ impl Default for PositionConfig {
             entry_blackout_close_mins: 15,
             limit_price_atr_cushion: dec!(0.10),
             us_fx_spread_pct: dec!(0.005),
+            eod_liquidation: false,
         }
     }
 }

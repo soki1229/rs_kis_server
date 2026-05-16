@@ -581,27 +581,31 @@ pub async fn run_generic_position_task(
                 }
             }
             Some(_) = eod_rx.recv() => {
-                tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
                 write_session_stats(&db_pool, market_name).await;
-                let eod_symbols: Vec<String> = pos_states.keys().cloned().collect();
-                for symbol in &eod_symbols {
-                    if let Some((state, qty)) = pos_states.get(symbol) {
-                        // last_prices 없으면 entry_price 폴백
-                        let price = last_prices.get(symbol).copied()
-                            .or(Some(state.entry_price));
-                        if let Err(e) = force_order_tx.send(OrderRequest {
-                            symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
-                        }).await {
-                            tracing::error!(symbol = %symbol, error = %e, "EOD trigger: Failed to send force order for full exit");
+                if !pos_cfg.eod_liquidation {
+                    tracing::info!(market = %market_name, "EOD trigger received — EOD liquidation disabled (swing mode), positions held overnight");
+                } else {
+                    tracing::info!(market = %market_name, "EOD trigger received — closing all positions");
+                    let eod_symbols: Vec<String> = pos_states.keys().cloned().collect();
+                    for symbol in &eod_symbols {
+                        if let Some((state, qty)) = pos_states.get(symbol) {
+                            // last_prices 없으면 entry_price 폴백
+                            let price = last_prices.get(symbol).copied()
+                                .or(Some(state.entry_price));
+                            if let Err(e) = force_order_tx.send(OrderRequest {
+                                symbol: symbol.clone(), side: Side::Sell, qty: *qty, price, atr: None, exchange_code: state.exchange_code.clone(), strength: None, is_short: false, max_holding_days: 0,
+                            }).await {
+                                tracing::error!(symbol = %symbol, error = %e, "EOD trigger: Failed to send force order for full exit");
+                            }
                         }
                     }
-                }
-                // exit_pending 설정 — 이후 틱에서 중복 청산 주문 방지
-                let now_inst = std::time::Instant::now();
-                for symbol in &eod_symbols {
-                    if let Some((state, _)) = pos_states.get_mut(symbol) {
-                        state.exit_pending = true;
-                        state.exit_pending_since = Some(now_inst);
+                    // exit_pending 설정 — 이후 틱에서 중복 청산 주문 방지
+                    let now_inst = std::time::Instant::now();
+                    for symbol in &eod_symbols {
+                        if let Some((state, _)) = pos_states.get_mut(symbol) {
+                            state.exit_pending = true;
+                            state.exit_pending_since = Some(now_inst);
+                        }
                     }
                 }
             }
